@@ -20,6 +20,13 @@ _SessionLocal: sessionmaker[Session] | None = None
 
 def _build_engine() -> Engine:
     url = get_settings().database_url
+    # Railway's Postgres plugin injects `postgresql://...`, which SQLAlchemy
+    # resolves to the psycopg2 driver by default. We ship psycopg 3, so
+    # rewrite the scheme to use it.
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+    elif url.startswith("postgres://"):  # legacy Heroku-style
+        url = url.replace("postgres://", "postgresql+psycopg://", 1)
     # SQLite needs check_same_thread=False because FastAPI requests run on
     # different threads in dev. Postgres ignores connect_args.
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
