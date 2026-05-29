@@ -19,7 +19,7 @@ _SessionLocal: sessionmaker[Session] | None = None
 
 
 def _build_engine() -> Engine:
-    url = get_settings().database_url
+    url = get_settings().get_database_url()
     # SQLite needs check_same_thread=False because FastAPI requests run on
     # different threads in dev. Postgres ignores connect_args.
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
@@ -58,3 +58,4 @@ def get_db() -> Generator[Session, None, None]:
         yield session
     finally:
         session.close()
+

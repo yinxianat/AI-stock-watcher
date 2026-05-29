@@ -71,6 +71,14 @@ class Settings(BaseSettings):
             out.append((int(h), int(m)))
         return out
 
+    def get_database_url(self) -> str:
+        """Return database URL with psycopg driver for PostgreSQL."""
+        url = self.database_url
+        # Convert postgresql:// to postgresql+psycopg:// for psycopg v3
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+        return url
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
@@ -80,3 +88,4 @@ def get_settings() -> Settings:
     to force a reload.
     """
     return Settings()
+
