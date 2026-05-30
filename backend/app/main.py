@@ -26,6 +26,7 @@ from app.api import (
 )
 from app.core.settings import get_settings
 from app.db.database import get_engine
+from app.db.seed import seed
 from app.models import Base
 
 
@@ -43,6 +44,8 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(Base.metadata.drop_all, bind=get_engine())
         await asyncio.to_thread(Base.metadata.create_all, bind=get_engine())
         log.info("DB schema ensured (env=%s)", settings.app_env)
+        n = await asyncio.to_thread(seed)
+        log.info("DB seeded: %d new tickers inserted.", n)
     except Exception:
         log.exception("STARTUP FAILED: error during DB schema initialisation")
         raise
