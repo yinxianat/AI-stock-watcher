@@ -38,24 +38,39 @@ log = logging.getLogger("app")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    await asyncio.to_thread(Base.metadata.create_all, bind=get_engine())
-    log.info("DB schema ensured (env=%s)", settings.app_env)
+
+    try:
+        await asyncio.to_thread(Base.metadata.create_all, bind=get_engine())
+        log.info("DB schema ensured (env=%s)", settings.app_env)
+    except Exception:
+        log.exception("STARTUP FAILED: error during DB schema initialisation")
+        raise
 
     scheduler = None
     if settings.batch_jobs_enabled and settings.app_env != "test":
         # Import here so tests don't accidentally start a scheduler thread.
-        from app.jobs.scheduler import start_scheduler
+        try:
+            from app.jobs.scheduler import start_scheduler
 
-        scheduler = start_scheduler()
-        log.info("Batch scheduler started.")
+            scheduler = start_scheduler()
+            log.info("Batch scheduler started.")
+        except Exception:
+            log.exception("STARTUP FAILED: error starting batch scheduler")
+            raise
     app.state.scheduler = scheduler
 
     try:
         yield
+    except Exception:
+        log.exception("LIFESPAN ERROR: unhandled exception during application runtime")
+        raise
     finally:
         if scheduler is not None:
-            scheduler.shutdown(wait=False)
-            log.info("Batch scheduler stopped.")
+            try:
+                scheduler.shutdown(wait=False)
+                log.info("Batch scheduler stopped.")
+            except Exception:
+                log.exception("SHUTDOWN ERROR: error stopping batch scheduler")
 
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
