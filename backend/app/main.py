@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
 
     try:
+        await asyncio.to_thread(Base.metadata.drop_all, bind=get_engine())
         await asyncio.to_thread(Base.metadata.create_all, bind=get_engine())
         log.info("DB schema ensured (env=%s)", settings.app_env)
     except Exception:
