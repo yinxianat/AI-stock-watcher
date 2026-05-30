@@ -86,8 +86,8 @@ class User(Base):
     # but only after the user confirms it via ConfirmationToken.
     notify_email: Mapped[str] = mapped_column(String(320), nullable=False)
     notify_email_confirmed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
 
     watchlist: Mapped[list[WatchlistItem]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -109,9 +109,9 @@ class LoginToken(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
 
 
 class Session(Base):
@@ -120,9 +120,9 @@ class Session(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
 
 
 class ConfirmationToken(Base):
@@ -134,9 +134,9 @@ class ConfirmationToken(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     new_email: Mapped[str] = mapped_column(String(320), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
 
 
 # ---------- Catalog ----------
@@ -169,7 +169,7 @@ class WatchlistItem(Base):
     ticker_id: Mapped[int] = mapped_column(
         ForeignKey("tickers.id", ondelete="CASCADE"), index=True
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
 
     user: Mapped[User] = relationship(back_populates="watchlist")
     ticker: Mapped[Ticker] = relationship()
@@ -201,9 +201,9 @@ class NotificationRule(Base):
     pct_low: Mapped[float | None] = mapped_column(Float, nullable=True)
     pct_high: Mapped[float | None] = mapped_column(Float, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+        DateTime(timezone=False), default=utcnow, onupdate=utcnow
     )
 
     user: Mapped[User] = relationship(back_populates="rules")
@@ -232,7 +232,7 @@ class PriceSnapshot(Base):
     quarter_high: Mapped[float | None] = mapped_column(Float, nullable=True)
     year_low: Mapped[float | None] = mapped_column(Float, nullable=True)
     year_high: Mapped[float | None] = mapped_column(Float, nullable=True)
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
 
     ticker: Mapped[Ticker] = relationship()
 
@@ -260,7 +260,7 @@ class TrendAnalysis(Base):
     is_quarter_high: Mapped[bool] = mapped_column(Boolean, default=False)
     is_year_low: Mapped[bool] = mapped_column(Boolean, default=False)
     is_year_high: Mapped[bool] = mapped_column(Boolean, default=False)
-    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
 
 
 class NotificationLog(Base):
@@ -282,5 +282,5 @@ class NotificationLog(Base):
     sent_to: Mapped[str] = mapped_column(String(320), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     sent_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, index=True
+        DateTime(timezone=False), default=utcnow, index=True
     )
