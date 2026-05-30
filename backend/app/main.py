@@ -7,6 +7,7 @@ OpenAPI docs:   GET /docs
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -37,7 +38,7 @@ log = logging.getLogger("app")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    Base.metadata.create_all(bind=get_engine())
+    await asyncio.to_thread(Base.metadata.create_all, bind=get_engine())
     log.info("DB schema ensured (env=%s)", settings.app_env)
 
     scheduler = None
