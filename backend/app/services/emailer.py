@@ -32,12 +32,36 @@ def send_email(to: str, subject: str, body_text: str, body_html: str | None = No
     if body_html:
         msg.add_alternative(body_html, subtype="html")
 
-    log.info("Sending email to=%s subject=%r", to, subject)
+    host_configured = bool(settings.smtp_host and settings.smtp_host != "localhost")
+    creds_configured = bool(settings.smtp_username)
 
-    if not settings.smtp_host or settings.smtp_host == "localhost" and not settings.smtp_username:
-        # Dev fallback: no real server configured — just log and return.
-        log.warning("SMTP not configured; email NOT actually sent. Body:\n%s", body_text)
+    log.debug(
+        "SMTP config check: SMTP_HOST=%r (configured=%s) SMTP_USERNAME=%s",
+        settings.smtp_host,
+        host_configured,
+        "set" if creds_configured else "not set",
+    )
+
+    if not host_configured or not creds_configured:
+        # Dev/unconfigured fallback — log clearly and skip the real send so
+        # callers can see exactly why the email was dropped.
+        reasons: list[str] = []
+        if not host_configured:
+            reasons.append(
+                f"SMTP_HOST is not set or is still the default 'localhost' (got {settings.smtp_host!r})"
+            )
+        if not creds_configured:
+            reasons.append("SMTP_USERNAME is not set")
+        log.warning(
+            "Email NOT sent to=%s subject=%r — SMTP is not fully configured: %s. Body:\n%s",
+            to,
+            subject,
+            "; ".join(reasons),
+            body_text,
+        )
         return
+
+    log.info("Sending email to=%s subject=%r via %s:%d", to, subject, settings.smtp_host, settings.smtp_port)
 
     with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
         if settings.smtp_use_tls:
@@ -45,3 +69,5 @@ def send_email(to: str, subject: str, body_text: str, body_html: str | None = No
         if settings.smtp_username:
             smtp.login(settings.smtp_username, settings.smtp_password)
         smtp.send_message(msg)
+
+    log.info("Email sent successfully to=%s subject=%r", to, subject)
