@@ -13,6 +13,7 @@ PriceSnapshot  — most-recent batch ingest row. Replaced each batch run.
 TrendAnalysis  — computed trend metrics per watched (user, ticker). Replaced
                   each compute run.
 NotificationLog — audit trail of sent notifications (used to suppress dupes).
+LogEntry       — durable application log (WARNING+), auto-pruned per LOG_LIFETIME.
 """
 
 from __future__ import annotations
@@ -284,3 +285,29 @@ class NotificationLog(Base):
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=utcnow, index=True
     )
+
+
+# ---------- Observability ----------
+
+
+class LogEntry(Base):
+    """Durable application log row.
+
+    Persisted by `DBLogHandler` for WARNING+ records. Pruned by the daily
+    cleanup job per `LOG_LIFETIME`. Queryable from the admin tooling.
+    """
+
+    __tablename__ = "log_entries"
+    __table_args__ = (
+        Index("ix_log_entries_created_level", "created_at", "level"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+    level: Mapped[str] = mapped_column(String(10), nullable=False)
+    logger: Mapped[str] = mapped_column(String(160), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    exc_info: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON

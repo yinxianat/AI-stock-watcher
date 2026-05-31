@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import EmailStr, Field
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     # CORS — comma-separated list of origins
     cors_origins: str = "http://localhost:5173"
 
+    # Logging & alerting
+    alert_receiver: str = ""  # blank → falls back to smtp_username
+    alerts_enabled: bool = True
+    log_db_persistence: bool = True  # disabled in tests to avoid noise
+    log_lifetime: str = "30d"  # "24h" | "7d" | "30d" | "1m" | "90d" | "1y"
+    daily_summary_time_et: str = "17:30"  # HH:MM in US/Eastern
+    daily_summary_enabled: bool = True
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -58,6 +66,16 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def effective_alert_receiver(self) -> str:
+        """Where admin alerts get sent. Falls back to the SMTP username."""
+        return (self.alert_receiver or self.smtp_username).strip()
+
+    @property
+    def daily_summary_time(self) -> tuple[int, int]:
+        h, m = self.daily_summary_time_et.split(":")
+        return int(h), int(m)
 
     @property
     def batch_times(self) -> list[tuple[int, int]]:
