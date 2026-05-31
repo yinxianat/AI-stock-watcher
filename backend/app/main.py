@@ -28,12 +28,14 @@ from app.core.settings import get_settings
 from app.db.database import get_engine
 from app.db.seed import seed
 from app.models import Base
-
+from app.services.alerts import install_handlers
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
 log = logging.getLogger("app")
+# Attach DB + email alert handlers to root logger. Safe & idempotent.
+install_handlers()
 
 
 @asynccontextmanager

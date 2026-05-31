@@ -24,6 +24,7 @@ from app.models import (
     User,
     utcnow,
 )
+from app.services.alerts import alert_event_first_notification
 from app.services.emailer import send_email
 from app.services.trend import TrendResult, rule_triggers, summarize_event
 
@@ -65,7 +66,19 @@ def run_notify(db: DBSession | None = None) -> int:
         }
         tickers = {t.id: t for t in db.execute(select(Ticker)).scalars().all()}
 
+        # Precompute which users have NEVER received a notification before.
+        # Anything in this set that gets a notification this run is a
+        # "first-ever" event the admin wants to know about.
+        users_with_history: set[int] = {
+            uid
+            for (uid,) in db.execute(
+                select(NotificationLog.user_id).distinct()
+            ).all()
+        }
+
         sent = 0
+        send_failures = 0
+        first_events: list[tuple[User, Ticker, str, str]] = []
         for rule in db.execute(select(NotificationRule)).scalars().all():
             if not rule.enabled:
                 continue
@@ -108,6 +121,7 @@ def run_notify(db: DBSession | None = None) -> int:
             try:
                 send_email(user.notify_email, f"[AI Stock Watcher] {ticker.symbol}", body)
             except Exception as e:  # pragma: no cover
+                send_failures += 1
                 log.warning("Email send failed for user=%d: %s", user.id, e)
                 continue
 
@@ -122,8 +136,32 @@ def run_notify(db: DBSession | None = None) -> int:
             )
             sent += 1
 
+            if user.id not in users_with_history:
+                # Record so we don't fire twice in the same batch run if the
+                # user has multiple rules triggering.
+                users_with_history.add(user.id)
+                first_events.append((user, ticker, rule.event_type.value, summary))
+
         db.commit()
-        log.info("Notify complete: %d emails sent", sent)
+
+        # Fire admin event alerts AFTER commit so a flaky SMTP doesn't roll
+        # back the notification log.
+        for user, ticker, event_type, summary in first_events:
+            alert_event_first_notification(
+                user.notify_email, ticker.symbol, event_type, summary
+            )
+
+        # Escalate sustained SMTP failure to ERROR (triggers alert via handler).
+        if send_failures >= 5:
+            log.error(
+                "Notify: %d email send failures in single run — SMTP likely broken",
+                send_failures,
+            )
+
+        log.info(
+            "Notify complete: %d emails sent, %d send failures",
+            sent, send_failures,
+        )
         return sent
     finally:
         if own:

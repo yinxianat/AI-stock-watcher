@@ -1,6 +1,7 @@
 from .models import (  # noqa: F401
     Base,
     ConfirmationToken,
+    LogEntry,
     LoginToken,
     NotificationEventType,
     NotificationLog,

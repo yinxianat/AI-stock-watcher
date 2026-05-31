@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session as DBSession
 from app.core.security import hash_session_token, issue_token, verify_token
 from app.core.settings import get_settings
 from app.models import LoginToken, Session, User, utcnow
+from app.services.alerts import alert_event_signup
 from app.services.emailer import send_email
 
 LOGIN_PURPOSE = "login"
@@ -79,6 +80,7 @@ def verify_magic_link(db: DBSession, token: str) -> User | None:
 
     email = payload["email"]
     user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+    is_new_signup = user is None
     if user is None:
         user = User(email=email, notify_email=email, notify_email_confirmed=True)
         db.add(user)
@@ -86,6 +88,11 @@ def verify_magic_link(db: DBSession, token: str) -> User | None:
 
     user.last_login_at = _now()
     db.commit()
+
+    if is_new_signup:
+        # Fire-and-forget admin alert; alerts module never raises.
+        alert_event_signup(email)
+
     return user
 
 
