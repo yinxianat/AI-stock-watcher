@@ -16,6 +16,9 @@ os.environ.setdefault("APP_DEBUG", "true")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-must-be-long-enough")
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("BATCH_JOBS_ENABLED", "false")
+os.environ.setdefault("ALERTS_ENABLED", "false")
+os.environ.setdefault("LOG_DB_PERSISTENCE", "false")
+os.environ.setdefault("DAILY_SUMMARY_ENABLED", "false")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402

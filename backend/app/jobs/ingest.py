@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.db.database import get_session_factory
 from app.models import PriceSnapshot, Ticker, utcnow
+from app.services.alerts import alert_event_upstream_api_down
 
 log = logging.getLogger(__name__)
 
@@ -115,9 +116,13 @@ def run_ingest(
         db.flush()
 
         count = 0
+        attempted = 0
+        failed_symbols: list[str] = []
         for t in tickers:
+            attempted += 1
             data = fetcher(t.symbol)
             if data is None:
+                failed_symbols.append(t.symbol)
                 log.info("Skipping %s — no data", t.symbol)
                 continue
             db.add(
@@ -138,7 +143,26 @@ def run_ingest(
             )
             count += 1
         db.commit()
-        log.info("Ingest complete: %d tickers", count)
+        log.info(
+            "Ingest complete: %d/%d tickers (failed: %d)",
+            count, attempted, len(failed_symbols),
+        )
+
+        # Upstream-down detection: if we tried tickers and got NOTHING, the
+        # data source is broken — alert. Half-failure (>50%) is ERROR but
+        # not full outage.
+        if attempted > 0 and count == 0:
+            log.critical(
+                "Ingest fetched 0 of %d tickers — upstream price API appears down",
+                attempted,
+            )
+            alert_event_upstream_api_down(attempted, count, failed_symbols)
+        elif attempted >= 4 and count / attempted < 0.5:
+            log.error(
+                "Ingest success rate %d/%d (<50%%) — partial upstream failure",
+                count, attempted,
+            )
+
         return count
     finally:
         if own_session:
