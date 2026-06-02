@@ -19,7 +19,7 @@ from sqlalchemy import delete
 
 from app.core.settings import get_settings
 from app.db.database import get_session_factory
-from app.models import IntradayPrice, LogEntry
+from app.models import InfoLog, IntradayPrice, LogEntry
 from app.services.alerts import parse_lifetime
 from app.services.price_history import prune_daily_closes
 
@@ -78,6 +78,25 @@ def _prune_intraday(session, lifetime_spec: str) -> int:
     return deleted
 
 
+def _prune_info_logs(session, lifetime_spec: str) -> int:
+    try:
+        lifetime = parse_lifetime(lifetime_spec)
+    except ValueError:
+        log.error(
+            "Invalid INFO_LOG_LIFETIME=%r; skipping info_logs cleanup",
+            lifetime_spec,
+        )
+        return 0
+    cutoff = datetime.utcnow() - lifetime
+    result = session.execute(
+        delete(InfoLog).where(InfoLog.created_at < cutoff)
+    )
+    session.commit()
+    deleted = result.rowcount or 0
+    log.info("Info logs cleanup: deleted %d info_logs rows older than %s", deleted, cutoff.isoformat())
+    return deleted
+
+
 def _prune_job_runs(session, lifetime_spec: str) -> int:
     try:
         lifetime = parse_lifetime(lifetime_spec)
@@ -115,13 +134,14 @@ def run_cleanup() -> int:
         deleted += _prune_log_entries(session, settings.log_lifetime)
         deleted += _prune_price_history(session, settings.price_history_lifetime)
         deleted += _prune_intraday(session, settings.intraday_retention)
-        deleted += _prune_job_runs(session, getattr(settings, "job_runs_retention", "30d"))
+        deleted += _prune_job_runs(session, settings.job_runs_retention)
+        deleted += _prune_info_logs(session, settings.info_log_lifetime)
         elapsed = _time.monotonic() - t0
         log.info("Cleanup complete: %d total rows deleted (%.2fs)", deleted, elapsed)
         record_job_run(
             "cleanup", "SUCCESS", started, elapsed,
             result_summary=f"deleted={deleted} rows",
-            tables_updated=["log_entries", "daily_closes", "intraday_prices", "job_runs"],
+            tables_updated=["log_entries", "daily_closes", "intraday_prices", "job_runs", "info_logs"],
         )
         return deleted
     finally:
