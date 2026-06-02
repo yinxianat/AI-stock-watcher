@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from app.core.settings import get_settings
 from app.db.database import get_session_factory
 from app.models import (
+    DailyClose,
     LogEntry,
     NotificationLog,
     PriceSnapshot,
@@ -133,6 +134,7 @@ def collect_summary() -> dict:
             "users": session.execute(select(func.count(User.id))).scalar_one(),
             "tickers": session.execute(select(func.count(Ticker.id))).scalar_one(),
             "watchlist_items": session.execute(select(func.count(WatchlistItem.id))).scalar_one(),
+            "daily_closes": session.execute(select(func.count(DailyClose.id))).scalar_one(),
             "price_snapshots": session.execute(select(func.count(PriceSnapshot.id))).scalar_one(),
             "trend_analyses": session.execute(select(func.count(TrendAnalysis.id))).scalar_one(),
             "notification_logs": session.execute(select(func.count(NotificationLog.id))).scalar_one(),
@@ -194,6 +196,7 @@ def collect_summary() -> dict:
                 "platform": platform.platform(),
                 "app_env": settings.app_env,
                 "log_lifetime": settings.log_lifetime,
+                "price_history_lifetime": settings.price_history_lifetime,
                 "batch_jobs_enabled": settings.batch_jobs_enabled,
                 "daily_summary_enabled": settings.daily_summary_enabled,
             },
@@ -280,9 +283,10 @@ def _format_text(s: dict) -> str:
         f"  Uptime:            {sysd['uptime']}",
         f"  Python:            {sysd['python']}",
         f"  Platform:          {sysd['platform']}",
-        f"  Log lifetime:      {sysd['log_lifetime']}",
-        f"  Batch enabled:     {sysd['batch_jobs_enabled']}",
-        f"  Summary enabled:   {sysd['daily_summary_enabled']}",
+        f"  Log lifetime:        {sysd['log_lifetime']}",
+        f"  Price history life:  {sysd['price_history_lifetime']}",
+        f"  Batch enabled:       {sysd['batch_jobs_enabled']}",
+        f"  Summary enabled:     {sysd['daily_summary_enabled']}",
         "",
         "SCHEDULE",
         f"  Batch times (ET):   {', '.join(sched['batch_times_et'])}",

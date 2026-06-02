@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 
 from app.api.deps import current_user
 from app.db.database import get_db
+from app.jobs.on_demand import kickoff_ticker_ingest
 from app.models import Ticker, TickerType, User, WatchlistItem
 from app.schemas.schemas import AddWatchRequest, WatchlistItemOut
 
@@ -30,6 +31,7 @@ def list_watchlist(
 @router.post("", response_model=WatchlistItemOut, status_code=status.HTTP_201_CREATED)
 def add_watch(
     payload: AddWatchRequest,
+    background_tasks: BackgroundTasks,
     user: User = Depends(current_user),
     db: DBSession = Depends(get_db),
 ) -> WatchlistItemOut:
@@ -64,6 +66,12 @@ def add_watch(
     db.add(item)
     db.commit()
     db.refresh(item)
+
+    # Kick off a single-ticker ingest + trend compute in the background so
+    # the user sees price data immediately, without waiting for the next
+    # 09:35 / 12:30 / 16:05 ET batch tick. No-op in the test environment.
+    background_tasks.add_task(kickoff_ticker_ingest, ticker.id, user.id)
+
     return WatchlistItemOut.model_validate(item)
 
 
