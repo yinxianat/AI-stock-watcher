@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     # Swap providers without code changes if Yahoo blocks scraping again.
     stock_data_provider: str = "yfinance"
     finnhub_api_key: str = ""
+    # When using STOCK_DATA_PROVIDER=finnhub the live /quote endpoint is
+    # served by Finnhub on the free tier, but Finnhub's /stock/candle
+    # endpoint is paid-only since 2024. Daily history therefore routes
+    # through Twelve Data — sign up at https://twelvedata.com (free tier:
+    # 800 req/day, 8 req/min — ample for ~50 watched tickers).
+    twelvedata_api_key: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
