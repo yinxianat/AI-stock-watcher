@@ -161,8 +161,10 @@ def run_ingest(
 
         db.commit()
         log.info(
-            "Ingest complete: %d/%d tickers (failed: %d)",
+            "Ingest complete: %d/%d tickers succeeded, %d failed%s, "
+            "db=[daily_closes, price_snapshots]",
             count, attempted, len(failed_symbols),
+            f" ({', '.join(failed_symbols)})" if failed_symbols else "",
         )
 
         # Upstream-down detection (same thresholds as before).

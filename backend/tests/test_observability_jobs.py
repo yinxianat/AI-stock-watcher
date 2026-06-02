@@ -17,6 +17,7 @@ from app.jobs.ingest import run_ingest
 from app.jobs.notify import run_notify
 from app.jobs.compute import run_compute
 from app.models import (
+    JobRun,
     LogEntry,
     NotificationEventType,
     NotificationRule,
@@ -67,11 +68,10 @@ def test_cleanup_invalid_lifetime_returns_zero(client, monkeypatch):
 def test_heartbeat_ok_when_recent_pipeline_complete(client):
     db = get_session_factory()()
     db.add(
-        LogEntry(
-            level="INFO",
-            logger="app.jobs.scheduler",
-            message="Pipeline complete",
-            created_at=datetime.utcnow() - timedelta(hours=1),
+        JobRun(
+            job_name="batch_pipeline",
+            status="SUCCESS",
+            started_at=datetime.utcnow() - timedelta(hours=1),
         )
     )
     db.commit()
@@ -80,18 +80,17 @@ def test_heartbeat_ok_when_recent_pipeline_complete(client):
 
 
 def test_heartbeat_alerts_when_no_recent_pipeline(client):
-    # No LogEntry rows exist at all → heartbeat should report missing.
+    # No JobRun rows exist at all → heartbeat should report missing.
     assert run_heartbeat() is False
 
 
 def test_heartbeat_ignores_old_pipeline_completes(client):
     db = get_session_factory()()
     db.add(
-        LogEntry(
-            level="INFO",
-            logger="app.jobs.scheduler",
-            message="Pipeline complete",
-            created_at=datetime.utcnow() - timedelta(hours=48),
+        JobRun(
+            job_name="batch_pipeline",
+            status="SUCCESS",
+            started_at=datetime.utcnow() - timedelta(hours=48),
         )
     )
     db.commit()
