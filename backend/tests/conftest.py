@@ -90,11 +90,12 @@ def client(engine, monkeypatch) -> Iterator[TestClient]:
     monkeypatch.setattr(emailer, "send_email", _capture)
     # Also patch references in services that imported it directly at top level
     from app.services import auth as auth_mod, confirm_email as ce_mod
-    from app.jobs import notify as notify_mod
+    from app.jobs import intraday as intraday_mod, notify as notify_mod
 
     monkeypatch.setattr(auth_mod, "send_email", _capture)
     monkeypatch.setattr(ce_mod, "send_email", _capture)
     monkeypatch.setattr(notify_mod, "send_email", _capture)
+    monkeypatch.setattr(intraday_mod, "send_email", _capture)
 
     app = create_app()
     with TestClient(app) as tc:

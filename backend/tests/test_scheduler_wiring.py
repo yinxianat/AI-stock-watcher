@@ -12,10 +12,9 @@ from app.jobs.scheduler import run_full_pipeline, start_scheduler
 
 
 def test_start_scheduler_registers_all_jobs(monkeypatch):
-    """All six configured jobs must be registered with the expected IDs."""
-    # conftest defaults disable the daily summary; flip it on for this test so
-    # we exercise the registration path.
+    """All seven configured jobs must be registered with the expected IDs."""
     monkeypatch.setenv("DAILY_SUMMARY_ENABLED", "true")
+    monkeypatch.setenv("INTRADAY_INGEST_ENABLED", "true")
     from app.core.settings import get_settings
     get_settings.cache_clear()
 
@@ -28,7 +27,8 @@ def test_start_scheduler_registers_all_jobs(monkeypatch):
         assert "daily_summary" in ids
         assert "log_cleanup" in ids
         assert "pipeline_heartbeat" in ids
-        assert len(ids) == 6
+        assert "intraday_capture" in ids
+        assert len(ids) == 7
     finally:
         sched.shutdown(wait=False)
 
@@ -46,6 +46,20 @@ def test_daily_summary_skipped_when_disabled(monkeypatch):
         # Cleanup and heartbeat are always registered.
         assert "log_cleanup" in ids
         assert "pipeline_heartbeat" in ids
+    finally:
+        sched.shutdown(wait=False)
+
+
+def test_intraday_skipped_when_disabled(monkeypatch):
+    """Setting INTRADAY_INGEST_ENABLED=false omits the intraday job."""
+    monkeypatch.setenv("INTRADAY_INGEST_ENABLED", "false")
+    from app.core.settings import get_settings
+    get_settings.cache_clear()
+
+    sched = start_scheduler()
+    try:
+        ids = [j.id for j in sched.get_jobs()]
+        assert "intraday_capture" not in ids
     finally:
         sched.shutdown(wait=False)
 

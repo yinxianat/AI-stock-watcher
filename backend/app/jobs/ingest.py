@@ -34,33 +34,16 @@ from app.services.price_history import (
 log = logging.getLogger(__name__)
 
 # Fetcher returns a list of (date, close) rows in date-ascending order, or
-# None on failure. yfinance is imported lazily inside the default fetcher so
-# tests can swap it out without ever touching the network.
+# None on failure. Provider routed via `STOCK_DATA_PROVIDER` setting so tests
+# can swap it out without ever touching the network.
 PriceFetcher = Callable[[str], list[tuple[date_, float]] | None]
 
 
 def default_fetcher(symbol: str) -> list[tuple[date_, float]] | None:  # pragma: no cover (network)
-    """Fetch 1y of daily (date, close) pairs for `symbol`, ascending."""
-    import yfinance as yf
+    """Fetch 1y of daily (date, close) pairs via the configured provider."""
+    from app.services.stock_data import get_daily_history
 
-    try:
-        hist = yf.Ticker(symbol).history(period="1y", interval="1d", auto_adjust=False)
-    except Exception as e:
-        log.warning("yfinance fetch failed for %s: %s", symbol, e)
-        return None
-    if hist is None or hist.empty:
-        return None
-    closes = hist["Close"].dropna()
-    if closes.empty:
-        return None
-    out: list[tuple[date_, float]] = []
-    for idx, val in closes.items():
-        try:
-            d = idx.date() if hasattr(idx, "date") else date_.fromisoformat(str(idx)[:10])
-            out.append((d, float(val)))
-        except Exception:
-            continue
-    return out or None
+    return get_daily_history(symbol)
 
 
 # ---------------------------------------------------------------------------

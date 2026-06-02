@@ -19,6 +19,7 @@ from app.core.settings import get_settings
 from app.db.database import get_session_factory
 from app.models import (
     DailyClose,
+    IntradayPrice,
     LogEntry,
     NotificationLog,
     PriceSnapshot,
@@ -135,6 +136,7 @@ def collect_summary() -> dict:
             "tickers": session.execute(select(func.count(Ticker.id))).scalar_one(),
             "watchlist_items": session.execute(select(func.count(WatchlistItem.id))).scalar_one(),
             "daily_closes": session.execute(select(func.count(DailyClose.id))).scalar_one(),
+            "intraday_prices": session.execute(select(func.count(IntradayPrice.id))).scalar_one(),
             "price_snapshots": session.execute(select(func.count(PriceSnapshot.id))).scalar_one(),
             "trend_analyses": session.execute(select(func.count(TrendAnalysis.id))).scalar_one(),
             "notification_logs": session.execute(select(func.count(NotificationLog.id))).scalar_one(),
