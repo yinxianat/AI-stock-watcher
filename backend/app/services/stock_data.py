@@ -34,6 +34,7 @@ route them in the public dispatchers below.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date as date_, datetime, timedelta, timezone
 
 import httpx
@@ -60,8 +61,12 @@ def get_current_price(symbol: str) -> float | None:
     provider = get_settings().stock_data_provider.lower()
     try:
         if provider == "finnhub":
-            return _quote_finnhub(symbol)
-        return _quote_yfinance(symbol)
+            price = _quote_finnhub(symbol)
+        else:
+            price = _quote_yfinance(symbol)
+        if price is None:
+            log.warning("get_current_price(%s) via %s returned None", symbol, provider)
+        return price
     except Exception as e:  # noqa: BLE001
         log.warning("get_current_price(%s) via %s failed: %s", symbol, provider, e)
         return None
@@ -191,19 +196,24 @@ def _finnhub_get(path: str, params: dict) -> dict | None:
         return None
     params = dict(params)
     params["token"] = key
+    url = _FINNHUB_BASE + path
+    t0 = time.monotonic()
     try:
-        r = httpx.get(_FINNHUB_BASE + path, params=params, timeout=_HTTP_TIMEOUT)
+        r = httpx.get(url, params=params, timeout=_HTTP_TIMEOUT)
     except httpx.HTTPError as e:
-        log.warning("Finnhub %s failed: %s", path, e)
+        log.warning("Finnhub GET %s failed after %.2fs: %s", path, time.monotonic() - t0, e)
         return None
+    elapsed = time.monotonic() - t0
     if r.status_code != 200:
-        log.warning("Finnhub %s returned HTTP %d: %s", path, r.status_code, r.text[:160])
+        log.warning("Finnhub GET %s HTTP %d (%.2fs): %s", path, r.status_code, elapsed, r.text[:160])
         return None
     try:
-        return r.json()
+        data = r.json()
     except Exception as e:  # noqa: BLE001
-        log.warning("Finnhub %s non-JSON body: %s", path, e)
+        log.warning("Finnhub GET %s non-JSON body (%.2fs): %s", path, elapsed, e)
         return None
+    log.info("Finnhub GET %s symbol=%s HTTP 200 (%.2fs)", path, params.get("symbol", "?"), elapsed)
+    return data
 
 
 def _quote_finnhub(symbol: str) -> float | None:
@@ -213,11 +223,15 @@ def _quote_finnhub(symbol: str) -> float | None:
     # /quote returns {c: current, pc: prev close, h, l, o, t}
     c = data.get("c")
     if c in (None, 0):
+        log.warning("Finnhub /quote %s returned c=%r (keys=%s)", symbol, c, sorted(data.keys()))
         return None
     try:
-        return float(c)
+        price = float(c)
     except (TypeError, ValueError):
+        log.warning("Finnhub /quote %s: c=%r not convertible to float", symbol, c)
         return None
+    log.info("Finnhub quote %s: price=%.4f", symbol, price)
+    return price
 
 
 def _prev_close_finnhub(symbol: str) -> float | None:
@@ -262,6 +276,7 @@ def _fetch_twelvedata_raw(
         "format": "JSON",
         "apikey": key,
     }
+    t0 = time.monotonic()
     try:
         r = httpx.get(
             _TWELVEDATA_TIME_SERIES_URL,
@@ -270,13 +285,19 @@ def _fetch_twelvedata_raw(
             headers={"Accept": "application/json"},
         )
     except httpx.HTTPError as e:
+        log.warning("TwelveData GET /time_series %s failed after %.2fs: %s", symbol, time.monotonic() - t0, e)
         return None, None, f"httpx error: {e}"
+    elapsed = time.monotonic() - t0
     if r.status_code != 200:
+        log.warning("TwelveData GET /time_series %s HTTP %d (%.2fs)", symbol, r.status_code, elapsed)
         return r.status_code, (r.text or "")[:300], f"HTTP {r.status_code}"
     try:
-        return r.status_code, r.json(), None
+        data = r.json()
     except Exception as e:  # noqa: BLE001
+        log.warning("TwelveData GET /time_series %s non-JSON (%.2fs): %s", symbol, elapsed, e)
         return r.status_code, (r.text or "")[:300], f"non-JSON body: {e}"
+    log.info("TwelveData GET /time_series %s HTTP 200 (%.2fs)", symbol, elapsed)
+    return r.status_code, data, None
 
 
 def _parse_twelvedata_response(
