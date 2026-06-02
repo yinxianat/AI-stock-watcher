@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session as DBSession
 
 from app.api.deps import current_user
@@ -22,6 +22,7 @@ from app.services.auth import (
     verify_magic_link,
 )
 from app.services.confirm_email import confirm_notify_email, request_notify_email_change
+from app.services.signin_backfill import kickoff_signin_backfill
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -38,11 +39,22 @@ def request_link(payload: LoginRequest, db: DBSession = Depends(get_db)):
 
 
 @router.post("/verify", response_model=SessionResponse)
-def verify(payload: MagicLinkVerify, db: DBSession = Depends(get_db)) -> SessionResponse:
+def verify(
+    payload: MagicLinkVerify,
+    background_tasks: BackgroundTasks,
+    db: DBSession = Depends(get_db),
+) -> SessionResponse:
     user = verify_magic_link(db, payload.token)
     if user is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired token")
     plaintext, row = issue_session(db, user)
+
+    # Sign-in backfill: ensure we have recent daily_closes for every ticker
+    # this user has notification rules on, so the day-over-day PRICE_CHANGE
+    # baseline works from their first session. No-op when nothing is missing
+    # or when the test app_env is set.
+    background_tasks.add_task(kickoff_signin_backfill, user.id)
+
     return SessionResponse(
         session_token=plaintext, expires_at=row.expires_at, user=UserOut.model_validate(user)
     )

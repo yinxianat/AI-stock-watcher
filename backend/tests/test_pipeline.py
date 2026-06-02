@@ -40,46 +40,34 @@ def _fake_fetcher_factory(today: date, prior: float, current: float):
     return _fetch
 
 
-def test_full_pipeline_sends_one_email(client):
+def test_daily_pipeline_does_not_fire_price_change_range(client):
+    """PRICE_CHANGE_RANGE rules are intraday-driven only — the daily
+    ingest+compute+notify path must NOT send them, even on a big day-over-
+    day move. (Intraday path covered by tests/test_intraday.py.)"""
     seed()
     db = get_session_factory()()
     user = User(email="al@example.com", notify_email="al@example.com")
     db.add(user)
     db.flush()
     aapl = db.execute(select(Ticker).where(Ticker.symbol == "AAPL")).scalar_one()
-    aapl_id = aapl.id
-    user_id = user.id
+    aapl_id, user_id = aapl.id, user.id
     db.add(WatchlistItem(user_id=user_id, ticker_id=aapl_id))
     db.add(
         NotificationRule(
-            user_id=user_id,
-            ticker_id=aapl_id,
+            user_id=user_id, ticker_id=aapl_id,
             event_type=NotificationEventType.PRICE_CHANGE_RANGE,
-            pct_low=-5,
-            pct_high=5,
-            enabled=True,
+            pct_low=-5, pct_high=5, enabled=True,
         )
     )
     db.commit()
     db.close()
 
     today = date.today()
-    # Prior close 100, today 110 → +10% (outside ±5% band → fires).
-    n = run_ingest(fetcher=_fake_fetcher_factory(today, 100.0, 110.0))
-    assert n == 1
-
-    n2 = run_compute()
-    assert n2 == 1
-
+    run_ingest(fetcher=_fake_fetcher_factory(today, 100.0, 110.0))
+    run_compute()
     before = len(client.sent_emails)
-    sent = run_notify()
-    assert sent == 1
-    assert len(client.sent_emails) == before + 1
-    assert client.sent_emails[-1]["to"] == "al@example.com"
-
-    # Re-running notify in the same dedup window should NOT re-send.
-    sent_again = run_notify()
-    assert sent_again == 0
+    assert run_notify() == 0
+    assert len(client.sent_emails) == before
 
 
 def test_full_pipeline_fires_strict_new_low(client):

@@ -1,8 +1,10 @@
-"""Job 3 — Dispatch notification emails based on rules + trends.
+"""Job 3 — Dispatch notification emails for daily (high/low) rules.
 
-Walks every enabled NotificationRule, looks at the matching TrendAnalysis,
-and emails the user if the rule fires. Each send is logged to
-NotificationLog so we don't double-send within the same batch window.
+Walks every enabled NotificationRule (except `PRICE_CHANGE_RANGE`, which is
+intraday-driven — see `app.jobs.intraday`), looks at the matching
+TrendAnalysis, and emails the user if the rule fires. Each send is logged
+to NotificationLog so we don't double-send within the dedup window
+(shared with the intraday path).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from sqlalchemy.orm import Session as DBSession
 from app.core.settings import get_settings
 from app.db.database import get_session_factory
 from app.models import (
+    NotificationEventType,
     NotificationLog,
     NotificationRule,
     PriceSnapshot,
@@ -81,6 +84,11 @@ def run_notify(db: DBSession | None = None) -> int:
         first_events: list[tuple[User, Ticker, str, str]] = []
         for rule in db.execute(select(NotificationRule)).scalars().all():
             if not rule.enabled:
+                continue
+            # PRICE_CHANGE_RANGE is now handled by the intraday capture job
+            # (tick-over-tick). Skip it here so a single rule never fires
+            # through both code paths.
+            if rule.event_type == NotificationEventType.PRICE_CHANGE_RANGE:
                 continue
             user = users.get(rule.user_id)
             if user is None or not user.notify_email_confirmed:
