@@ -3,7 +3,7 @@ and first-notification event hook."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -156,14 +156,13 @@ def test_ingest_partial_success_does_not_alert(client, monkeypatch):
 
     # 2 of 4 succeed → 50% — borderline, should NOT trigger CRITICAL alert
     # (only triggers when count == 0).
+    today = date.today()
+    history = [(today - timedelta(days=i), 100.0) for i in range(7, 0, -1)]
+    history.append((today, 100.0))
+
     def fetcher(symbol):
         if symbol in ("AAPL", "MSFT"):
-            return {
-                "price": 100.0, "week_low": 99.0, "week_high": 101.0,
-                "month_low": 95.0, "month_high": 105.0,
-                "quarter_low": 90.0, "quarter_high": 110.0,
-                "year_low": 80.0, "year_high": 120.0,
-            }
+            return history
         return None
 
     count = run_ingest(fetcher=fetcher)
@@ -177,13 +176,11 @@ def test_ingest_partial_success_does_not_alert(client, monkeypatch):
 
 
 def _fetcher_with_week_high(symbol: str):
-    return {
-        "price": 110.0,
-        "week_low": 95.0, "week_high": 110.0,
-        "month_low": 90.0, "month_high": 110.0,
-        "quarter_low": 85.0, "quarter_high": 110.0,
-        "year_low": 80.0, "year_high": 110.0,
-    }
+    """Return a history where today is strictly above the prior week's max."""
+    today = date.today()
+    rows = [(today - timedelta(days=i), 100.0) for i in range(7, 0, -1)]
+    rows.append((today, 110.0))
+    return rows
 
 
 def _setup_user_with_week_high_rule(email: str = "new@example.com") -> tuple[int, int]:

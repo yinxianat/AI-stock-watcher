@@ -9,9 +9,18 @@ ConfirmationToken — pending email-address change confirmation.
 Ticker         — catalog of symbols we know about (seeded + user-added).
 WatchlistItem  — many-to-many of users -> tickers.
 NotificationRule — per (user, ticker) rule(s) defining when to alert.
-PriceSnapshot  — most-recent batch ingest row. Replaced each batch run.
-TrendAnalysis  — computed trend metrics per watched (user, ticker). Replaced
-                  each compute run.
+DailyClose     — durable per-day closing price per ticker. SOURCE OF TRUTH
+                  for all price history; retention bounded by PRICE_HISTORY_LIFETIME
+                  (default 365 days). Pruned daily by `app.jobs.cleanup`.
+PriceSnapshot  — derived "current view" per ticker, replaced each batch run.
+                  `previous_price` is the prior TRADING DAY's close (sourced
+                  from DailyClose), so `pct_change` is meaningful day-over-day.
+                  `week_low`/`month_low`/... are the prior-window EXTREMES
+                  EXCLUDING today — so `today.price < snapshot.week_low` means
+                  today's close set a *new* weekly low (strict).
+TrendAnalysis  — per (user, ticker) booleans derived from PriceSnapshot.
+                  `is_X_low/high` = strict "today set a new X-period extreme".
+                  Replaced each compute run.
 NotificationLog — audit trail of sent notifications (used to suppress dupes).
 LogEntry       — durable application log (WARNING+), auto-pruned per LOG_LIFETIME.
 """
@@ -19,10 +28,11 @@ LogEntry       — durable application log (WARNING+), auto-pruned per LOG_LIFET
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import date as date_, datetime
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -214,8 +224,53 @@ class NotificationRule(Base):
 # ---------- Batch outputs ----------
 
 
+class DailyClose(Base):
+    """One row per (ticker, trading day) — durable price history.
+
+    This is the source of truth. `PriceSnapshot` is derived from it. Retention
+    is bounded by the `PRICE_HISTORY_LIFETIME` setting (default 365 days);
+    `app.jobs.cleanup` prunes older rows daily.
+
+    Idempotent upsert key: (ticker_id, date). Ingest writes ON CONFLICT UPDATE
+    so corporate-action adjustments (splits/dividends) from yfinance correctly
+    rewrite historical values on re-fetch.
+    """
+
+    __tablename__ = "daily_closes"
+    __table_args__ = (
+        UniqueConstraint("ticker_id", "date", name="uq_daily_close_ticker_date"),
+        Index("ix_daily_close_ticker_date", "ticker_id", "date"),
+        Index("ix_daily_close_date", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticker_id: Mapped[int] = mapped_column(
+        ForeignKey("tickers.id", ondelete="CASCADE"), nullable=False
+    )
+    date: Mapped[date_] = mapped_column(Date, nullable=False)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+
+    ticker: Mapped[Ticker] = relationship()
+
+
 class PriceSnapshot(Base):
-    """Most-recent batch ingest. Cleared & re-populated every run."""
+    """Derived current-view per ticker. Replaced each batch run.
+
+    Field semantics (changed in the Option-B redesign):
+
+    * `price` — most recent close from yfinance (may be today's partial bar
+      during market hours; finalised at the 16:05 batch).
+    * `previous_price` — the prior TRADING DAY's close, sourced from
+      `daily_closes`. This makes `pct_change` mean "day over day", not
+      "since the last 3-hour batch tick".
+    * `week_low`/`week_high`/`month_low`/.../`year_high` — min/max close
+      over the prior window EXCLUDING today. So `price < week_low` means
+      today's close is *strictly* lower than every close in the prior 7 days
+      = a new weekly low.
+    """
 
     __tablename__ = "price_snapshots"
 
