@@ -1,5 +1,6 @@
 """APScheduler setup — fires ingest -> compute -> notify three times per day,
-plus daily summary, log retention, and heartbeat health-check jobs."""
+plus daily summary, log retention, heartbeat health-check, and a keepalive
+self-ping that prevents Railway from sleeping the container."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import time
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from app.core.settings import get_settings
 from app.jobs.compute import run_compute
@@ -15,6 +17,30 @@ from app.jobs.ingest import run_ingest
 from app.jobs.notify import run_notify
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Keepalive self-ping — prevents Railway from sleeping the container.
+# Without this, the in-process scheduler dies when Railway scales to zero.
+# ---------------------------------------------------------------------------
+
+_KEEPALIVE_INTERVAL_SECONDS = 300  # 5 minutes
+
+
+def _self_ping() -> None:
+    """Hit our own /healthz endpoint to keep the container awake."""
+    import httpx
+
+    settings = get_settings()
+    port = None
+    try:
+        import os
+        port = os.environ.get("PORT", "8000")
+        url = f"http://127.0.0.1:{port}/healthz"
+        r = httpx.get(url, timeout=5.0)
+        log.debug("Keepalive self-ping: %s → %d", url, r.status_code)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Keepalive self-ping failed (port=%s): %s", port, e)
 
 
 def _run_stage(name: str, fn) -> None:
@@ -126,22 +152,29 @@ def start_scheduler() -> BackgroundScheduler:
         close_h, _ = settings.intraday_market_close
         # Bound the cron to the market-hours window — cheaper than waking
         # the job 144 times/day to no-op.
+        # TODO: TEMPORARY — run 24/7 for testing. Restore market-hours cron:
+        #   CronTrigger(day_of_week="mon-fri", hour=f"{open_h}-{close_h}", minute=f"*/{tick}")
         sched.add_job(
-            run_intraday_capture,
-            CronTrigger(
-                day_of_week="mon-fri",
-                hour=f"{open_h}-{close_h}",
-                minute=f"*/{tick}",
-            ),
+            lambda: run_intraday_capture(force=True),
+            IntervalTrigger(minutes=tick),
             id="intraday_capture",
             replace_existing=True,
         )
         log.info(
-            "Registered job: intraday_capture (Mon-Fri %02d:%02d-%02d:%02d ET, every %d min)",
-            open_h, settings.intraday_market_open[1], close_h, settings.intraday_market_close[1], tick,
+            "Registered job: intraday_capture (TESTING MODE — every %d min, 24/7, force=True)",
+            tick,
         )
     else:
         log.warning("Intraday ingest DISABLED — skipping registration")
+
+    # Keepalive self-ping — prevents Railway from sleeping the container.
+    sched.add_job(
+        _self_ping,
+        IntervalTrigger(seconds=_KEEPALIVE_INTERVAL_SECONDS),
+        id="keepalive_self_ping",
+        replace_existing=True,
+    )
+    log.info("Registered job: keepalive_self_ping (every %ds)", _KEEPALIVE_INTERVAL_SECONDS)
 
     total_jobs = len(sched.get_jobs())
     log.info("Scheduler starting with %d registered jobs", total_jobs)
