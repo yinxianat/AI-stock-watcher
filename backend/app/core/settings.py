@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     intraday_tick_minutes: int = 10
     intraday_retention: str = "7d"
     job_runs_retention: str = "30d"
+    info_log_lifetime: str = "7d"
     intraday_market_open_et: str = "09:30"   # NYSE regular open
     intraday_market_close_et: str = "16:00"  # NYSE regular close
 

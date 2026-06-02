@@ -279,6 +279,73 @@ class DBLogHandler(logging.Handler):
 
 
 # -----------------------------------------------------------------------------
+# INFO-level handler — filtered to app.jobs.* and app.services.* loggers
+# -----------------------------------------------------------------------------
+
+# Logger prefixes that get captured to info_logs.
+_INFO_LOGGER_PREFIXES = ("app.jobs.", "app.services.")
+
+
+class InfoLogHandler(logging.Handler):
+    """Persist INFO+ records from app.jobs/app.services to `info_logs`.
+
+    Same circuit-breaker pattern as DBLogHandler.
+    """
+
+    _MAX_CONSEC_FAILURES = 5
+    _COOLDOWN_SECS = 60
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self._failures = 0
+        self._disabled_until = 0.0
+        self._lock = threading.Lock()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno < logging.INFO:
+            return
+        if not any(record.name.startswith(p) for p in _INFO_LOGGER_PREFIXES):
+            return
+        if record.name.startswith("sqlalchemy"):
+            return
+        with self._lock:
+            if time.monotonic() < self._disabled_until:
+                return
+        try:
+            settings = get_settings()
+            if not settings.log_db_persistence:
+                return
+            from app.db.database import get_session_factory
+            from app.models import InfoLog
+
+            session = get_session_factory()()
+            try:
+                session.add(
+                    InfoLog(
+                        level=record.levelname,
+                        logger=record.name[:160],
+                        message=record.getMessage()[:10_000],
+                    )
+                )
+                session.commit()
+            finally:
+                session.close()
+
+            with self._lock:
+                self._failures = 0
+        except Exception as e:  # noqa: BLE001
+            with self._lock:
+                self._failures += 1
+                if self._failures >= self._MAX_CONSEC_FAILURES:
+                    self._disabled_until = time.monotonic() + self._COOLDOWN_SECS
+                    self._failures = 0
+                    _stderr(
+                        f"InfoLogHandler disabled for {self._COOLDOWN_SECS}s after repeated failures"
+                    )
+            _stderr(f"InfoLogHandler.emit failed: {e}")
+
+
+# -----------------------------------------------------------------------------
 # Installer
 # -----------------------------------------------------------------------------
 
@@ -288,7 +355,7 @@ _installed_lock = threading.Lock()
 
 
 def install_handlers() -> None:
-    """Attach DB + email handlers to the root logger. Idempotent."""
+    """Attach DB + email + info handlers to the root logger. Idempotent."""
     global _installed
     with _installed_lock:
         if _installed:
@@ -296,6 +363,7 @@ def install_handlers() -> None:
         root = logging.getLogger()
         root.addHandler(DBLogHandler())
         root.addHandler(EmailAlertHandler())
+        root.addHandler(InfoLogHandler())
         _installed = True
 
 
@@ -305,7 +373,7 @@ def reset_for_tests() -> None:
     with _installed_lock:
         root = logging.getLogger()
         for h in list(root.handlers):
-            if isinstance(h, (DBLogHandler, EmailAlertHandler)):
+            if isinstance(h, (DBLogHandler, EmailAlertHandler, InfoLogHandler)):
                 root.removeHandler(h)
         _installed = False
     with _dedup_lock:
