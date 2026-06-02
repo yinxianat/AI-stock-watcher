@@ -318,8 +318,8 @@ def run_intraday_capture(
         log.debug("Intraday capture skipped: outside market hours")
         return 0
 
-    log.info(
-        "Intraday capture starting (provider=%s, tick=%d min, force=%s)",
+    log.warning(
+        "[AUDIT] Intraday capture starting (provider=%s, tick=%d min, force=%s)",
         settings.stock_data_provider, settings.intraday_tick_minutes, force,
     )
 
@@ -401,8 +401,8 @@ def run_intraday_capture(
                 "Intraday capture: %d/%d tickers FAILED to fetch: %s",
                 len(failed_symbols), attempted, ", ".join(failed_symbols),
             )
-        log.info(
-            "Intraday capture complete: captured=%d/%d, failed=%d, emails_sent=%d",
+        log.warning(
+            "[AUDIT] Intraday capture complete: captured=%d/%d, failed=%d, emails_sent=%d",
             captured, attempted, len(failed_symbols), total_sent,
         )
         return total_sent
