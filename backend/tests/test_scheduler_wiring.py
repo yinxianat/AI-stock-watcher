@@ -81,7 +81,7 @@ def test_run_full_pipeline_logs_completion(client, caplog, monkeypatch):
         run_full_pipeline()
 
     assert calls == ["ingest", "compute", "notify"]
-    assert any("Pipeline complete" in r.message for r in caplog.records)
+    assert any("Pipeline SUCCESS" in r.message for r in caplog.records)
 
 
 def test_run_full_pipeline_halts_after_stage_failure(client, caplog, monkeypatch):

@@ -78,8 +78,36 @@ def _prune_intraday(session, lifetime_spec: str) -> int:
     return deleted
 
 
+def _prune_job_runs(session, lifetime_spec: str) -> int:
+    try:
+        lifetime = parse_lifetime(lifetime_spec)
+    except ValueError:
+        log.error(
+            "Invalid JOB_RUNS_RETENTION=%r; skipping job_runs cleanup",
+            lifetime_spec,
+        )
+        return 0
+    from app.models import JobRun
+
+    cutoff = datetime.utcnow() - lifetime
+    result = session.execute(
+        delete(JobRun).where(JobRun.started_at < cutoff)
+    )
+    session.commit()
+    deleted = result.rowcount or 0
+    log.info("Job runs cleanup: deleted %d job_runs rows older than %s", deleted, cutoff.isoformat())
+    return deleted
+
+
 def run_cleanup() -> int:
     """Run all retention pruning. Returns total rows deleted across tables."""
+    import time as _time
+
+    from app.jobs.audit import record_job_run
+    from app.models import utcnow
+
+    started = utcnow()
+    t0 = _time.monotonic()
     settings = get_settings()
     session = get_session_factory()()
     try:
@@ -87,6 +115,14 @@ def run_cleanup() -> int:
         deleted += _prune_log_entries(session, settings.log_lifetime)
         deleted += _prune_price_history(session, settings.price_history_lifetime)
         deleted += _prune_intraday(session, settings.intraday_retention)
+        deleted += _prune_job_runs(session, getattr(settings, "job_runs_retention", "30d"))
+        elapsed = _time.monotonic() - t0
+        log.info("Cleanup complete: %d total rows deleted (%.2fs)", deleted, elapsed)
+        record_job_run(
+            "cleanup", "SUCCESS", started, elapsed,
+            result_summary=f"deleted={deleted} rows",
+            tables_updated=["log_entries", "daily_closes", "intraday_prices", "job_runs"],
+        )
         return deleted
     finally:
         session.close()

@@ -378,6 +378,39 @@ class NotificationLog(Base):
 # ---------- Observability ----------
 
 
+class JobRun(Base):
+    """Structured audit record for every scheduled job execution.
+
+    One row per job invocation. Replaces the [AUDIT] WARNING-level log hack
+    with queryable, structured data. Pruned by the cleanup job (30d default,
+    configurable via JOB_RUNS_RETENTION).
+
+    `result_summary` is a short human-readable string (e.g.
+    "captured=4/4, emails_sent=1"). `tables_updated` is a comma-separated
+    list of DB tables modified during this run.
+    """
+
+    __tablename__ = "job_runs"
+    __table_args__ = (
+        Index("ix_job_runs_job_name_started", "job_name", "started_at"),
+        Index("ix_job_runs_started_at", "started_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_name: Mapped[str] = mapped_column(String(60), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)  # SUCCESS / FAILED / SKIPPED
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True
+    )
+    duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tables_updated: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class LogEntry(Base):
     """Durable application log row.
 

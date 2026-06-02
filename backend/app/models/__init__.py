@@ -3,6 +3,7 @@ from .models import (  # noqa: F401
     ConfirmationToken,
     DailyClose,
     IntradayPrice,
+    JobRun,
     LogEntry,
     LoginToken,
     NotificationEventType,
