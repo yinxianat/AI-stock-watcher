@@ -301,10 +301,21 @@ def _format_text(s: dict) -> str:
 
 def run_daily_summary() -> dict:
     """Build + send the daily summary. Returns the data dict (for tests)."""
+    import time as _time
+
+    from app.jobs.audit import record_job_run
+    from app.models import utcnow
+
+    started = utcnow()
+    t0 = _time.monotonic()
     try:
         data = collect_summary()
     except Exception:
         log.exception("Daily summary collection failed")
+        record_job_run(
+            "daily_summary", "FAILED", started, _time.monotonic() - t0,
+            error="collection failed",
+        )
         raise
     body = _format_text(data)
     health = "HEALTHY"
@@ -318,5 +329,10 @@ def run_daily_summary() -> dict:
         body,
         channel=AlertChannel.SUMMARY,
     )
-    log.info("Daily summary sent (health=%s)", health)
+    elapsed = _time.monotonic() - t0
+    log.info("Daily summary sent (health=%s, %.2fs)", health, elapsed)
+    record_job_run(
+        "daily_summary", "SUCCESS", started, elapsed,
+        result_summary=f"health={health}",
+    )
     return data

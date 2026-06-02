@@ -59,7 +59,11 @@ def run_compute(db: DBSession | None = None) -> int:
             )
             count += 1
         db.commit()
-        log.info("Trend compute complete: %d (user, ticker) rows", count)
+        log.info(
+            "Compute complete: %d trend_analyses rows written, "
+            "db=[trend_analyses]",
+            count,
+        )
         return count
     finally:
         if own:

@@ -26,6 +26,7 @@ closing prices and don't move intraday.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -318,10 +319,12 @@ def run_intraday_capture(
         log.debug("Intraday capture skipped: outside market hours")
         return 0
 
-    log.warning(
-        "[AUDIT] Intraday capture starting (provider=%s, tick=%d min, force=%s)",
+    log.info(
+        "Intraday capture starting (provider=%s, tick=%d min, force=%s)",
         settings.stock_data_provider, settings.intraday_tick_minutes, force,
     )
+    started = utcnow()
+    t0 = time.monotonic()
 
     own = db is None
     if own:
@@ -332,11 +335,13 @@ def run_intraday_capture(
             log.warning("Intraday capture: no watched tickers — is anyone's watchlist populated?")
             return 0
 
-        log.info("Intraday capture: %d watched tickers to fetch", len(tickers))
+        log.info("Intraday capture: %d watched tickers to fetch: %s",
+                 len(tickers), ", ".join(t.symbol for t in tickers))
         now = utcnow()
         attempted = 0
         captured = 0
         failed_symbols: list[str] = []
+        captured_prices: list[str] = []  # "AAPL=$192.34" for the audit log
         total_sent = 0
         first_events_all: list[tuple] = []
         for t in tickers:
@@ -359,6 +364,7 @@ def run_intraday_capture(
             db.add(IntradayPrice(ticker_id=t.id, captured_at=now, price=price))
             db.flush()
             captured += 1
+            captured_prices.append(f"{t.symbol}=${price:.2f}")
 
             tick_pct = (
                 (price - prior_tick) / prior_tick * 100.0
@@ -401,9 +407,28 @@ def run_intraday_capture(
                 "Intraday capture: %d/%d tickers FAILED to fetch: %s",
                 len(failed_symbols), attempted, ", ".join(failed_symbols),
             )
-        log.warning(
-            "[AUDIT] Intraday capture complete: captured=%d/%d, failed=%d, emails_sent=%d",
-            captured, attempted, len(failed_symbols), total_sent,
+        tables = []
+        if captured:
+            tables.append("intraday_prices")
+        if total_sent:
+            tables.append("notification_logs")
+        elapsed = time.monotonic() - t0
+        summary = (
+            f"captured={captured}/{attempted}, failed={len(failed_symbols)}, "
+            f"emails_sent={total_sent}, prices=[{', '.join(captured_prices) or 'none'}]"
+        )
+        if failed_symbols:
+            summary += f", failed_symbols=[{', '.join(failed_symbols)}]"
+        log.info("Intraday capture complete (%.2fs): %s", elapsed, summary)
+
+        from app.jobs.audit import record_job_run
+
+        record_job_run(
+            "intraday_capture",
+            "FAILED" if captured == 0 and attempted > 0 else "SUCCESS",
+            started, elapsed,
+            result_summary=summary,
+            tables_updated=tables or None,
         )
         return total_sent
     finally:

@@ -6,15 +6,18 @@ from __future__ import annotations
 
 import logging
 import time
+import traceback
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.core.settings import get_settings
+from app.jobs.audit import record_job_run
 from app.jobs.compute import run_compute
 from app.jobs.ingest import run_ingest
 from app.jobs.notify import run_notify
+from app.models import utcnow
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +42,9 @@ def _self_ping() -> None:
 
     import httpx
 
+    started = utcnow()
+    t0 = time.monotonic()
+    url = ""
     try:
         public_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
         if public_domain:
@@ -47,18 +53,28 @@ def _self_ping() -> None:
             port = os.environ.get("PORT", "8000")
             url = f"http://127.0.0.1:{port}/healthz"
         r = httpx.get(url, timeout=10.0)
+        elapsed = time.monotonic() - t0
         log.info("Keepalive self-ping: %s → %d", url, r.status_code)
+        record_job_run(
+            "keepalive", "SUCCESS", started, elapsed,
+            result_summary=f"url={url}, status={r.status_code}",
+        )
     except Exception as e:  # noqa: BLE001
+        elapsed = time.monotonic() - t0
         log.warning("Keepalive self-ping failed (%s): %s", url, e)
+        record_job_run(
+            "keepalive", "FAILED", started, elapsed,
+            error=str(e),
+        )
 
 
-def _run_stage(name: str, fn) -> None:
+def _run_stage(name: str, fn) -> tuple[float, int | None]:
     """Run a pipeline stage with timing + granular error logging.
+
+    Returns (elapsed_seconds, result).
 
     Errors are logged at ERROR with the stage name so the alert email subject
     pinpoints which job failed, then re-raised so the orchestrator halts.
-    Running compute/notify on stale or missing data would produce misleading
-    output, so failures stop the pipeline.
     """
     started = time.monotonic()
     try:
@@ -66,22 +82,79 @@ def _run_stage(name: str, fn) -> None:
     except Exception:
         log.exception("Pipeline stage %r failed", name)
         raise
-    log.info("Pipeline stage %r ok (%.2fs, result=%s)", name, time.monotonic() - started, result)
+    elapsed = time.monotonic() - started
+    log.info("Pipeline stage %r ok (%.2fs, result=%s)", name, elapsed, result)
+    return elapsed, result
 
 
 def run_full_pipeline() -> None:
     """Run the three jobs in order. Each opens its own DB session."""
-    log.warning("[AUDIT] Pipeline start")
+    log.info("Pipeline start")
+    started = utcnow()
+    pipeline_start = time.monotonic()
+    stages: dict[str, dict] = {}
+    failed_stage = None
+    error_detail = None
     try:
-        _run_stage("ingest", run_ingest)
-        _run_stage("compute", run_compute)
-        _run_stage("notify", run_notify)
+        elapsed, result = _run_stage("ingest", run_ingest)
+        stages["ingest"] = {
+            "status": "SUCCESS", "elapsed": f"{elapsed:.2f}s",
+            "tickers_ingested": result,
+            "tables_updated": ["price_snapshots", "daily_closes"],
+        }
+
+        elapsed, result = _run_stage("compute", run_compute)
+        stages["compute"] = {
+            "status": "SUCCESS", "elapsed": f"{elapsed:.2f}s",
+            "trend_rows_written": result,
+            "tables_updated": ["trend_analyses"],
+        }
+
+        elapsed, result = _run_stage("notify", run_notify)
+        stages["notify"] = {
+            "status": "SUCCESS", "elapsed": f"{elapsed:.2f}s",
+            "emails_sent": result,
+            "tables_updated": ["notification_logs"] if result else [],
+        }
     except Exception:
-        # Already logged at ERROR by _run_stage; this just stops propagation
-        # so APScheduler doesn't mark the trigger as dead.
-        log.error("Pipeline aborted")
-    else:
-        log.warning("[AUDIT] Pipeline complete")
+        for name in ("ingest", "compute", "notify"):
+            if name not in stages:
+                failed_stage = name
+                stages[name] = {"status": "FAILED"}
+                break
+        error_detail = traceback.format_exc()
+        log.error("Pipeline aborted at stage %r", failed_stage)
+    total_elapsed = time.monotonic() - pipeline_start
+
+    # Build summary and collect all updated tables
+    stage_parts = []
+    all_tables: list[str] = []
+    for name in ("ingest", "compute", "notify"):
+        s = stages.get(name)
+        if s is None:
+            stage_parts.append(f"{name}=SKIPPED")
+        elif s["status"] == "FAILED":
+            stage_parts.append(f"{name}=FAILED")
+        else:
+            details = ", ".join(
+                f"{k}={v}" for k, v in s.items()
+                if k not in ("status", "tables_updated")
+            )
+            tables = s.get("tables_updated", [])
+            all_tables.extend(tables)
+            tables_str = f", db=[{','.join(tables)}]" if tables else ""
+            stage_parts.append(f"{name}=SUCCESS({details}{tables_str})")
+
+    overall = "FAILED" if failed_stage else "SUCCESS"
+    summary = " | ".join(stage_parts)
+    log.info("Pipeline %s (%.2fs): %s", overall, total_elapsed, summary)
+
+    record_job_run(
+        "batch_pipeline", overall, started, total_elapsed,
+        result_summary=summary,
+        tables_updated=all_tables or None,
+        error=error_detail,
+    )
 
 
 def start_scheduler() -> BackgroundScheduler:
@@ -161,17 +234,19 @@ def start_scheduler() -> BackgroundScheduler:
         close_h, _ = settings.intraday_market_close
         # Bound the cron to the market-hours window — cheaper than waking
         # the job 144 times/day to no-op.
-        # TODO: TEMPORARY — run 24/7 for testing. Restore market-hours cron:
-        #   CronTrigger(day_of_week="mon-fri", hour=f"{open_h}-{close_h}", minute=f"*/{tick}")
         sched.add_job(
-            lambda: run_intraday_capture(force=True),
-            IntervalTrigger(minutes=tick),
+            run_intraday_capture,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=f"{open_h}-{close_h}",
+                minute=f"*/{tick}",
+            ),
             id="intraday_capture",
             replace_existing=True,
         )
         log.info(
-            "Registered job: intraday_capture (TESTING MODE — every %d min, 24/7, force=True)",
-            tick,
+            "Registered job: intraday_capture (Mon-Fri %02d:%02d-%02d:%02d ET, every %d min)",
+            open_h, settings.intraday_market_open[1], close_h, settings.intraday_market_close[1], tick,
         )
     else:
         log.warning("Intraday ingest DISABLED — skipping registration")
@@ -188,11 +263,11 @@ def start_scheduler() -> BackgroundScheduler:
     total_jobs = len(sched.get_jobs())
     log.info("Scheduler starting with %d registered jobs", total_jobs)
     sched.start()
-    # Persist to log_entries DB so we can verify the scheduler actually started
-    # even if Railway stdout logs have rotated away.
-    log.warning(
-        "[AUDIT] Scheduler started with %d jobs: %s",
-        total_jobs,
-        ", ".join(j.id for j in sched.get_jobs()),
+    job_ids = ", ".join(j.id for j in sched.get_jobs())
+    log.info("Scheduler started with %d jobs: %s", total_jobs, job_ids)
+    # Record startup as a job_run so it's queryable even after stdout rotates.
+    record_job_run(
+        "scheduler_start", "SUCCESS", utcnow(), 0.0,
+        result_summary=f"{total_jobs} jobs: {job_ids}",
     )
     return sched
