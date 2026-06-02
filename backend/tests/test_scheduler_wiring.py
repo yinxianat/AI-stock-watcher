@@ -28,7 +28,8 @@ def test_start_scheduler_registers_all_jobs(monkeypatch):
         assert "log_cleanup" in ids
         assert "pipeline_heartbeat" in ids
         assert "intraday_capture" in ids
-        assert len(ids) == 7
+        assert "keepalive_self_ping" in ids
+        assert len(ids) == 8
     finally:
         sched.shutdown(wait=False)
 
