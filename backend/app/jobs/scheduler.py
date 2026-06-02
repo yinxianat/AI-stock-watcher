@@ -53,6 +53,20 @@ def start_scheduler() -> BackgroundScheduler:
     settings = get_settings()
     sched = BackgroundScheduler(timezone="US/Eastern")
 
+    # ---- Log configuration summary so prod deploys are self-documenting ----
+    log.info(
+        "Scheduler config: BATCH_JOB_TIMES_ET=%s, INTRADAY_INGEST_ENABLED=%s, "
+        "INTRADAY_TICK_MINUTES=%s, MARKET_WINDOW=%s-%s ET, "
+        "STOCK_DATA_PROVIDER=%s, DAILY_SUMMARY_ENABLED=%s",
+        settings.batch_job_times_et,
+        settings.intraday_ingest_enabled,
+        settings.intraday_tick_minutes,
+        settings.intraday_market_open_et,
+        settings.intraday_market_close_et,
+        settings.stock_data_provider,
+        settings.daily_summary_enabled,
+    )
+
     # Main batch pipeline — Mon-Fri at each configured time.
     for hour, minute in settings.batch_times:
         sched.add_job(
@@ -61,6 +75,7 @@ def start_scheduler() -> BackgroundScheduler:
             id=f"pipeline_{hour:02d}{minute:02d}",
             replace_existing=True,
         )
+        log.info("Registered job: pipeline_%02d%02d (Mon-Fri %02d:%02d ET)", hour, minute, hour, minute)
 
     # Daily summary — every day at configured time (default 17:30 ET).
     if settings.daily_summary_enabled:
@@ -73,6 +88,9 @@ def start_scheduler() -> BackgroundScheduler:
             id="daily_summary",
             replace_existing=True,
         )
+        log.info("Registered job: daily_summary (daily %02d:%02d ET)", sh, sm)
+    else:
+        log.warning("Daily summary DISABLED — skipping registration")
 
     # Log retention cleanup — daily at 03:15 ET (off-peak).
     from app.jobs.cleanup import run_cleanup
@@ -83,6 +101,7 @@ def start_scheduler() -> BackgroundScheduler:
         id="log_cleanup",
         replace_existing=True,
     )
+    log.info("Registered job: log_cleanup (daily 03:15 ET)")
 
     # Pipeline heartbeat — hourly on weekdays, alerts if no successful
     # pipeline in the last ~26 hours.
@@ -94,6 +113,7 @@ def start_scheduler() -> BackgroundScheduler:
         id="pipeline_heartbeat",
         replace_existing=True,
     )
+    log.info("Registered job: pipeline_heartbeat (Mon-Fri hourly at :20)")
 
     # Intraday capture — every INTRADAY_TICK_MINUTES during US market hours
     # on weekdays. The job itself also re-checks market hours so it's safe
@@ -116,6 +136,14 @@ def start_scheduler() -> BackgroundScheduler:
             id="intraday_capture",
             replace_existing=True,
         )
+        log.info(
+            "Registered job: intraday_capture (Mon-Fri %02d:%02d-%02d:%02d ET, every %d min)",
+            open_h, settings.intraday_market_open[1], close_h, settings.intraday_market_close[1], tick,
+        )
+    else:
+        log.warning("Intraday ingest DISABLED — skipping registration")
 
+    total_jobs = len(sched.get_jobs())
+    log.info("Scheduler starting with %d registered jobs", total_jobs)
     sched.start()
     return sched
