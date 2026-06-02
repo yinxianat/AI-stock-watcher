@@ -1,15 +1,31 @@
 """Seed the ticker catalog with popular ETFs and stocks.
 
 Run from project root:  python -m app.db.seed
-Idempotent: safe to re-run; existing symbols are left untouched.
+Idempotent: safe to re-run; called automatically from `lifespan()` on every
+app startup (and therefore on every production redeploy on Railway).
+
+Guarantees:
+
+* Existing tickers that match a seed entry are UPDATED only on `name`/`type`
+  drift, and only if we own them (`is_seeded=True`). Tickers the user added
+  themselves (`is_seeded=False`) are never touched.
+* No row is ever deleted by seed — symbols dropped from the catalog stay in
+  the DB so watchlist FK references remain valid.
+* No table other than `tickers` is touched. Users, watchlists, rules,
+  notification_logs, and daily_closes are all untouched, so seed is safe
+  to run on every redeploy without losing user profile data.
 """
 
 from __future__ import annotations
+
+import logging
 
 from sqlalchemy import select
 
 from app.db.database import get_engine, get_session_factory
 from app.models import Base, Ticker, TickerType
+
+log = logging.getLogger(__name__)
 
 ETFS: list[tuple[str, str]] = [
     ("SPY", "SPDR S&P 500 ETF Trust"),
@@ -92,30 +108,60 @@ STOCKS: list[tuple[str, str]] = [
 
 
 def seed() -> int:
-    """Insert any missing seed tickers. Returns # of new rows."""
+    """Sync the ticker catalog with the in-code seed list. Returns # inserted.
+
+    Behavior on each call (every app startup, including prod redeploys):
+
+    * Brand-new seed symbols are inserted with `is_seeded=True`.
+    * Existing tickers we own (`is_seeded=True`) get name/type updates if the
+      catalog has drifted — e.g. you edit "Apple Inc." to add Inc.
+    * Existing tickers a user added themselves (`is_seeded=False`) are NEVER
+      modified, even if they happen to share a symbol with the seed list.
+    * Tickers removed from the seed list are NOT deleted — watchlist FK rows
+      would break and that's user data.
+    * No table besides `tickers` is touched.
+    """
+    # create_all is idempotent — adds missing tables without dropping anything.
     Base.metadata.create_all(bind=get_engine())
+
+    catalog: list[tuple[str, str, TickerType]] = (
+        [(s, n, TickerType.ETF) for (s, n) in ETFS]
+        + [(s, n, TickerType.STOCK) for (s, n) in STOCKS]
+    )
+
     db = get_session_factory()()
     inserted = 0
+    updated = 0
     try:
-        existing = {
-            s for (s,) in db.execute(select(Ticker.symbol)).all()
+        existing: dict[str, Ticker] = {
+            row.symbol: row
+            for row in db.execute(select(Ticker)).scalars().all()
         }
-        for sym, name in ETFS:
-            if sym in existing:
+        for sym, name, ttype in catalog:
+            row = existing.get(sym)
+            if row is None:
+                db.add(Ticker(symbol=sym, name=name, type=ttype, is_seeded=True))
+                inserted += 1
                 continue
-            db.add(Ticker(symbol=sym, name=name, type=TickerType.ETF, is_seeded=True))
-            inserted += 1
-        for sym, name in STOCKS:
-            if sym in existing:
+            # Only update rows WE own. User-added tickers keep whatever
+            # name/type the user gave them.
+            if not row.is_seeded:
                 continue
-            db.add(Ticker(symbol=sym, name=name, type=TickerType.STOCK, is_seeded=True))
-            inserted += 1
+            if row.name != name or row.type != ttype:
+                row.name = name
+                row.type = ttype
+                updated += 1
         db.commit()
+        log.info(
+            "Seed: %d inserted, %d updated, %d already current (catalog size=%d)",
+            inserted, updated, len(catalog) - inserted - updated, len(catalog),
+        )
     finally:
         db.close()
     return inserted
 
 
 if __name__ == "__main__":  # pragma: no cover
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     n = seed()
     print(f"Seeded {n} new tickers.")

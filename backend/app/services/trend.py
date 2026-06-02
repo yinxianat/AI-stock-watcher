@@ -2,6 +2,16 @@
 
 Pure functions where possible — they take primitives, return primitives —
 so they're trivially unit-testable without touching the DB or yfinance.
+
+Option-B semantics (see app/models/models.py docstrings for full context):
+
+* `snap.previous_price` is the prior trading day's close (from `daily_closes`),
+  so `pct_change` is meaningful day-over-day, not "since the last 3-hour
+  batch tick".
+* `snap.week_low` / `week_high` / etc. are the min/max close in the prior
+  window EXCLUDING today. `is_week_low` therefore means "today's close is
+  STRICTLY lower than every close in the previous 7 days" — a genuine new
+  low, not a tie.
 """
 
 from __future__ import annotations
@@ -26,13 +36,22 @@ class TrendResult:
     is_year_high: bool
 
 
-def _close(a: float | None, b: float | None, tol: float = 1e-6) -> bool:
-    """True when both values exist and are within `tol` of each other."""
-    return a is not None and b is not None and abs(a - b) <= tol
+def _strictly_below(price: float | None, prior_min: float | None) -> bool:
+    """True iff today's price is strictly below the prior-window minimum.
+
+    If `prior_min` is None (no history in that window yet), we can't claim a
+    new low — return False rather than firing on the first-ever data point.
+    """
+    return price is not None and prior_min is not None and price < prior_min
+
+
+def _strictly_above(price: float | None, prior_max: float | None) -> bool:
+    """True iff today's price is strictly above the prior-window maximum."""
+    return price is not None and prior_max is not None and price > prior_max
 
 
 def compute_trend(snap: PriceSnapshot) -> TrendResult:
-    """Derive percent change and period-low/high flags from a single snapshot row."""
+    """Derive percent change and strict new-low / new-high flags."""
     prev = snap.previous_price
     if prev is None or prev == 0:
         pct = 0.0
@@ -41,14 +60,14 @@ def compute_trend(snap: PriceSnapshot) -> TrendResult:
 
     return TrendResult(
         pct_change=pct,
-        is_week_low=_close(snap.price, snap.week_low),
-        is_week_high=_close(snap.price, snap.week_high),
-        is_month_low=_close(snap.price, snap.month_low),
-        is_month_high=_close(snap.price, snap.month_high),
-        is_quarter_low=_close(snap.price, snap.quarter_low),
-        is_quarter_high=_close(snap.price, snap.quarter_high),
-        is_year_low=_close(snap.price, snap.year_low),
-        is_year_high=_close(snap.price, snap.year_high),
+        is_week_low=_strictly_below(snap.price, snap.week_low),
+        is_week_high=_strictly_above(snap.price, snap.week_high),
+        is_month_low=_strictly_below(snap.price, snap.month_low),
+        is_month_high=_strictly_above(snap.price, snap.month_high),
+        is_quarter_low=_strictly_below(snap.price, snap.quarter_low),
+        is_quarter_high=_strictly_above(snap.price, snap.quarter_high),
+        is_year_low=_strictly_below(snap.price, snap.year_low),
+        is_year_high=_strictly_above(snap.price, snap.year_high),
     )
 
 
@@ -88,8 +107,11 @@ def summarize_event(
     """One-line human summary of a triggered event."""
     if event == NotificationEventType.PRICE_CHANGE_RANGE:
         direction = "up" if trend.pct_change >= 0 else "down"
+        prev = snap.previous_price
+        ref = f" from ${prev:.2f}" if prev is not None else ""
         return (
-            f"{symbol} moved {direction} {abs(trend.pct_change):.2f}% to ${snap.price:.2f}."
+            f"{symbol} moved {direction} {abs(trend.pct_change):.2f}% to "
+            f"${snap.price:.2f}{ref} (vs. prior trading day close)."
         )
     period_and_kind = {
         NotificationEventType.WEEK_LOW: "weekly low",
