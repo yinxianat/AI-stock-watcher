@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     daily_summary_time_et: str = "17:30"  # HH:MM in US/Eastern
     daily_summary_enabled: bool = True
 
+    # Price-history retention — how long to keep DailyClose rows. Pruned daily
+    # by `app.jobs.cleanup`. Same units as LOG_LIFETIME (see parse_lifetime).
+    price_history_lifetime: str = "365d"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
