@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,9 +33,25 @@ from app.db.seed import seed
 from app.models import Base
 from app.services.alerts import install_handlers
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-)
+_PACIFIC = ZoneInfo("US/Pacific")
+
+
+class _PacificFormatter(logging.Formatter):
+    """Log formatter that renders timestamps in US/Pacific."""
+
+    converter = None  # unused — we override formatTime
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc).astimezone(_PACIFIC)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_PacificFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logging.root.addHandler(_handler)
+logging.root.setLevel(logging.INFO)
 log = logging.getLogger("app")
 # Attach DB + email alert handlers to root logger. Safe & idempotent.
 install_handlers()
