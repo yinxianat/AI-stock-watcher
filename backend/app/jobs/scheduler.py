@@ -28,19 +28,28 @@ _KEEPALIVE_INTERVAL_SECONDS = 300  # 5 minutes
 
 
 def _self_ping() -> None:
-    """Hit our own /healthz endpoint to keep the container awake."""
+    """Hit our own /healthz endpoint to keep the container awake.
+
+    Railway only counts EXTERNAL requests for its sleep/scale-to-zero
+    detection — loopback requests to 127.0.0.1 don't count. So we ping
+    via the public Railway domain (RAILWAY_PUBLIC_DOMAIN env var) when
+    available, falling back to localhost for local dev.
+    """
+    import os
+
     import httpx
 
-    settings = get_settings()
-    port = None
     try:
-        import os
-        port = os.environ.get("PORT", "8000")
-        url = f"http://127.0.0.1:{port}/healthz"
-        r = httpx.get(url, timeout=5.0)
-        log.debug("Keepalive self-ping: %s → %d", url, r.status_code)
+        public_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+        if public_domain:
+            url = f"https://{public_domain}/healthz"
+        else:
+            port = os.environ.get("PORT", "8000")
+            url = f"http://127.0.0.1:{port}/healthz"
+        r = httpx.get(url, timeout=10.0)
+        log.info("Keepalive self-ping: %s → %d", url, r.status_code)
     except Exception as e:  # noqa: BLE001
-        log.warning("Keepalive self-ping failed (port=%s): %s", port, e)
+        log.warning("Keepalive self-ping failed (%s): %s", url, e)
 
 
 def _run_stage(name: str, fn) -> None:
