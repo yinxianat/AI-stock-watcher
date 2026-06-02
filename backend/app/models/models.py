@@ -411,6 +411,29 @@ class JobRun(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class InfoLog(Base):
+    """INFO-level application log row.
+
+    Captured by `InfoLogHandler` for INFO+ records from `app.jobs.*` and
+    `app.services.*` loggers only — excludes uvicorn, APScheduler, and other
+    framework noise. Pruned by the cleanup job per `INFO_LOG_LIFETIME`
+    (default 7 days).
+    """
+
+    __tablename__ = "info_logs"
+    __table_args__ = (
+        Index("ix_info_logs_created_logger", "created_at", "logger"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+    level: Mapped[str] = mapped_column(String(10), nullable=False)
+    logger: Mapped[str] = mapped_column(String(160), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class LogEntry(Base):
     """Durable application log row.
 
