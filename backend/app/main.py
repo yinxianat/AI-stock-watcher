@@ -49,6 +49,7 @@ def _log_persistence_snapshot() -> None:
 
         from app.models import (
             DailyClose,
+            IntradayPrice,
             NotificationLog,
             NotificationRule,
             User,
@@ -67,6 +68,9 @@ def _log_persistence_snapshot() -> None:
                     select(func.count(NotificationLog.id))
                 ).scalar_one(),
                 "daily_closes": db.execute(select(func.count(DailyClose.id))).scalar_one(),
+                "intraday_prices": db.execute(
+                    select(func.count(IntradayPrice.id))
+                ).scalar_one(),
             }
         finally:
             db.close()

@@ -95,5 +95,27 @@ def start_scheduler() -> BackgroundScheduler:
         replace_existing=True,
     )
 
+    # Intraday capture — every INTRADAY_TICK_MINUTES during US market hours
+    # on weekdays. The job itself also re-checks market hours so it's safe
+    # if the cron schedule wakes it slightly outside the bounded window.
+    if settings.intraday_ingest_enabled:
+        from app.jobs.intraday import run_intraday_capture
+
+        tick = max(1, int(settings.intraday_tick_minutes))
+        open_h, _ = settings.intraday_market_open
+        close_h, _ = settings.intraday_market_close
+        # Bound the cron to the market-hours window — cheaper than waking
+        # the job 144 times/day to no-op.
+        sched.add_job(
+            run_intraday_capture,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=f"{open_h}-{close_h}",
+                minute=f"*/{tick}",
+            ),
+            id="intraday_capture",
+            replace_existing=True,
+        )
+
     sched.start()
     return sched

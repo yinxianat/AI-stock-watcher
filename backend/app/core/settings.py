@@ -60,6 +60,23 @@ class Settings(BaseSettings):
     # by `app.jobs.cleanup`. Same units as LOG_LIFETIME (see parse_lifetime).
     price_history_lifetime: str = "365d"
 
+    # ---- Intraday capture ----------------------------------------------------
+    # Every INTRADAY_TICK_MINUTES, during US-market hours, we capture the
+    # latest price for every watched ticker into `intraday_prices`. The
+    # PRICE_CHANGE_RANGE notification rule fires on BOTH the tick-over-tick
+    # % AND the % vs. previous trading day's close.
+    intraday_ingest_enabled: bool = True
+    intraday_tick_minutes: int = 10
+    intraday_retention: str = "7d"
+    intraday_market_open_et: str = "09:30"   # NYSE regular open
+    intraday_market_close_et: str = "16:00"  # NYSE regular close
+
+    # ---- Stock-data provider -------------------------------------------------
+    # "yfinance" (default) | "finnhub". Set FINNHUB_API_KEY when using finnhub.
+    # Swap providers without code changes if Yahoo blocks scraping again.
+    stock_data_provider: str = "yfinance"
+    finnhub_api_key: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -79,6 +96,16 @@ class Settings(BaseSettings):
     @property
     def daily_summary_time(self) -> tuple[int, int]:
         h, m = self.daily_summary_time_et.split(":")
+        return int(h), int(m)
+
+    @property
+    def intraday_market_open(self) -> tuple[int, int]:
+        h, m = self.intraday_market_open_et.split(":")
+        return int(h), int(m)
+
+    @property
+    def intraday_market_close(self) -> tuple[int, int]:
+        h, m = self.intraday_market_close_et.split(":")
         return int(h), int(m)
 
     @property

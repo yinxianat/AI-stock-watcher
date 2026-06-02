@@ -10,8 +10,12 @@ Ticker         — catalog of symbols we know about (seeded + user-added).
 WatchlistItem  — many-to-many of users -> tickers.
 NotificationRule — per (user, ticker) rule(s) defining when to alert.
 DailyClose     — durable per-day closing price per ticker. SOURCE OF TRUTH
-                  for all price history; retention bounded by PRICE_HISTORY_LIFETIME
+                  for daily history; retention bounded by PRICE_HISTORY_LIFETIME
                   (default 365 days). Pruned daily by `app.jobs.cleanup`.
+IntradayPrice  — high-frequency price ticks (every INTRADAY_TICK_MINUTES, default
+                  10 min) during US market hours. Drives the tick-over-tick
+                  PRICE_CHANGE_RANGE notification path. Retention bounded by
+                  INTRADAY_RETENTION (default 7 days).
 PriceSnapshot  — derived "current view" per ticker, replaced each batch run.
                   `previous_price` is the prior TRADING DAY's close (sourced
                   from DailyClose), so `pct_change` is meaningful day-over-day.
@@ -222,6 +226,35 @@ class NotificationRule(Base):
 
 
 # ---------- Batch outputs ----------
+
+
+class IntradayPrice(Base):
+    """One row per (ticker, capture timestamp) intraday tick.
+
+    Written every INTRADAY_TICK_MINUTES (default 10) during US market hours
+    by `app.jobs.intraday.run_intraday_capture`. The notification path for
+    PRICE_CHANGE_RANGE rules compares each new tick against the prior tick
+    for the same ticker — tick-over-tick % change.
+
+    Retention is bounded by `INTRADAY_RETENTION` (default 7 days); the
+    cleanup job prunes older rows.
+    """
+
+    __tablename__ = "intraday_prices"
+    __table_args__ = (
+        Index("ix_intraday_prices_ticker_captured", "ticker_id", "captured_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticker_id: Mapped[int] = mapped_column(
+        ForeignKey("tickers.id", ondelete="CASCADE"), nullable=False
+    )
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+
+    ticker: Mapped[Ticker] = relationship()
 
 
 class DailyClose(Base):
