@@ -318,18 +318,25 @@ def run_intraday_capture(
         log.debug("Intraday capture skipped: outside market hours")
         return 0
 
+    log.info(
+        "Intraday capture starting (provider=%s, tick=%d min, force=%s)",
+        settings.stock_data_provider, settings.intraday_tick_minutes, force,
+    )
+
     own = db is None
     if own:
         db = get_session_factory()()
     try:
         tickers = _watched_tickers(db)
         if not tickers:
-            log.info("Intraday capture: no watched tickers")
+            log.warning("Intraday capture: no watched tickers — is anyone's watchlist populated?")
             return 0
 
+        log.info("Intraday capture: %d watched tickers to fetch", len(tickers))
         now = utcnow()
         attempted = 0
         captured = 0
+        failed_symbols: list[str] = []
         total_sent = 0
         first_events_all: list[tuple] = []
         for t in tickers:
@@ -338,8 +345,14 @@ def run_intraday_capture(
                 price = fetcher(t.symbol)
             except Exception as e:
                 log.warning("Intraday fetch failed for %s: %s", t.symbol, e)
+                failed_symbols.append(t.symbol)
                 price = None
             if price is None or price <= 0:
+                if price is None:
+                    failed_symbols.append(t.symbol) if t.symbol not in failed_symbols else None
+                    log.warning("Intraday fetch returned None for %s", t.symbol)
+                elif price <= 0:
+                    log.warning("Intraday fetch returned invalid price %.4f for %s", price, t.symbol)
                 continue
             prior_tick = _prior_tick_price(db, t.id, before=now)
             prev_day_close = _previous_day_close(db, t)
@@ -383,9 +396,14 @@ def run_intraday_capture(
                 summary,
             )
 
+        if failed_symbols:
+            log.warning(
+                "Intraday capture: %d/%d tickers FAILED to fetch: %s",
+                len(failed_symbols), attempted, ", ".join(failed_symbols),
+            )
         log.info(
-            "Intraday capture complete: %d/%d tickers captured, %d emails sent",
-            captured, attempted, total_sent,
+            "Intraday capture complete: captured=%d/%d, failed=%d, emails_sent=%d",
+            captured, attempted, len(failed_symbols), total_sent,
         )
         return total_sent
     finally:

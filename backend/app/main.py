@@ -100,17 +100,37 @@ async def lifespan(app: FastAPI):
         log.exception("STARTUP FAILED: error during DB schema initialisation")
         raise
 
-    scheduler = None
-    if settings.batch_jobs_enabled and settings.app_env != "test":
-        # Import here so tests don't accidentally start a scheduler thread.
-        try:
-            from app.jobs.scheduler import start_scheduler
+    # ---- Config dump: makes misconfigurations visible in deploy logs ----
+    log.info(
+        "Batch config: BATCH_JOBS_ENABLED=%s, BATCH_JOB_TIMES_ET=%s, "
+        "INTRADAY_INGEST_ENABLED=%s, INTRADAY_TICK_MINUTES=%s, "
+        "STOCK_DATA_PROVIDER=%s, APP_ENV=%s",
+        settings.batch_jobs_enabled,
+        settings.batch_job_times_et,
+        settings.intraday_ingest_enabled,
+        settings.intraday_tick_minutes,
+        settings.stock_data_provider,
+        settings.app_env,
+    )
 
-            scheduler = start_scheduler()
-            log.info("Batch scheduler started.")
-        except Exception:
-            log.exception("STARTUP FAILED: error starting batch scheduler")
-            raise
+    scheduler = None
+    if settings.app_env != "test":
+        if not settings.batch_jobs_enabled:
+            log.warning(
+                "BATCH_JOBS_ENABLED=false — scheduler is OFF. "
+                "No batch pipeline, intraday capture, heartbeat, or cleanup "
+                "jobs will run. Set BATCH_JOBS_ENABLED=true to enable."
+            )
+        else:
+            # Import here so tests don't accidentally start a scheduler thread.
+            try:
+                from app.jobs.scheduler import start_scheduler
+
+                scheduler = start_scheduler()
+                log.info("Batch scheduler started.")
+            except Exception:
+                log.exception("STARTUP FAILED: error starting batch scheduler")
+                raise
     app.state.scheduler = scheduler
 
     try:
