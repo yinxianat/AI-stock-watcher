@@ -36,7 +36,7 @@ def _run_stage(name: str, fn) -> None:
 
 def run_full_pipeline() -> None:
     """Run the three jobs in order. Each opens its own DB session."""
-    log.info("Pipeline start")
+    log.warning("[AUDIT] Pipeline start")
     try:
         _run_stage("ingest", run_ingest)
         _run_stage("compute", run_compute)
@@ -46,7 +46,7 @@ def run_full_pipeline() -> None:
         # so APScheduler doesn't mark the trigger as dead.
         log.error("Pipeline aborted")
     else:
-        log.info("Pipeline complete")
+        log.warning("[AUDIT] Pipeline complete")
 
 
 def start_scheduler() -> BackgroundScheduler:
@@ -146,4 +146,11 @@ def start_scheduler() -> BackgroundScheduler:
     total_jobs = len(sched.get_jobs())
     log.info("Scheduler starting with %d registered jobs", total_jobs)
     sched.start()
+    # Persist to log_entries DB so we can verify the scheduler actually started
+    # even if Railway stdout logs have rotated away.
+    log.warning(
+        "[AUDIT] Scheduler started with %d jobs: %s",
+        total_jobs,
+        ", ".join(j.id for j in sched.get_jobs()),
+    )
     return sched
