@@ -1,4 +1,6 @@
-"""Seed the ticker catalog with popular ETFs and stocks.
+"""Seed the ticker catalog with popular ETFs and stocks, and populate a
+demo watchlist for the first user so the intraday capture job has tickers
+to process immediately after initialisation.
 
 Run from project root:  python -m app.db.seed
 Idempotent: safe to re-run; called automatically from `lifespan()` on every
@@ -11,9 +13,9 @@ Guarantees:
   themselves (`is_seeded=False`) are never touched.
 * No row is ever deleted by seed — symbols dropped from the catalog stay in
   the DB so watchlist FK references remain valid.
-* No table other than `tickers` is touched. Users, watchlists, rules,
-  notification_logs, and daily_closes are all untouched, so seed is safe
-  to run on every redeploy without losing user profile data.
+* The demo watchlist items (DEMO_WATCHLIST symbols) are added to the first
+  user's watchlist only if that user exists and the item is not already
+  present — existing watchlist entries are never modified or removed.
 """
 
 from __future__ import annotations
@@ -23,9 +25,13 @@ import logging
 from sqlalchemy import select
 
 from app.db.database import get_engine, get_session_factory
-from app.models import Base, Ticker, TickerType
+from app.models import Base, Ticker, TickerType, User, WatchlistItem
 
 log = logging.getLogger(__name__)
+
+# Symbols added to the first user's watchlist on every startup so the
+# intraday capture job has something to fetch immediately.
+DEMO_WATCHLIST: list[str] = ["SPY", "QQQ", "AAPL", "MSFT"]
 
 ETFS: list[tuple[str, str]] = [
     ("SPY", "SPDR S&P 500 ETF Trust"),
@@ -107,6 +113,56 @@ STOCKS: list[tuple[str, str]] = [
 ]
 
 
+def _seed_demo_watchlist(db) -> int:
+    """Add DEMO_WATCHLIST tickers to the first user's watchlist.
+
+    Idempotent: skips any (user_id, ticker_id) pair that already exists.
+    Returns the number of WatchlistItem rows inserted.
+    """
+    first_user: User | None = db.execute(
+        select(User).order_by(User.id).limit(1)
+    ).scalar_one_or_none()
+    if first_user is None:
+        log.info("Seed watchlist: no users in DB yet — skipping demo watchlist")
+        return 0
+
+    # Fetch the ticker rows for the demo symbols in one query.
+    tickers: list[Ticker] = db.execute(
+        select(Ticker).where(Ticker.symbol.in_(DEMO_WATCHLIST))
+    ).scalars().all()
+    if not tickers:
+        log.warning("Seed watchlist: none of %s found in tickers table", DEMO_WATCHLIST)
+        return 0
+
+    # Build a set of ticker_ids already on this user's watchlist.
+    existing_ids: set[int] = {
+        tid for (tid,) in db.execute(
+            select(WatchlistItem.ticker_id).where(
+                WatchlistItem.user_id == first_user.id
+            )
+        ).all()
+    }
+
+    inserted = 0
+    for ticker in tickers:
+        if ticker.id in existing_ids:
+            continue
+        db.add(WatchlistItem(user_id=first_user.id, ticker_id=ticker.id))
+        inserted += 1
+
+    if inserted:
+        log.info(
+            "Seed watchlist: added %d demo ticker(s) to user %d (%s)",
+            inserted, first_user.id, first_user.email,
+        )
+    else:
+        log.info(
+            "Seed watchlist: demo tickers already present for user %d — nothing to add",
+            first_user.id,
+        )
+    return inserted
+
+
 def seed() -> int:
     """Sync the ticker catalog with the in-code seed list. Returns # inserted.
 
@@ -156,6 +212,8 @@ def seed() -> int:
             "Seed: %d inserted, %d updated, %d already current (catalog size=%d)",
             inserted, updated, len(catalog) - inserted - updated, len(catalog),
         )
+        _seed_demo_watchlist(db)
+        db.commit()
     finally:
         db.close()
     return inserted
