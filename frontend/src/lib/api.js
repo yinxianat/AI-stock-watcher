@@ -4,6 +4,15 @@
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const TOKEN_KEY = 'sw_session_token';
 
+export class ApiError extends Error  {
+  constructor(message, { status, detail } ={}) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -15,7 +24,7 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
-async function request(path, { method = 'GET', body, auth = false } = {}) {
+async function request(path, { method = 'GET', body, auth = false, signal } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (auth) {
     const t = getToken();
@@ -26,9 +35,15 @@ async function request(path, { method = 'GET', body, auth = false } = {}) {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal
   });
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401){
+    clearToken();
+    // notify the app so it can redirect
+    throw new ApiError("Session expired", {status: 401});
+  }
   if (!res.ok) {
     const msg = data.detail || res.statusText || 'Request failed';
     throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
@@ -48,7 +63,7 @@ export const api = {
 
   // tickers
   listTickers: () => request('/tickers'),
-  searchTickers: (q) => request(`/tickers/search?q=${encodeURIComponent(q)}`),
+  searchTickers: (q, opts) => request(`/tickers/search?q=${encodeURIComponent(q)}`,opts),
 
   // watchlist
   listWatchlist: () => request('/watchlist', { auth: true }),
