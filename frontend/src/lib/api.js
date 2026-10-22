@@ -1,17 +1,12 @@
 // Tiny fetch wrapper. Single place to attach the session token and
 // translate non-2xx responses into thrown Errors.
 
+import { ApiError, NetworkError, TimeoutError, errorFromResponse } from "../api/errors";
+
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const TOKEN_KEY = 'sw_session_token';
+const DEFAULT_TIMEOUT_MS = 15000;
 
-export class ApiError extends Error  {
-  constructor(message, { status, detail } ={}) {
-    super(message);
-    this.name = 'ApiError';
-    this.status = status;
-    this.detail = detail;
-  }
-}
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -24,29 +19,42 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
-async function request(path, { method = 'GET', body, auth = false, signal } = {}) {
+async function request(path, { method = 'GET', body, auth = false, signal, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (auth) {
     const t = getToken();
-    if (!t) throw new Error('Not signed in');
+    if (!t) throw new ApiError("Not signed in", {status:401, path, method});
     headers.Authorization = `Bearer ${t}`;
   }
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal
-  });
+  // Abort on whichever comes first: the caller's signal (e.g. search-as-you-type)
+  // or our timeout.
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    });
+  } catch(err){
+    // Caller cancelled on purpose: pass it through so the UI can ignore it.
+    if (err.name === "AbortError") throw err;
+    if (err.name === "TimeoutError") throw new TimeoutError(err, {path, method, timeoutMs});
+    // fetch only throws TypeError when no response arrived (offline, DNS, CORS).
+    if (err instanceof TypeError) throw new NetworkError(err, {path, method});
+    throw err;
+  }
+  
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
   if (res.status === 401){
     clearToken();
     // notify the app so it can redirect
-    throw new ApiError("Session expired", {status: 401});
+    throw new ApiError("Session expired", {status: 401, path, method});
   }
   if (!res.ok) {
-    const msg = data.detail || res.statusText || 'Request failed';
-    throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    throw errorFromResponse(res, data, {path, method})
   }
   return data;
 }
