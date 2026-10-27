@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
+import { formatCountdown } from '../api/errors.js';
 
 // Matches the backend's per-user cooldown between confirmation emails.
-const RESEND_COOLDOWN_S = 60;
+const RESEND_COOLDOWN_S = 30;
 
 export default function Settings() {
   const [me, setMe] = useState(null);
@@ -71,7 +72,8 @@ export default function Settings() {
       setMe(refreshed);
     } catch (err) {
       setFlash({ kind: 'err', msg: err.message });
-      if (err.status === 429) setCooldown(RESEND_COOLDOWN_S);
+      // Wait as long as the server asked (could be minutes after the hourly cap).
+      if (err.status === 429) setCooldown(err.retryAfterSeconds ?? RESEND_COOLDOWN_S);
     } finally {
       inFlight.current = false;
       setSending(false);
@@ -114,7 +116,7 @@ export default function Settings() {
               {sending
                 ? 'Sending…'
                 : cooldown > 0
-                  ? `Resend in ${cooldown}s`
+                  ? `Resend in ${formatCountdown(cooldown)}`
                   : 'Send confirmation'}
             </button>
           </div>

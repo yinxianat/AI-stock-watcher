@@ -148,8 +148,8 @@ export default function Help() {
           </li>
           <li>You can't use an address that another account already uses.</li>
           <li>
-            Confirmation and sign-in emails can be re-sent once a minute (up to
-            five times an hour) to protect your inbox.
+            To protect your inbox, confirmation and sign-in emails can be re-sent
+            every 30 seconds, up to five times in 10 minutes.
           </li>
         </ul>
 
@@ -178,7 +178,7 @@ export default function Help() {
           <summary>I didn't get my sign-in email</summary>
           <p>
             Check your spam or promotions folder. Links expire after 15 minutes;
-            you can request a new one after a minute.
+            you can request a new one after 30 seconds.
           </p>
         </details>
 

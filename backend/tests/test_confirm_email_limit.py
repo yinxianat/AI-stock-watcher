@@ -35,7 +35,7 @@ def test_rapid_clicks_send_only_one_email(signed_in):
     for _ in range(5):
         r = _request(c, auth)
         assert r.status_code == 429
-        assert 1 <= int(r.headers["Retry-After"]) <= 60
+        assert 1 <= int(r.headers["Retry-After"]) <= 30
 
     assert len(_confirmation_emails(c)) == 1
 
@@ -50,7 +50,7 @@ def test_can_resend_after_cooldown(signed_in):
     assert len(_confirmation_emails(c)) == 2
 
 
-def test_hourly_cap(signed_in):
+def test_burst_cap(signed_in):
     c, auth = signed_in["client"], signed_in["auth"]
     for _ in range(5):
         assert _request(c, auth).status_code == 204
@@ -58,7 +58,8 @@ def test_hourly_cap(signed_in):
 
     r = _request(c, auth)
     assert r.status_code == 429
-    assert int(r.headers["Retry-After"]) > 60
+    # Capped by the 10-minute burst window, not the 30s cooldown.
+    assert 30 < int(r.headers["Retry-After"]) <= 600
     assert len(_confirmation_emails(c)) == 5
 
 

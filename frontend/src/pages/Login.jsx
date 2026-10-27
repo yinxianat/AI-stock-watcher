@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api.js';
+import { formatCountdown } from '../api/errors.js';
 
-// Matches the backend's limit of one sign-in email per address per minute.
-const RESEND_COOLDOWN_S = 60;
+// Matches the backend's default wait between sign-in emails (EMAIL_RESEND_COOLDOWN_SECONDS).
+const RESEND_COOLDOWN_S = 30;
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -33,7 +34,8 @@ export default function Login() {
       setCooldown(RESEND_COOLDOWN_S);
     } catch (err) {
       setError(err.message);
-      if (err.status === 429) setCooldown(RESEND_COOLDOWN_S);
+      // Wait as long as the server asked (could be minutes after the hourly cap).
+      if (err.status === 429) setCooldown(err.retryAfterSeconds ?? RESEND_COOLDOWN_S);
     } finally {
       inFlight.current = false;
       setSubmitting(false);
@@ -45,7 +47,7 @@ export default function Login() {
     send();
   }
 
-  const waitLabel = cooldown > 0 ? `Send again in ${cooldown}s` : null;
+  const waitLabel = cooldown > 0 ? `Send again in ${formatCountdown(cooldown)}` : null;
 
   return (
     <div className="container">

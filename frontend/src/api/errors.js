@@ -69,10 +69,27 @@ export class ValidationError extends ApiError {
   }
 }
 
+// Human-readable wait, e.g. 45 → "45 seconds", 1313 → "22 minutes".
+export function formatWait(seconds) {
+  if (seconds < 60) return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  const minutes = Math.ceil(seconds / 60);
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+
+// Short countdown for buttons, e.g. 45 → "45s", 1313 → "21:53".
+export function formatCountdown(seconds) {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = String(seconds % 60).padStart(2, "0");
+  return `${m}:${s}`;
+}
+
 export class RateLimitError extends ApiError {
-  constructor(message, { status = 429, detail, path, method } = {}) {
+  constructor(message, { status = 429, detail, path, method, retryAfterSeconds = null } = {}) {
     super(message, { status, detail, path, method });
     this.name = "RateLimitError";
+    // From the Retry-After header; null if the server didn't say.
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -111,9 +128,11 @@ export function errorFromResponse(res, data, { path, method } = {}) {
       const raw = res.headers.get("Retry-After");
       const seconds = raw && /^\d+$/.test(raw) ? Number(raw) : null;
       message = seconds
-        ? `Too many requests. Try again in ${seconds} seconds.`
+        ? `Too many requests. Try again in ${formatWait(seconds)}.`
         : "Too many requests, please wait a moment";
-      errorObj = new RateLimitError(message, { status: errorStatus, detail, path, method });
+      errorObj = new RateLimitError(message, {
+        status: errorStatus, detail, path, method, retryAfterSeconds: seconds,
+      });
       break;
     }
     default:
