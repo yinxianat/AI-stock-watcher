@@ -71,7 +71,7 @@ label { display: block; margin: 12px 0 4px; color: var(--muted); font-size: 13px
 
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 10px; text-align: left; border-bottom: 1px solid var(--border); }
-th { color: var(--muted); font-weight: 600; font-size: 13px; }
+th { color: var(--muted); font-weight: 600; font-size: 13px; white-space: nowrap; }
 
 .flash {
   padding: 10px 14px;
@@ -134,6 +134,10 @@ main:focus { outline: none; }
 
 /* Action cells (Rules link, Remove/Delete buttons) sit at the right on desktop. */
 td.actions { text-align: right; white-space: nowrap; }
+td.actions a { margin-right: 12px; }
+
+/* Headings at the top of a card don't need extra space above them. */
+.card > :first-child { margin-top: 0; }
 
 /* ---------- Phones (≤ 600px) ---------- */
 @media (max-width: 600px) {
@@ -159,6 +163,8 @@ td.actions { text-align: right; white-space: nowrap; }
 
   /* Bigger tap targets (Apple/Google recommend ~44px). */
   button, input, select { min-height: 44px; }
+  /* iOS Safari zooms the page when focusing an input smaller than 16px. */
+  input, select, textarea { font-size: 16px; }
   button.link-button { min-height: 0; }
 
   /* Tables become one card per row, each cell labelled from data-label. */
@@ -237,6 +243,7 @@ td.actions { text-align: right; white-space: nowrap; }
   .watch-table .cell-price { grid-area: price; text-align: right; font-size: 17px; }
   .watch-table .cell-change { grid-area: change; text-align: right; font-weight: 600; }
   .watch-table .cell-flags { grid-area: flags; align-self: center; color: var(--muted); font-size: 12px; }
+  .watch-table td.cell-actions a { margin-right: 0; }
   .watch-table .cell-actions {
     grid-area: actions;
     display: flex;

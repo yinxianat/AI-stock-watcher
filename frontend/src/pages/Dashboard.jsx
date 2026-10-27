@@ -174,7 +174,7 @@ export default function Dashboard() {
                       <td className="cell-symbol"><strong>{w.ticker.symbol}</strong></td>
                       <td className="cell-name" title={w.ticker.name}>{w.ticker.name}</td>
                       <td className="cell-price">{tr ? `$${tr.price.toFixed(2)}` : '—'}</td>
-                      <td className="cell-change" style={{ color: tr && tr.pct_change >= 0 ? 'var(--ok)' : 'var(--danger)' }}>
+                      <td className="cell-change" style={tr ? { color: tr.pct_change >= 0 ? 'var(--ok)' : 'var(--danger)' } : undefined}>
                         {tr ? `${tr.pct_change >= 0 ? '+' : ''}${tr.pct_change.toFixed(2)}%` : '—'}
                       </td>
                       <td className="cell-flags">
