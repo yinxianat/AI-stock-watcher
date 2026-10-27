@@ -17,12 +17,19 @@ from app.schemas.schemas import (
     UserOut,
 )
 from app.services.auth import (
+    TooManySignInEmails,
     issue_session,
     request_magic_link,
     revoke_session,
     verify_magic_link,
 )
-from app.services.confirm_email import confirm_notify_email, request_notify_email_change
+from app.services.confirm_email import (
+    EmailInUse,
+    SameNotifyEmail,
+    TooManyConfirmationEmails,
+    confirm_notify_email,
+    request_notify_email_change,
+)
 from app.services.email_prefs import (
     is_unsubscribed,
     set_alerts_enabled,
@@ -40,7 +47,14 @@ def request_link(payload: LoginRequest, db: DBSession = Depends(get_db)):
     Always returns 204 — even if the email is unknown — so we don't leak
     which addresses are registered. Account creation is implicit on verify.
     """
-    request_magic_link(db, payload.email)
+    try:
+        request_magic_link(db, payload.email)
+    except TooManySignInEmails as e:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "A sign-in link was sent recently. Please check your inbox or try again shortly.",
+            headers={"Retry-After": str(e.retry_after_seconds)},
+        )
     return Response(status_code=204)
 
 
@@ -86,7 +100,24 @@ def change_notify_email(
     user: User = Depends(current_user),
     db: DBSession = Depends(get_db),
 ):
-    request_notify_email_change(db, user, payload.new_email)
+    try:
+        request_notify_email_change(db, user, payload.new_email)
+    except SameNotifyEmail:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "That's already your notification email.",
+        )
+    except EmailInUse:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "That email is already used by another account. Please choose a different one.",
+        )
+    except TooManyConfirmationEmails as e:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "A confirmation email was sent recently. Please check your inbox or try again shortly.",
+            headers={"Retry-After": str(e.retry_after_seconds)},
+        )
     return Response(status_code=204)
 
 
@@ -94,7 +125,13 @@ def change_notify_email(
 def confirm_change(
     payload: MagicLinkVerify, db: DBSession = Depends(get_db)
 ) -> UserOut:
-    user = confirm_notify_email(db, payload.token)
+    try:
+        user = confirm_notify_email(db, payload.token)
+    except EmailInUse:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "That email is now used by another account, so it can't be confirmed.",
+        )
     if user is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired token")
     return UserOut.model_validate(user)
