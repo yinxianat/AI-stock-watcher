@@ -5,10 +5,32 @@ export default function Settings() {
   const [me, setMe] = useState(null);
   const [newEmail, setNewEmail] = useState('');
   const [flash, setFlash] = useState(null);
+  // null while loading or if it failed to load; the toggle is hidden then.
+  const [alertsEnabled, setAlertsEnabled] = useState(null);
+  const [savingAlerts, setSavingAlerts] = useState(false);
+  const [alertsFlash, setAlertsFlash] = useState(null);
 
   useEffect(() => {
     api.me().then(setMe).catch(() => setMe(null));
+    api
+      .getEmailPreferences()
+      .then((p) => setAlertsEnabled(p.alerts_enabled))
+      .catch(() => setAlertsEnabled(null));
   }, []);
+
+  async function toggleAlerts(e) {
+    const enabled = e.target.checked;
+    setSavingAlerts(true);
+    setAlertsFlash(null);
+    try {
+      const p = await api.setAlertsEnabled(enabled);
+      setAlertsEnabled(p.alerts_enabled);
+    } catch (err) {
+      setAlertsFlash(err.message);
+    } finally {
+      setSavingAlerts(false);
+    }
+  }
 
   async function submit(e) {
     e.preventDefault();
@@ -59,6 +81,28 @@ export default function Settings() {
           </div>
         </form>
       </div>
+
+      {alertsEnabled !== null && (
+        <div className="card">
+          <h3>Alert emails</h3>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={alertsEnabled}
+              onChange={toggleAlerts}
+              disabled={savingAlerts}
+            />
+            <span>Email me when my stock alerts are triggered</span>
+          </label>
+          <p className="muted">
+            {alertsEnabled
+              ? 'Alerts are on. Each stock\'s rules decide when you get an email.'
+              : 'Alerts are off. Your rules are kept, but no alert emails will be sent until you turn this back on.'}{' '}
+            Sign-in links are always sent.
+          </p>
+          {alertsFlash && <div className="flash err">{alertsFlash}</div>}
+        </div>
+      )}
     </div>
   );
 }

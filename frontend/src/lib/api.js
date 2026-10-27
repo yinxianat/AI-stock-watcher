@@ -68,6 +68,10 @@ export const api = {
     request('/auth/notify-email', { method: 'POST', body: { new_email }, auth: true }),
   confirmNotifyEmail: (token) =>
     request('/auth/notify-email/confirm', { method: 'POST', body: { token } }),
+  getEmailPreferences: (opts) => request('/auth/email-preferences', { auth: true, ...opts }),
+  setAlertsEnabled: (alerts_enabled) =>
+    request('/auth/email-preferences', { method: 'PUT', body: { alerts_enabled }, auth: true }),
+  unsubscribe: (token) => request('/auth/unsubscribe', { method: 'POST', body: { token } }),
 
   // tickers
   listTickers: () => request('/tickers'),
@@ -79,7 +83,7 @@ export const api = {
   removeWatch: (id) => request(`/watchlist/${id}`, { method: 'DELETE', auth: true }),
 
   // rules
-  listRules: () => request('/rules', { auth: true }),
+  listRules: (opts) => request('/rules', { auth: true, ...opts }),
   upsertRule: (payload) => request('/rules', { method: 'POST', body: payload, auth: true }),
   deleteRule: (id) => request(`/rules/${id}`, { method: 'DELETE', auth: true }),
 

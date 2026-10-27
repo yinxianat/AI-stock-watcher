@@ -48,6 +48,11 @@ from app.models import (
 )
 from app.services.alerts import alert_event_first_notification
 from app.services.emailer import send_email
+from app.services.email_prefs import (
+    alert_email_footer,
+    alert_email_headers,
+    opted_out_user_ids,
+)
 
 log = logging.getLogger(__name__)
 
@@ -207,17 +212,22 @@ def _already_fired_recently(
 
 
 def _send_one_alert(
-    db: DBSession, user: User, ticker: Ticker, summary: str, frontend_url: str,
+    db: DBSession, user: User, ticker: Ticker, summary: str,
 ) -> bool:
     """Send the email and write the NotificationLog row. True iff the
     SMTP call didn't raise (so we should record it)."""
     body = (
         f"{summary}\n\n"
-        f"Manage your watchlist and rules: {frontend_url}\n"
-        "You're receiving this because you set a price-change rule for this ticker."
+        "You're receiving this because you set a price-change rule for this ticker.\n"
+        f"{alert_email_footer(user)}"
     )
     try:
-        send_email(user.notify_email, f"[AI Stock Watcher] {ticker.symbol}", body)
+        send_email(
+            user.notify_email,
+            f"[AI Stock Watcher] {ticker.symbol}",
+            body,
+            headers=alert_email_headers(user),
+        )
     except Exception as e:  # pragma: no cover
         log.warning("Intraday email send failed for user=%d: %s", user.id, e)
         return False
@@ -261,6 +271,7 @@ def _dispatch_range_alerts(
             select(NotificationLog.user_id).distinct()
         ).all()
     }
+    unsubscribed = opted_out_user_ids(db)
 
     settings = get_settings()
     sent_count = 0
@@ -278,6 +289,8 @@ def _dispatch_range_alerts(
         user = users.get(rule.user_id)
         if user is None or not user.notify_email_confirmed:
             continue
+        if user.id in unsubscribed:
+            continue
         if rule.pct_low is None or rule.pct_high is None:
             continue
         for prefix, baseline, pct in signals:
@@ -288,7 +301,7 @@ def _dispatch_range_alerts(
             if _already_fired_recently(db, user.id, ticker.id, prefix, captured_at):
                 continue
             summary = _summary_text(ticker, new_price, pct, prefix, baseline)
-            if not _send_one_alert(db, user, ticker, summary, settings.frontend_base_url):
+            if not _send_one_alert(db, user, ticker, summary):
                 continue
             sent_count += 1
             if user.id not in users_with_history:

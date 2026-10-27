@@ -49,6 +49,11 @@ class UpdateNotifyEmailRequest(BaseModel):
     new_email: EmailStr
 
 
+class EmailPreferences(BaseModel):
+    # False = the user unsubscribed from stock-alert emails.
+    alerts_enabled: bool
+
+
 # ---------- Ticker ----------
 
 
