@@ -40,7 +40,7 @@ def test_rapid_send_link_clicks_send_one_email(client):
     for _ in range(5):
         r = client.post("/auth/request-link", json={"email": "bob@example.com"})
         assert r.status_code == 429
-        assert 1 <= int(r.headers["Retry-After"]) <= 60
+        assert 1 <= int(r.headers["Retry-After"]) <= 30
     assert len(client.sent_emails) == 1
 
 
@@ -62,13 +62,14 @@ def test_can_request_new_link_after_cooldown(client):
     assert len(client.sent_emails) == 2
 
 
-def test_send_link_hourly_cap(client):
+def test_send_link_burst_cap(client):
     for _ in range(5):
         assert client.post("/auth/request-link", json={"email": "bob@example.com"}).status_code == 204
         _age_login_tokens(timedelta(seconds=61))
     r = client.post("/auth/request-link", json={"email": "bob@example.com"})
     assert r.status_code == 429
-    assert int(r.headers["Retry-After"]) > 60
+    # Capped by the 10-minute burst window, not the 30s cooldown.
+    assert 30 < int(r.headers["Retry-After"]) <= 600
 
 
 def test_limit_does_not_reveal_whether_account_exists(client):

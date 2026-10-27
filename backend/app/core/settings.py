@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     magic_link_ttl_minutes: int = 15
     email_confirm_ttl_minutes: int = 60
     session_ttl_days: int = 30
+    # Limits on user-triggered emails (sign-in links, address confirmations),
+    # per address/user: a short wait between sends, plus a cap on bursts.
+    # Defaults: 30s between emails, at most 5 per 10 minutes, so the longest
+    # wait anyone sees is under 10 minutes.
+    email_resend_cooldown_seconds: int = 30
+    email_burst_limit: int = 5
+    email_burst_window_minutes: int = 10
+
     # Unsubscribe links live in old emails, so they stay valid for a long time.
     unsubscribe_link_ttl_days: int = 365
 
