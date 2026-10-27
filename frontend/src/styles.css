@@ -309,3 +309,18 @@ label.toggle input {
   margin: 0;
   accent-color: var(--accent);
 }
+
+/* Disabled buttons (e.g. "Resend in 42s") must look and feel inactive. */
+button:disabled,
+button:disabled:hover {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--accent);
+}
+button.secondary:disabled,
+button.secondary:disabled:hover { background: transparent; }
+
+/* A link-styled button inside a sentence (e.g. "send it again"). */
+button.link-button.inline { margin-left: 0; font-size: inherit; min-height: 0; }
+button.link-button:disabled,
+button.link-button:disabled:hover { background: none; color: var(--muted); text-decoration: none; }

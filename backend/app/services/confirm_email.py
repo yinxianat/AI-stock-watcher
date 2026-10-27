@@ -11,30 +11,83 @@ from __future__ import annotations
 import secrets
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as DBSession
 
 from app.core.security import hash_session_token, issue_token, verify_token
 from app.core.settings import get_settings
 from app.models import ConfirmationToken, User, utcnow
 from app.services.emailer import send_email
+from app.services.send_limits import TooManyEmails, enforce_send_limit, window_start
 
 CONFIRM_PURPOSE = "confirm-notify-email"
 
+# Re-exported so the route can catch it without importing send_limits.
+TooManyConfirmationEmails = TooManyEmails
+
+
+class SameNotifyEmail(Exception):
+    """The new address is already the user's confirmed notification email."""
+
+
+class EmailInUse(Exception):
+    """Another account already uses this address."""
+
+
+def _used_by_another_account(db: DBSession, user_id: int, email: str) -> bool:
+    """True if a different user signs in with `email` or gets alerts at it.
+
+    Only *confirmed* notification addresses count, so nobody can block an
+    address just by typing it in and never confirming.
+    """
+    hit = db.execute(
+        select(User.id).where(
+            User.id != user_id,
+            or_(
+                User.email == email,
+                (User.notify_email == email) & User.notify_email_confirmed.is_(True),
+            ),
+        )
+    ).first()
+    return hit is not None
+
+
+def _check_send_limit(db: DBSession, user_id: int) -> None:
+    sent = db.execute(
+        select(ConfirmationToken.created_at)
+        .where(
+            ConfirmationToken.user_id == user_id,
+            ConfirmationToken.created_at >= window_start(),
+        )
+        .order_by(ConfirmationToken.created_at.desc())
+    ).scalars().all()
+    enforce_send_limit(sent)
+
 
 def request_notify_email_change(db: DBSession, user: User, new_email: str) -> str:
+    """Start a notification-address change by emailing a confirmation link.
+
+    Raises SameNotifyEmail, EmailInUse, or TooManyConfirmationEmails. Requesting
+    the address that is already pending confirmation re-sends the link.
+    """
     settings = get_settings()
-    payload = {"user_id": user.id, "new_email": new_email.lower(),
+    new_email = new_email.strip().lower()
+    if new_email == user.notify_email.lower() and user.notify_email_confirmed:
+        raise SameNotifyEmail()
+    if _used_by_another_account(db, user.id, new_email):
+        raise EmailInUse()
+    _check_send_limit(db, user.id)
+    payload = {"user_id": user.id, "new_email": new_email,
                "nonce": secrets.token_urlsafe(16)}
     token = issue_token(CONFIRM_PURPOSE, payload)
 
-    user.notify_email = new_email.lower()
+    user.notify_email = new_email
     user.notify_email_confirmed = False
 
     db.add(
         ConfirmationToken(
             user_id=user.id,
-            new_email=new_email.lower(),
+            new_email=new_email,
             token_hash=hash_session_token(token),
             expires_at=utcnow() + timedelta(minutes=settings.email_confirm_ttl_minutes),
         )
@@ -56,6 +109,8 @@ def request_notify_email_change(db: DBSession, user: User, new_email: str) -> st
 
 
 def confirm_notify_email(db: DBSession, token: str) -> User | None:
+    """Returns None for a bad/expired token. Raises EmailInUse if another
+    account claimed the address after the link was sent."""
     settings = get_settings()
     payload = verify_token(CONFIRM_PURPOSE, token, settings.email_confirm_ttl_minutes * 60)
     if not payload:
@@ -71,6 +126,8 @@ def confirm_notify_email(db: DBSession, token: str) -> User | None:
     user = db.get(User, row.user_id)
     if user is None:
         return None
+    if _used_by_another_account(db, user.id, row.new_email):
+        raise EmailInUse()
     user.notify_email = row.new_email
     user.notify_email_confirmed = True
     row.consumed_at = utcnow()

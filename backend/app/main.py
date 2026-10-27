@@ -183,6 +183,9 @@ def create_app() -> FastAPI:
         allow_credentials=False,  # tokens travel in Authorization header, not cookies
         allow_methods=["*"],
         allow_headers=["*"],
+        # Lets the SPA read how long to wait after a 429 (cross-origin
+        # responses hide non-standard headers unless exposed).
+        expose_headers=["Retry-After"],
     )
 
     @app.get("/healthz", tags=["meta"])

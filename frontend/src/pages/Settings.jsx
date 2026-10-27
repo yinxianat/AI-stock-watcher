@@ -1,10 +1,18 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
+
+// Matches the backend's per-user cooldown between confirmation emails.
+const RESEND_COOLDOWN_S = 60;
 
 export default function Settings() {
   const [me, setMe] = useState(null);
   const [newEmail, setNewEmail] = useState('');
   const [flash, setFlash] = useState(null);
+  const [sending, setSending] = useState(false);
+  // Seconds until "Send confirmation" can be used again (0 = ready).
+  const [cooldown, setCooldown] = useState(0);
+  // Blocks a fast double-click before React re-renders the disabled button.
+  const inFlight = useRef(false);
   // null while loading or if it failed to load; the toggle is hidden then.
   const [alertsEnabled, setAlertsEnabled] = useState(null);
   const [savingAlerts, setSavingAlerts] = useState(false);
@@ -17,6 +25,12 @@ export default function Settings() {
       .then((p) => setAlertsEnabled(p.alerts_enabled))
       .catch(() => setAlertsEnabled(null));
   }, []);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const id = setTimeout(() => setCooldown((s) => s - 1), 1000);
+    return () => clearTimeout(id);
+  }, [cooldown]);
 
   async function toggleAlerts(e) {
     const enabled = e.target.checked;
@@ -34,18 +48,33 @@ export default function Settings() {
 
   async function submit(e) {
     e.preventDefault();
+    // Ignore extra clicks (or Enter presses) while a request is in flight
+    // or during the cooldown.
+    if (inFlight.current || cooldown > 0) return;
+    const target = newEmail.trim().toLowerCase();
+    if (me.notify_email_confirmed && target === me.notify_email.toLowerCase()) {
+      setFlash({ kind: 'warn', msg: "That's already your notification email. Enter a different address to change it." });
+      return;
+    }
+    inFlight.current = true;
     setFlash(null);
+    setSending(true);
     try {
-      await api.changeNotifyEmail(newEmail.trim());
+      await api.changeNotifyEmail(target);
       setFlash({
         kind: 'ok',
         msg: 'Confirmation email sent. Click the link in your inbox to activate the new address.',
       });
       setNewEmail('');
+      setCooldown(RESEND_COOLDOWN_S);
       const refreshed = await api.me();
       setMe(refreshed);
     } catch (err) {
       setFlash({ kind: 'err', msg: err.message });
+      if (err.status === 429) setCooldown(RESEND_COOLDOWN_S);
+    } finally {
+      inFlight.current = false;
+      setSending(false);
     }
   }
 
@@ -66,7 +95,11 @@ export default function Settings() {
             <span style={{ color: 'var(--danger)' }}>(pending confirmation)</span>
           )}
         </p>
-        {flash && <div className={`flash ${flash.kind}`}>{flash.msg}</div>}
+        {flash && (
+          <div className={`flash ${flash.kind}`} role={flash.kind === 'ok' ? 'status' : 'alert'}>
+            {flash.msg}
+          </div>
+        )}
         <form onSubmit={submit}>
           <label>Change notification email</label>
           <input
@@ -77,7 +110,13 @@ export default function Settings() {
             required
           />
           <div style={{ marginTop: 12 }}>
-            <button>Send confirmation</button>
+            <button disabled={sending || cooldown > 0}>
+              {sending
+                ? 'Sending…'
+                : cooldown > 0
+                  ? `Resend in ${cooldown}s`
+                  : 'Send confirmation'}
+            </button>
           </div>
         </form>
       </div>

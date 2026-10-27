@@ -21,6 +21,7 @@ from app.core.settings import get_settings
 from app.models import LoginToken, Session, User, utcnow
 from app.services.alerts import alert_event_signup
 from app.services.emailer import send_email
+from app.services.send_limits import TooManyEmails, enforce_send_limit, window_start
 
 LOGIN_PURPOSE = "login"
 CONFIRM_PURPOSE = "confirm-email"
@@ -30,12 +31,25 @@ def _now():
     return utcnow()
 
 
+# Re-exported so the route can catch it without importing send_limits.
+TooManySignInEmails = TooManyEmails
+
+
 def request_magic_link(db: DBSession, email: str) -> str:
     """Create+persist a magic-link token, email it, return the plaintext token.
 
     Returning the token is convenient for tests; the API endpoint discards it.
+    Raises TooManySignInEmails if links were sent to this address too often.
+    The limit applies whether or not the address has an account, so it
+    doesn't reveal which emails are registered.
     """
     settings = get_settings()
+    sent = db.execute(
+        select(LoginToken.created_at)
+        .where(LoginToken.email == email.lower(), LoginToken.created_at >= window_start())
+        .order_by(LoginToken.created_at.desc())
+    ).scalars().all()
+    enforce_send_limit(sent)
     ttl_min = settings.magic_link_ttl_minutes
     payload = {"email": email.lower(), "nonce": secrets.token_urlsafe(16)}
     token = issue_token(LOGIN_PURPOSE, payload)
