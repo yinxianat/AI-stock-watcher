@@ -74,7 +74,7 @@ export const api = {
   searchTickers: (q, opts) => request(`/tickers/search?q=${encodeURIComponent(q)}`,opts),
 
   // watchlist
-  listWatchlist: () => request('/watchlist', { auth: true }),
+  listWatchlist: (opts) => request('/watchlist', { auth: true, ...opts }),
   addWatch: (payload) => request('/watchlist', { method: 'POST', body: payload, auth: true }),
   removeWatch: (id) => request(`/watchlist/${id}`, { method: 'DELETE', auth: true }),
 
@@ -84,5 +84,5 @@ export const api = {
   deleteRule: (id) => request(`/rules/${id}`, { method: 'DELETE', auth: true }),
 
   // trends
-  myTrends: () => request('/trends', { auth: true }),
+  myTrends: (opts) => request('/trends', { auth: true, ...opts }),
 };

@@ -1,4 +1,7 @@
-import { Link, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { ErrorBoundary } from 'react-error-boundary';
+import ErrorFallback from './components/ErrorFallback.jsx';
+import { logRenderError } from './lib/log.js';
 import { clearToken, getToken } from './lib/api.js';
 import Login from './pages/Login.jsx';
 import AuthCallback from './pages/AuthCallback.jsx';
@@ -22,16 +25,16 @@ function Header() {
           <>
             <Link to="/dashboard">Dashboard</Link>
             <Link to="/settings">Settings</Link>
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => {
                 clearToken();
                 nav('/');
               }}
             >
               Sign out
-            </a>
+            </button>
           </>
         ) : (
           <Link to="/">Sign in</Link>
@@ -42,9 +45,20 @@ function Header() {
 }
 
 export default function App() {
+  const location = useLocation();
   return (
     <>
+    <a href="#main-content" className="skip-link">
+      Skip to main content
+    </a>
       <Header />
+      <main id="main-content" tabIndex={-1}>
+      <ErrorBoundary
+        fallbackRender={(props) => <ErrorFallback {...props} takeFocus />}
+        resetKeys={[location.pathname]}
+        onError={logRenderError}
+        >
+      
       <Routes>
         <Route path="/" element={<Login />} />
         <Route path="/auth/callback" element={<AuthCallback />} />
@@ -54,6 +68,8 @@ export default function App() {
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      </ErrorBoundary>
+      </main>
     </>
   );
 }
