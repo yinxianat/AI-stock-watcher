@@ -2,43 +2,66 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api.js';
 import TickerAutocomplete from '../components/TickerAutocomplete.jsx';
+import { logRenderError } from '../lib/log.js';
+import { ErrorBoundary } from 'react-error-boundary';
+import ErrorFallback from '../components/ErrorFallback.jsx';
 
 export default function Dashboard() {
   const [watch, setWatch] = useState([]);
   const [trends, setTrends] = useState([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [reloadKey, setReloadKey] = useState(0);
 
-  async function load() {
-    try {
-      const [w, t] = await Promise.all([api.listWatchlist(), api.myTrends()]);
-      setWatch(w);
-      setTrends(t);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
   useEffect(() => {
+    const controller = new AbortController();
+    async function load(){
+      try{
+        const [w,t] = await Promise.all([api.listWatchlist({signal: controller.signal}), api.myTrends({signal:controller.signal})]);
+        if(controller.signal.aborted) return;
+        setWatch(w);
+        setTrends(t);
+        setError(null);
+        setLoading(false);
+      } catch (err){
+        if(err.name === "AbortError") return;
+        setError(err.message);
+        setLoading(false);
+      }
+    }
     load();
-  }, []);
+    return () => controller.abort()
+  }, [reloadKey]);
+  
+  const refresh = () => setReloadKey((prev) => prev+1);
 
   async function addByPick(t) {
-    await api.addWatch({ ticker_id: t.id });
-    load();
+    try{
+       await api.addWatch({ ticker_id: t.id });
+       refresh();
+    }catch(err){
+      setError(err.message);
+    }
   }
   async function addBySymbol(sym) {
     if (!sym) return;
-    await api.addWatch({ symbol: sym.toUpperCase() });
-    load();
+    try{
+        await api.addWatch({ symbol: sym.toUpperCase() });
+        refresh();
+    }catch(err){
+      setError(err.message);
+    }
   }
   async function remove(id) {
-    await api.removeWatch(id);
-    load();
+    try{
+        await api.removeWatch(id);
+        refresh()
+    }catch(err){
+        setError(err.message);
+    }
   }
 
-  const trendByTicker = Object.fromEntries(trends.map((t) => [t.ticker_id, t]));
+  const trendByTicker = Array.isArray(trends)?Object.fromEntries(trends.map((t) => [t.ticker_id, t])) :{};
 
   return (
     <div className="container">
@@ -48,7 +71,16 @@ export default function Dashboard() {
           Pick from the popular list or type any ticker to add it. Trend data
           is refreshed three times each US trading day.
         </p>
-        <TickerAutocomplete onPick={addByPick} />
+        <ErrorBoundary
+          fallbackRender={(props) => (
+            <ErrorFallback
+              {...props}
+              message="Search is unavailable right now" />
+          )}
+          onError={logRenderError}
+          >
+             <TickerAutocomplete onPick={addByPick} />
+          </ErrorBoundary>
         <p className="muted" style={{ marginTop: 12 }}>
           Need a ticker not in the search? Type it as a plain symbol:{' '}
           <FastAddSymbol onAdd={addBySymbol} />
