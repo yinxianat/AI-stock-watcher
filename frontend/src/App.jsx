@@ -10,6 +10,7 @@ import Rules from './pages/Rules.jsx';
 import Settings from './pages/Settings.jsx';
 import ConfirmEmail from './pages/ConfirmEmail.jsx';
 import Unsubscribe from './pages/Unsubscribe.jsx';
+import Help from './pages/Help.jsx';
 
 function RequireAuth({ children }) {
   return getToken() ? children : <Navigate to="/" replace />;
@@ -26,6 +27,7 @@ function Header() {
           <>
             <Link to="/dashboard">Dashboard</Link>
             <Link to="/settings">Settings</Link>
+            <Link to="/help">Help</Link>
             <button
               type="button"
               className="link-button"
@@ -38,7 +40,10 @@ function Header() {
             </button>
           </>
         ) : (
-          <Link to="/">Sign in</Link>
+          <>
+            <Link to="/help">How it works</Link>
+            <Link to="/">Sign in</Link>
+          </>
         )}
       </nav>
     </header>
@@ -65,6 +70,7 @@ export default function App() {
         <Route path="/auth/callback" element={<AuthCallback />} />
         <Route path="/auth/confirm-email" element={<ConfirmEmail />} />
         <Route path="/unsubscribe" element={<Unsubscribe />} />
+        <Route path="/help" element={<Help />} />
         <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />
         <Route path="/rules/:tickerId" element={<RequireAuth><Rules /></RequireAuth>} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
