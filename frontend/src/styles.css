@@ -324,3 +324,29 @@ button.secondary:disabled:hover { background: transparent; }
 button.link-button.inline { margin-left: 0; font-size: inherit; min-height: 0; }
 button.link-button:disabled,
 button.link-button:disabled:hover { background: none; color: var(--muted); text-decoration: none; }
+
+/* ---------- Help page ---------- */
+.help h4 { margin: 20px 0 6px; font-size: 15px; }
+.help ul, .help ol { padding-left: 20px; }
+.help li { margin: 4px 0; }
+.help code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 0.9em;
+}
+.help-toc { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; font-size: 14px; }
+.help-steps li { margin: 10px 0; }
+.help-terms dt { font-weight: 600; margin-top: 12px; }
+.help-terms dd { margin: 2px 0 0; color: var(--muted); }
+.help-terms dd ul { margin: 6px 0 0; }
+.help details {
+  border-top: 1px solid var(--border);
+  padding: 12px 0;
+}
+.help details:first-of-type { border-top: none; }
+.help summary { cursor: pointer; font-weight: 600; }
+.help details p, .help details ul { color: var(--muted); margin: 8px 0 0; }
+/* Section links shouldn't hide the heading under the top of the screen. */
+.help section { scroll-margin-top: 16px; }
