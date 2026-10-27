@@ -16,7 +16,13 @@ from app.core.settings import get_settings
 log = logging.getLogger(__name__)
 
 
-def send_email(to: str, subject: str, body_text: str, body_html: str | None = None) -> None:
+def send_email(
+    to: str,
+    subject: str,
+    body_text: str,
+    body_html: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> None:
     """Send a plain-text (and optionally HTML) email via configured SMTP.
 
     Catches and logs all SMTP/network errors so that a broken mail server
@@ -28,6 +34,8 @@ def send_email(to: str, subject: str, body_text: str, body_html: str | None = No
     msg["From"] = settings.smtp_from
     msg["To"] = to
     msg["Subject"] = subject
+    for name, value in (headers or {}).items():
+        msg[name] = value
     msg.set_content(body_text)
     if body_html:
         msg.add_alternative(body_html, subtype="html")

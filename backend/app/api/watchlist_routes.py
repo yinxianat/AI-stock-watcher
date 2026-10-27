@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session as DBSession
 
 from app.api.deps import current_user
+from app.core.settings import get_settings
 from app.db.database import get_db
 from app.jobs.on_demand import kickoff_ticker_ingest
-from app.models import Ticker, TickerType, User, WatchlistItem
+from app.models import (
+    NotificationEventType,
+    NotificationRule,
+    Ticker,
+    TickerType,
+    User,
+    WatchlistItem,
+)
 from app.schemas.schemas import AddWatchRequest, WatchlistItemOut
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
@@ -64,6 +72,7 @@ def add_watch(
 
     item = WatchlistItem(user_id=user.id, ticker_id=ticker.id)
     db.add(item)
+    _add_default_rule(db, user.id, ticker.id)
     db.commit()
     db.refresh(item)
 
@@ -82,6 +91,42 @@ def remove_watch(
     item = db.get(WatchlistItem, item_id)
     if item is None or item.user_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Watch item not found")
+    # Remove the stock's rules too, so a removed stock never sends alerts.
+    db.execute(
+        delete(NotificationRule).where(
+            NotificationRule.user_id == user.id,
+            NotificationRule.ticker_id == item.ticker_id,
+        )
+    )
     db.delete(item)
     db.commit()
     return Response(status_code=204)
+
+
+def _add_default_rule(db: DBSession, user_id: int, ticker_id: int) -> None:
+    """Give a newly watched stock a starter "moves more than ±N%" rule.
+
+    Skipped if the user already has any rule for this stock, or if the
+    default is turned off (DEFAULT_RULE_BAND_PCT=0).
+    """
+    band = get_settings().default_rule_band_pct
+    if band <= 0:
+        return
+    has_rule = db.execute(
+        select(NotificationRule.id).where(
+            NotificationRule.user_id == user_id,
+            NotificationRule.ticker_id == ticker_id,
+        )
+    ).first()
+    if has_rule is not None:
+        return
+    db.add(
+        NotificationRule(
+            user_id=user_id,
+            ticker_id=ticker_id,
+            event_type=NotificationEventType.PRICE_CHANGE_RANGE,
+            pct_low=-band,
+            pct_high=band,
+            enabled=True,
+        )
+    )

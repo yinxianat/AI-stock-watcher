@@ -9,6 +9,7 @@ from app.api.deps import current_user
 from app.db.database import get_db
 from app.models import User
 from app.schemas.schemas import (
+    EmailPreferences,
     LoginRequest,
     MagicLinkVerify,
     SessionResponse,
@@ -22,6 +23,11 @@ from app.services.auth import (
     verify_magic_link,
 )
 from app.services.confirm_email import confirm_notify_email, request_notify_email_change
+from app.services.email_prefs import (
+    is_unsubscribed,
+    set_alerts_enabled,
+    user_id_from_unsubscribe_token,
+)
 from app.services.signin_backfill import kickoff_signin_backfill
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -92,3 +98,32 @@ def confirm_change(
     if user is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired token")
     return UserOut.model_validate(user)
+
+
+@router.get("/email-preferences", response_model=EmailPreferences)
+def get_email_preferences(
+    user: User = Depends(current_user), db: DBSession = Depends(get_db)
+) -> EmailPreferences:
+    return EmailPreferences(alerts_enabled=not is_unsubscribed(db, user.id))
+
+
+@router.put("/email-preferences", response_model=EmailPreferences)
+def update_email_preferences(
+    payload: EmailPreferences,
+    user: User = Depends(current_user),
+    db: DBSession = Depends(get_db),
+) -> EmailPreferences:
+    set_alerts_enabled(db, user, payload.alerts_enabled)
+    return EmailPreferences(alerts_enabled=payload.alerts_enabled)
+
+
+@router.post("/unsubscribe", status_code=204, response_class=Response)
+def unsubscribe(payload: MagicLinkVerify, db: DBSession = Depends(get_db)):
+    """Unsubscribe link from an alert email. No sign-in needed: the signed
+    token identifies the user. Safe to call more than once."""
+    user_id = user_id_from_unsubscribe_token(payload.token)
+    user = db.get(User, user_id) if user_id is not None else None
+    if user is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired unsubscribe link")
+    set_alerts_enabled(db, user, False)
+    return Response(status_code=204)

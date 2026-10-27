@@ -82,9 +82,15 @@ def client(engine, monkeypatch) -> Iterator[TestClient]:
     # Capture outgoing emails.
     captured: list[dict] = []
 
-    def _capture(to, subject, body_text, body_html=None):
+    def _capture(to, subject, body_text, body_html=None, headers=None):
         captured.append(
-            {"to": to, "subject": subject, "body_text": body_text, "body_html": body_html}
+            {
+                "to": to,
+                "subject": subject,
+                "body_text": body_text,
+                "body_html": body_html,
+                "headers": headers or {},
+            }
         )
 
     monkeypatch.setattr(emailer, "send_email", _capture)

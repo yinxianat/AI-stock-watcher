@@ -1,18 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../lib/api.js';
-
-const EVENT_TYPES = [
-  { value: 'price_change_range', label: 'Price change outside band (%)', needsBand: true },
-  { value: 'week_low', label: 'Hits new weekly low' },
-  { value: 'week_high', label: 'Hits new weekly high' },
-  { value: 'month_low', label: 'Hits new monthly low' },
-  { value: 'month_high', label: 'Hits new monthly high' },
-  { value: 'quarter_low', label: 'Hits new quarterly low' },
-  { value: 'quarter_high', label: 'Hits new quarterly high' },
-  { value: 'year_low', label: 'Hits new yearly low' },
-  { value: 'year_high', label: 'Hits new yearly high' },
-];
+import { EVENT_TYPES } from '../lib/rules.js';
 
 export default function Rules() {
   const { tickerId } = useParams();
