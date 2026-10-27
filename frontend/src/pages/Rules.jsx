@@ -114,7 +114,7 @@ export default function Rules() {
         {rules.length === 0 ? (
           <p className="muted">No rules yet for this ticker.</p>
         ) : (
-          <table>
+          <table className="stack-table">
             <thead>
               <tr>
                 <th>Event</th>
@@ -126,10 +126,10 @@ export default function Rules() {
             <tbody>
               {rules.map((r) => (
                 <tr key={r.id}>
-                  <td>{EVENT_TYPES.find((e) => e.value === r.event_type)?.label || r.event_type}</td>
-                  <td>{r.pct_low != null ? `[${r.pct_low}%, ${r.pct_high}%]` : '—'}</td>
-                  <td>{r.enabled ? 'yes' : 'no'}</td>
-                  <td><button className="danger" onClick={() => remove(r.id)}>Delete</button></td>
+                  <td data-label="Event">{EVENT_TYPES.find((e) => e.value === r.event_type)?.label || r.event_type}</td>
+                  <td data-label="Range">{r.pct_low != null ? `[${r.pct_low}%, ${r.pct_high}%]` : '—'}</td>
+                  <td data-label="Enabled">{r.enabled ? 'yes' : 'no'}</td>
+                  <td className="actions"><button className="danger" onClick={() => remove(r.id)}>Delete</button></td>
                 </tr>
               ))}
             </tbody>
