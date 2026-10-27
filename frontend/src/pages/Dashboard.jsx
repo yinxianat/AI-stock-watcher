@@ -6,12 +6,62 @@ import { logRenderError } from '../lib/log.js';
 import { ErrorBoundary } from 'react-error-boundary';
 import ErrorFallback from '../components/ErrorFallback.jsx';
 
+const SORT_KEY = 'sw_watchlist_sort';
+const SORT_OPTIONS = [
+  { value: 'added', label: 'Date added' },
+  { value: 'movers', label: 'Biggest movers' },
+  { value: 'gainers', label: 'Top gainers' },
+  { value: 'losers', label: 'Top losers' },
+  { value: 'symbol', label: 'Symbol (A–Z)' },
+];
+
+// Stocks without trend data yet always go to the bottom for price-based sorts.
+function sortWatchlist(items, trendByTicker, sortBy) {
+  if (sortBy === 'added') return items;
+  if (sortBy === 'symbol') {
+    return [...items].sort((a, b) => a.ticker.symbol.localeCompare(b.ticker.symbol));
+  }
+  const score = {
+    movers: (pct) => -Math.abs(pct),
+    gainers: (pct) => -pct,
+    losers: (pct) => pct,
+  }[sortBy];
+  const pctOf = (w) => trendByTicker[w.ticker.id]?.pct_change;
+  return [...items].sort((a, b) => {
+    const pa = pctOf(a);
+    const pb = pctOf(b);
+    if (pa == null && pb == null) return 0;
+    if (pa == null) return 1;
+    if (pb == null) return -1;
+    return score(pa) - score(pb);
+  });
+}
+
+function readSavedSort() {
+  try {
+    const saved = localStorage.getItem(SORT_KEY);
+    return SORT_OPTIONS.some((o) => o.value === saved) ? saved : 'added';
+  } catch {
+    return 'added';
+  }
+}
+
 export default function Dashboard() {
   const [watch, setWatch] = useState([]);
   const [trends, setTrends] = useState([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
+  const [sortBy, setSortBy] = useState(readSavedSort);
+
+  function changeSort(value) {
+    setSortBy(value);
+    try {
+      localStorage.setItem(SORT_KEY, value);
+    } catch {
+      // Private browsing can block storage; sorting still works for this visit.
+    }
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -62,6 +112,7 @@ export default function Dashboard() {
   }
 
   const trendByTicker = Array.isArray(trends)?Object.fromEntries(trends.map((t) => [t.ticker_id, t])) :{};
+  const sortedWatch = sortWatchlist(watch, trendByTicker, sortBy);
 
   return (
     <div className="container">
@@ -95,7 +146,16 @@ export default function Dashboard() {
           {watch.length === 0 ? (
             <p className="muted">Nothing on your watchlist yet.</p>
           ) : (
-            <table>
+            <>
+            <div className="list-toolbar">
+              <label htmlFor="watch-sort">Sort by</label>
+              <select id="watch-sort" value={sortBy} onChange={(e) => changeSort(e.target.value)}>
+                {SORT_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
+            <table className="watch-table">
               <thead>
                 <tr>
                   <th>Symbol</th>
@@ -107,17 +167,17 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {watch.map((w) => {
+                {sortedWatch.map((w) => {
                   const tr = trendByTicker[w.ticker.id];
                   return (
                     <tr key={w.id}>
-                      <td><strong>{w.ticker.symbol}</strong></td>
-                      <td>{w.ticker.name}</td>
-                      <td>{tr ? `$${tr.price.toFixed(2)}` : '—'}</td>
-                      <td style={{ color: tr && tr.pct_change >= 0 ? 'var(--ok)' : 'var(--danger)' }}>
+                      <td className="cell-symbol"><strong>{w.ticker.symbol}</strong></td>
+                      <td className="cell-name" title={w.ticker.name}>{w.ticker.name}</td>
+                      <td className="cell-price">{tr ? `$${tr.price.toFixed(2)}` : '—'}</td>
+                      <td className="cell-change" style={{ color: tr && tr.pct_change >= 0 ? 'var(--ok)' : 'var(--danger)' }}>
                         {tr ? `${tr.pct_change >= 0 ? '+' : ''}${tr.pct_change.toFixed(2)}%` : '—'}
                       </td>
-                      <td>
+                      <td className="cell-flags">
                         {tr
                           ? [
                               tr.is_week_high && 'W-Hi',
@@ -133,15 +193,16 @@ export default function Dashboard() {
                               .join(' · ') || '—'
                           : '—'}
                       </td>
-                      <td style={{ textAlign: 'right' }}>
-                        <Link to={`/rules/${w.ticker.id}`}>Rules</Link>{' '}
-                        <button className="secondary" onClick={() => remove(w.id)}>Remove</button>
+                      <td className="actions cell-actions">
+                        <Link to={`/rules/${w.ticker.id}`} aria-label={`Rules for ${w.ticker.symbol}`}>Rules</Link>{' '}
+                        <button className="secondary" onClick={() => remove(w.id)} aria-label={`Remove ${w.ticker.symbol}`}>Remove</button>
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+            </>
           )}
         </div>
       )}

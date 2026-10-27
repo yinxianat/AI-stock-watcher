@@ -131,3 +131,120 @@ button.link-button {
 button.link-button:hover { background: none; text-decoration: underline; }
 
 main:focus { outline: none; }
+
+/* Action cells (Rules link, Remove/Delete buttons) sit at the right on desktop. */
+td.actions { text-align: right; white-space: nowrap; }
+
+/* ---------- Phones (≤ 600px) ---------- */
+@media (max-width: 600px) {
+  .container { padding: 16px 12px; }
+  .card { padding: 16px; }
+
+  /* Header: title on its own line, nav links wrap underneath. */
+  header.app-header {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px 16px;
+  }
+  header.app-header nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  header.app-header nav a,
+  button.link-button { margin-left: 0; }
+
+  /* Side-by-side fields and button groups stack vertically. */
+  .row { flex-direction: column; align-items: stretch; }
+
+  /* Bigger tap targets (Apple/Google recommend ~44px). */
+  button, input, select { min-height: 44px; }
+  button.link-button { min-height: 0; }
+
+  /* Tables become one card per row, each cell labelled from data-label. */
+  .stack-table thead { display: none; }
+  .stack-table tr {
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px 12px;
+    margin-bottom: 12px;
+  }
+  .stack-table td {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    text-align: right;
+  }
+  .stack-table td:last-child { border-bottom: none; }
+  .stack-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 13px;
+    text-align: left;
+  }
+  .stack-table td.actions {
+    justify-content: flex-end;
+    align-items: center;
+    gap: 16px;
+  }
+}
+
+/* ---------- Watchlist ---------- */
+.list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.list-toolbar label { margin: 0; }
+.list-toolbar select { width: auto; }
+
+/* Phones: each stock is a compact 3-line card instead of a 6-column row.
+     AAPL                $512.30
+     Apple Inc.           +1.84%
+     W-Hi · M-Hi    Rules  Remove   */
+@media (max-width: 600px) {
+  .watch-table thead { display: none; }
+  .watch-table tbody { display: block; }
+  .watch-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "symbol price"
+      "name   change"
+      "flags  actions";
+    column-gap: 12px;
+    row-gap: 2px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .watch-table td { padding: 0; border: none; }
+  .watch-table .cell-symbol { grid-area: symbol; font-size: 17px; }
+  .watch-table .cell-name {
+    grid-area: name;
+    color: var(--muted);
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .watch-table .cell-price { grid-area: price; text-align: right; font-size: 17px; }
+  .watch-table .cell-change { grid-area: change; text-align: right; font-weight: 600; }
+  .watch-table .cell-flags { grid-area: flags; align-self: center; color: var(--muted); font-size: 12px; }
+  .watch-table .cell-actions {
+    grid-area: actions;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 16px;
+    margin-top: 4px;
+  }
+  .watch-table .cell-actions button { min-height: 40px; padding: 4px 14px; }
+  .list-toolbar select { flex: 1; }
+}
