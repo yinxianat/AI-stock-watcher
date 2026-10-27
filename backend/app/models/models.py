@@ -225,6 +225,24 @@ class NotificationRule(Base):
     ticker: Mapped[Ticker] = relationship()
 
 
+class EmailOptOut(Base):
+    """A user who unsubscribed from stock-alert emails.
+
+    A row's presence means "don't send alerts"; deleting it resubscribes.
+    Sign-in links and email-confirmation emails are transactional and are
+    still sent. Kept as its own table (not a `users` column) because startup
+    only runs `create_all`, which creates missing tables but never adds
+    columns to existing ones.
+    """
+
+    __tablename__ = "email_opt_outs"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+
+
 # ---------- Batch outputs ----------
 
 

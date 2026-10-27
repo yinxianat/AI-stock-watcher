@@ -15,7 +15,6 @@ from datetime import timedelta
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session as DBSession
 
-from app.core.settings import get_settings
 from app.db.database import get_session_factory
 from app.models import (
     NotificationEventType,
@@ -29,6 +28,11 @@ from app.models import (
 )
 from app.services.alerts import alert_event_first_notification
 from app.services.emailer import send_email
+from app.services.email_prefs import (
+    alert_email_footer,
+    alert_email_headers,
+    opted_out_user_ids,
+)
 from app.services.trend import TrendResult, rule_triggers, summarize_event
 
 log = logging.getLogger(__name__)
@@ -57,7 +61,6 @@ def run_notify(db: DBSession | None = None) -> int:
     if own:
         db = get_session_factory()()
     try:
-        settings = get_settings()
         users = {u.id: u for u in db.execute(select(User)).scalars().all()}
         snaps = {
             s.ticker_id: s
@@ -68,6 +71,7 @@ def run_notify(db: DBSession | None = None) -> int:
             for t in db.execute(select(TrendAnalysis)).scalars().all()
         }
         tickers = {t.id: t for t in db.execute(select(Ticker)).scalars().all()}
+        unsubscribed = opted_out_user_ids(db)
 
         # Precompute which users have NEVER received a notification before.
         # Anything in this set that gets a notification this run is a
@@ -92,6 +96,8 @@ def run_notify(db: DBSession | None = None) -> int:
                 continue
             user = users.get(rule.user_id)
             if user is None or not user.notify_email_confirmed:
+                continue
+            if user.id in unsubscribed:
                 continue
             trend_row = trends.get((rule.user_id, rule.ticker_id))
             snap = snaps.get(rule.ticker_id)
@@ -123,11 +129,16 @@ def run_notify(db: DBSession | None = None) -> int:
             )
             body = (
                 f"{summary}\n\n"
-                f"Manage your watchlist and rules: {settings.frontend_base_url}\n"
-                "You're receiving this because you set a notification rule for this ticker."
+                "You're receiving this because you set a notification rule for this ticker.\n"
+                f"{alert_email_footer(user)}"
             )
             try:
-                send_email(user.notify_email, f"[AI Stock Watcher] {ticker.symbol}", body)
+                send_email(
+                    user.notify_email,
+                    f"[AI Stock Watcher] {ticker.symbol}",
+                    body,
+                    headers=alert_email_headers(user),
+                )
             except Exception as e:  # pragma: no cover
                 send_failures += 1
                 log.warning("Email send failed for user=%d: %s", user.id, e)

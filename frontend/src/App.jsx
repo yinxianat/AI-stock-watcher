@@ -9,6 +9,7 @@ import Dashboard from './pages/Dashboard.jsx';
 import Rules from './pages/Rules.jsx';
 import Settings from './pages/Settings.jsx';
 import ConfirmEmail from './pages/ConfirmEmail.jsx';
+import Unsubscribe from './pages/Unsubscribe.jsx';
 
 function RequireAuth({ children }) {
   return getToken() ? children : <Navigate to="/" replace />;
@@ -63,6 +64,7 @@ export default function App() {
         <Route path="/" element={<Login />} />
         <Route path="/auth/callback" element={<AuthCallback />} />
         <Route path="/auth/confirm-email" element={<ConfirmEmail />} />
+        <Route path="/unsubscribe" element={<Unsubscribe />} />
         <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />
         <Route path="/rules/:tickerId" element={<RequireAuth><Rules /></RequireAuth>} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
