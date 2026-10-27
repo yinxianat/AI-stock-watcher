@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../lib/api.js';
 
 // Matches the backend's limit of one sign-in email per address per minute.
@@ -50,7 +51,10 @@ export default function Login() {
     <div className="container">
       <div className="card">
         <h2>Sign in to AI Stock Watcher</h2>
-        <p className="muted">We'll email you a sign-in link. No password needed.</p>
+        <p className="muted">
+          We'll email you a sign-in link. No password needed.{' '}
+          <Link to="/help">New here? See how it works.</Link>
+        </p>
         {sent ? (
           <>
             <div className="flash ok" role="status">
