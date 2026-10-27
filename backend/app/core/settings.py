@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     magic_link_ttl_minutes: int = 15
     email_confirm_ttl_minutes: int = 60
     session_ttl_days: int = 30
+    # Unsubscribe links live in old emails, so they stay valid for a long time.
+    unsubscribe_link_ttl_days: int = 365
+
+    # Rule created automatically when a stock is added to a watchlist, so new
+    # stocks alert on big moves without the user setting anything up. Emails
+    # when the move is below -N% or above +N%. Set to 0 to disable.
+    default_rule_band_pct: float = 5.0
 
     # SMTP
     smtp_host: str = "localhost"

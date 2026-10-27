@@ -255,3 +255,57 @@ td.actions a { margin-right: 12px; }
   .watch-table .cell-actions button { min-height: 40px; padding: 4px 14px; }
   .list-toolbar select { flex: 1; }
 }
+
+/* ---------- Per-stock alert summary ---------- */
+.cell-alerts { font-size: 13px; }
+.alerts-none { color: var(--muted); font-style: italic; }
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (max-width: 600px) {
+  .watch-table tr {
+    grid-template-areas:
+      "symbol price"
+      "name   change"
+      "alerts alerts"
+      "flags  actions";
+  }
+  .watch-table .cell-alerts {
+    grid-area: alerts;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+  }
+}
+
+/* The dashboard table has 7 columns, so give it more room on desktop. */
+.container.wide { max-width: 1120px; }
+@media (min-width: 601px) {
+  .watch-table .cell-flags { white-space: nowrap; }
+  .watch-table .cell-alerts { min-width: 200px; }
+}
+
+/* ---------- Email preferences ---------- */
+.flash.warn { background: rgba(255, 193, 7, 0.12); color: #f5c451; }
+label.toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  color: var(--text);
+  font-size: 15px;
+  cursor: pointer;
+}
+label.toggle input {
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  margin: 0;
+  accent-color: var(--accent);
+}
