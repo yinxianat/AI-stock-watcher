@@ -8,6 +8,7 @@ validate inputs).
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
@@ -52,6 +53,17 @@ class UpdateNotifyEmailRequest(BaseModel):
 class EmailPreferences(BaseModel):
     # False = the user unsubscribed from stock-alert emails.
     alerts_enabled: bool
+
+
+class StoryPreferences(BaseModel):
+    # Age groups whose "why it moved" stories the parent wants; at least one.
+    age_groups: list[Literal["3-5", "6-9", "10-12", "13-17"]] = Field(min_length=1)
+
+
+class StoryPreferencesOut(StoryPreferences):
+    # False while the stories feature is switched off on the server, so the
+    # app can hide the setting.
+    stories_enabled: bool
 
 
 # ---------- Ticker ----------

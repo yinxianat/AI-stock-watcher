@@ -13,9 +13,13 @@ from app.schemas.schemas import (
     LoginRequest,
     MagicLinkVerify,
     SessionResponse,
+    StoryPreferences,
+    StoryPreferencesOut,
     UpdateNotifyEmailRequest,
     UserOut,
 )
+from app.core.settings import get_settings
+from app.services.articles.preferences import get_age_groups, set_age_groups
 from app.services.auth import (
     TooManySignInEmails,
     issue_session,
@@ -158,6 +162,28 @@ def update_email_preferences(
 ) -> EmailPreferences:
     set_alerts_enabled(db, user, payload.alerts_enabled)
     return EmailPreferences(alerts_enabled=payload.alerts_enabled)
+
+
+@router.get("/story-preferences", response_model=StoryPreferencesOut)
+def get_story_preferences(
+    user: User = Depends(current_user), db: DBSession = Depends(get_db)
+) -> StoryPreferencesOut:
+    return StoryPreferencesOut(
+        age_groups=get_age_groups(db, user.id),
+        stories_enabled=get_settings().ai_articles_enabled,
+    )
+
+
+@router.put("/story-preferences", response_model=StoryPreferencesOut)
+def update_story_preferences(
+    payload: StoryPreferences,
+    user: User = Depends(current_user),
+    db: DBSession = Depends(get_db),
+) -> StoryPreferencesOut:
+    return StoryPreferencesOut(
+        age_groups=set_age_groups(db, user, payload.age_groups),
+        stories_enabled=get_settings().ai_articles_enabled,
+    )
 
 
 @router.post("/unsubscribe", status_code=204, response_class=Response)

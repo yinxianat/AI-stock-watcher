@@ -393,6 +393,90 @@ class NotificationLog(Base):
     )
 
 
+
+class StockArticle(Base):
+    """AI-written "why it moved" story for one stock's move on one day.
+
+    Shared by every user whose alert fired for that move, so each story is
+    generated once: unique on (ticker, trading day, direction). Durable,
+    unlike the per-batch tables. `status` is pending → ready |
+    no_clear_cause | failed. `content` holds the checked facts and the
+    story as JSON; the numbers shown in emails come from the price columns
+    here, never from the AI.
+    """
+
+    __tablename__ = "stock_articles"
+    __table_args__ = (
+        UniqueConstraint(
+            "ticker_id", "trading_date", "direction", name="uq_article_ticker_day_dir"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticker_id: Mapped[int] = mapped_column(
+        ForeignKey("tickers.id", ondelete="CASCADE"), index=True
+    )
+    trading_date: Mapped[date_] = mapped_column(Date, nullable=False, index=True)
+    direction: Mapped[str] = mapped_column(String(4), nullable=False)  # "up" | "down"
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    move_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    prev_close: Mapped[float] = mapped_column(Float, nullable=False)
+    market_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+
+    ticker: Mapped[Ticker] = relationship()
+
+
+class StoryPreference(Base):
+    """Which age groups' stories a parent wants in their alerts.
+
+    No row means the default (ages 6-9). Only the group is stored, never a
+    child's age, name or other details.
+    """
+
+    __tablename__ = "story_preferences"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    age_groups: Mapped[str] = mapped_column(String(40), nullable=False)  # e.g. "3-5,13-17"
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, onupdate=utcnow
+    )
+
+
+class ArticleFollowup(Base):
+    """A user whose alert said "we're still looking", waiting for the story.
+
+    Sent as a reply to the original alert (`in_reply_to` is its Message-ID)
+    so mail apps show both in one thread. `status` is waiting → sent |
+    abandoned (no story found, or gave up).
+    """
+
+    __tablename__ = "article_followups"
+    __table_args__ = (
+        UniqueConstraint("article_id", "user_id", name="uq_followup_article_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    article_id: Mapped[int] = mapped_column(
+        ForeignKey("stock_articles.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    in_reply_to: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="waiting")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+
+
 # ---------- Observability ----------
 
 

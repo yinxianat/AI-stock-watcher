@@ -3,7 +3,7 @@ import { getToken } from '../lib/api.js';
 
 // User guide. Public, so people can read it before signing in. Keep the
 // numbers here in sync with the backend (check times, 3-hour repeat window,
-// default ±5% rule, sign-in link expiry).
+// default ±5% rule, sign-in link expiry, story age groups).
 export default function Help() {
   const signedIn = !!getToken();
 
@@ -20,6 +20,7 @@ export default function Help() {
           <a href="#start">Getting started</a>
           <a href="#dashboard">Your dashboard</a>
           <a href="#alerts">Alerts and rules</a>
+          <a href="#stories">Stock Stories for kids</a>
           <a href="#emails">Emails</a>
           <a href="#faq">Common questions</a>
         </nav>
@@ -131,6 +132,52 @@ export default function Help() {
         </p>
       </section>
 
+      <section className="card" id="stories" aria-labelledby="stories-h">
+        <h3 id="stories-h">Stock Stories for kids</h3>
+        <p>
+          Many parents want to talk with their kids about money and investing but
+          don't know where to start. When one of your stocks moves a lot compared
+          with the previous day's close, your alert email can include a short{' '}
+          <strong>Stock Story</strong>: what happened to the company, explained so
+          you can read it together.
+        </p>
+        <ul>
+          <li>
+            <strong>Written for your kids' ages.</strong> Choose one or more age
+            groups in {signedIn ? <Link to="/settings">Settings</Link> : 'Settings'}:
+            little ones (3–5), kids (6–9), tweens (10–12) or teens (13–17). If you
+            don't choose, stories are written for ages 6–9.
+          </li>
+          <li>
+            <strong>A money idea and a question.</strong> Each story ends with one
+            simple investing idea (like "prices go up and down every day") and a
+            question to ask your child.
+          </li>
+          <li>
+            <strong>For grown-ups too.</strong> A short summary, a quote from the
+            news and links to the original articles, so you can read more.
+          </li>
+          <li>
+            <strong>Based on trusted news.</strong> Stories only use reporting from a
+            small set of well-known financial news sites, and say so honestly when
+            there's no clear reason for a move.
+          </li>
+          <li>
+            <strong>Sometimes a few minutes later.</strong> If a story isn't ready
+            when your alert goes out, the alert says we're still looking, and the
+            story follows as a reply in the same email thread.
+          </li>
+        </ul>
+        <div className="flash warn" role="note">
+          <strong>Please read it yourself first.</strong> Stock Stories are written
+          by AI and haven't been checked by a person. AI can make mistakes, leave
+          things out or reflect bias, so read each story before sharing it with your
+          child and check the linked sources. Stories are for learning and family
+          conversation only. They're not financial advice and never a recommendation
+          to buy, sell or hold anything.
+        </div>
+      </section>
+
       <section className="card" id="emails" aria-labelledby="emails-h">
         <h3 id="emails-h">Emails</h3>
         <h4>Where alerts are sent</h4>
@@ -197,6 +244,16 @@ export default function Help() {
             <li>Your notification email is waiting for confirmation.</li>
             <li>The market was closed: alerts are only checked on US trading days.</li>
             <li>You already got the same alert for that stock in the last 3 hours.</li>
+          </ul>
+        </details>
+
+        <details>
+          <summary>Why didn't my alert include a Stock Story?</summary>
+          <ul>
+            <li>We couldn't find a clear reason for the move in trusted news. We'd rather say nothing than guess.</li>
+            <li>The alert was for a quick 10-minute jump. Stories explain the day's move, which usually takes longer to show up in the news.</li>
+            <li>The story didn't pass our safety checks, so we didn't send it.</li>
+            <li>We'd already written a lot of stories that day. The biggest moves get stories first.</li>
           </ul>
         </details>
 
