@@ -13,6 +13,7 @@ from __future__ import annotations
 import secrets
 from datetime import timedelta
 
+from fastapi import BackgroundTasks
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 
@@ -35,10 +36,15 @@ def _now():
 TooManySignInEmails = TooManyEmails
 
 
-def request_magic_link(db: DBSession, email: str) -> str:
+def request_magic_link(
+    db: DBSession, email: str, background_tasks: BackgroundTasks | None = None
+) -> str:
     """Create+persist a magic-link token, email it, return the plaintext token.
 
     Returning the token is convenient for tests; the API endpoint discards it.
+    With `background_tasks`, the email is sent after the response goes out, so
+    the caller isn't kept waiting on SMTP (a phone user who switches to their
+    mail app straight away would otherwise see the request cut off).
     Raises TooManySignInEmails if links were sent to this address too often.
     The limit applies whether or not the address has an account, so it
     doesn't reveal which emails are registered.
@@ -69,11 +75,11 @@ def request_magic_link(db: DBSession, email: str) -> str:
         f"It expires in {ttl_min} minutes.\n\n{link}\n\n"
         "If you didn't request this, you can ignore this email."
     )
-    try:
+    # send_email logs SMTP failures instead of raising; the user can retry.
+    if background_tasks is not None:
+        background_tasks.add_task(send_email, email, "Your AI Stock Watcher sign-in link", body)
+    else:
         send_email(email, "Your AI Stock Watcher sign-in link", body)
-    except Exception:  # pragma: no cover — don't leak SMTP errors
-        # We swallow because the token is already minted; user can retry.
-        pass
 
     return token
 
