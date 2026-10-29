@@ -13,6 +13,12 @@ on weekdays. For each watched ticker we:
    has confirmed their notify email, fire an alert if EITHER signal is
    outside the user's [pct_low, pct_high] band.
 
+Stories: when AI_ARTICLES_ENABLED, alerts aren't sent straight away. All
+alerts for the run are collected first; stocks whose day-over-day signal
+fired get an AI "why it moved" story (see app.services.articles), given up
+to AI_ARTICLE_WAIT_SECONDS; then every alert is sent, with its story if
+ready, or a "still looking" note and a threaded follow-up later.
+
 Dedup: each signal has its own 3-hour window — so users get one tick
 alert AND one daily-baseline alert per (user, ticker), not just one or the
 other. Implemented by tagging the NotificationLog summary with a stable
@@ -27,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -39,6 +46,7 @@ from app.models import (
     DailyClose,
     IntradayPrice,
     NotificationEventType,
+    StockArticle,
     NotificationLog,
     NotificationRule,
     Ticker,
@@ -47,12 +55,9 @@ from app.models import (
     utcnow,
 )
 from app.services.alerts import alert_event_first_notification
+from app.services.articles import service as articles
 from app.services.emailer import send_email
-from app.services.email_prefs import (
-    alert_email_footer,
-    alert_email_headers,
-    opted_out_user_ids,
-)
+from app.services.email_prefs import alert_email_headers, opted_out_user_ids
 
 log = logging.getLogger(__name__)
 
@@ -211,23 +216,33 @@ def _already_fired_recently(
     return row is not None
 
 
-def _send_one_alert(
-    db: DBSession, user: User, ticker: Ticker, summary: str,
-) -> bool:
+@dataclass
+class _Alert:
+    """A rule that fired this run. Sent after stories have had their chance."""
+
+    user: User
+    ticker: Ticker
+    signal: str
+    pct: float
+    price: float
+    prev_close: float | None
+    summary: str
+
+
+def _send_one_alert(db: DBSession, alert: _Alert, story: StockArticle | None) -> bool:
     """Send the email and write the NotificationLog row. True iff the
     SMTP call didn't raise (so we should record it)."""
-    body = (
-        f"{summary}\n\n"
-        "You're receiving this because you set a price-change rule for this ticker.\n"
-        f"{alert_email_footer(user)}"
-    )
+    user, ticker = alert.user, alert.ticker
+    subject = f"[AI Stock Watcher] {ticker.symbol}"
+    body, body_html, story_pending = articles.build_alert_email(db, user, alert.summary, story)
+    headers = alert_email_headers(user)
+    message_id = None
+    if story is not None:
+        # Lets a follow-up story show up in the same thread as this alert.
+        message_id = articles.new_message_id()
+        headers = {**headers, "Message-ID": message_id}
     try:
-        send_email(
-            user.notify_email,
-            f"[AI Stock Watcher] {ticker.symbol}",
-            body,
-            headers=alert_email_headers(user),
-        )
+        send_email(user.notify_email, subject, body, body_html=body_html, headers=headers)
     except Exception as e:  # pragma: no cover
         log.warning("Intraday email send failed for user=%d: %s", user.id, e)
         return False
@@ -235,22 +250,25 @@ def _send_one_alert(
         NotificationLog(
             user_id=user.id, ticker_id=ticker.id,
             event_type=NotificationEventType.PRICE_CHANGE_RANGE,
-            sent_to=user.notify_email, summary=summary,
+            sent_to=user.notify_email, summary=alert.summary,
         )
     )
+    if story_pending and message_id is not None:
+        articles.add_followup(db, story, user, message_id, subject)
     return True
 
 
-def _dispatch_range_alerts(
+def _detect_range_alerts(
     db: DBSession,
     ticker: Ticker,
     new_price: float,
     tick_pct: float | None,
     daily_pct: float | None,
+    prev_day_close: float | None,
     captured_at: datetime,
-) -> tuple[int, list[tuple[User, str, str]]]:
+) -> list[_Alert]:
     """Evaluate both signals against every PRICE_CHANGE_RANGE rule for
-    `ticker`. Returns (#sent, [(user, event, summary) for first-ever notifications]).
+    `ticker`. Returns the alerts to send; sends nothing.
     """
     rules = db.execute(
         select(NotificationRule).where(
@@ -260,22 +278,16 @@ def _dispatch_range_alerts(
         )
     ).scalars().all()
     if not rules:
-        return 0, []
+        return []
 
     user_ids = {r.user_id for r in rules}
     users = {
         u.id: u for u in db.execute(select(User).where(User.id.in_(user_ids))).scalars()
     }
-    users_with_history: set[int] = {
-        uid for (uid,) in db.execute(
-            select(NotificationLog.user_id).distinct()
-        ).all()
-    }
     unsubscribed = opted_out_user_ids(db)
 
     settings = get_settings()
-    sent_count = 0
-    first_events: list[tuple[User, str, str]] = []
+    alerts: list[_Alert] = []
 
     # Define the two independent signals to check.
     tick_label = f"over the last {settings.intraday_tick_minutes} minutes"
@@ -300,17 +312,61 @@ def _dispatch_range_alerts(
                 continue
             if _already_fired_recently(db, user.id, ticker.id, prefix, captured_at):
                 continue
-            summary = _summary_text(ticker, new_price, pct, prefix, baseline)
-            if not _send_one_alert(db, user, ticker, summary):
-                continue
-            sent_count += 1
-            if user.id not in users_with_history:
-                users_with_history.add(user.id)
-                first_events.append((
-                    user, NotificationEventType.PRICE_CHANGE_RANGE.value, summary,
-                ))
+            alerts.append(_Alert(
+                user=user, ticker=ticker, signal=prefix, pct=pct, price=new_price,
+                prev_close=prev_day_close,
+                summary=_summary_text(ticker, new_price, pct, prefix, baseline),
+            ))
 
-    return sent_count, first_events
+    return alerts
+
+
+def _stories_for(db: DBSession, alerts: list[_Alert]) -> dict[int, StockArticle]:
+    """Stories (by ticker id) for stocks whose day-over-day signal fired,
+    after waiting up to AI_ARTICLE_WAIT_SECONDS. Empty when stories are off
+    or anything goes wrong — alerts then go out without them."""
+    settings = get_settings()
+    if not settings.ai_articles_enabled:
+        return {}
+    candidates: dict[int, articles.Candidate] = {}
+    for a in alerts:
+        if a.signal == SIGNAL_DAILY and a.prev_close:
+            candidates.setdefault(
+                a.ticker.id, articles.Candidate(a.ticker, a.pct, a.price, a.prev_close),
+            )
+    if not candidates:
+        return {}
+    try:
+        stories = articles.ensure_articles(db, list(candidates.values()))
+        articles.wait_for(db, list(stories.values()), settings.ai_article_wait_seconds)
+        return stories
+    except Exception as e:  # noqa: BLE001
+        log.warning("Stories unavailable this run: %s", e)
+        db.rollback()
+        return {}
+
+
+def _send_alerts(
+    db: DBSession, alerts: list[_Alert], stories: dict[int, StockArticle],
+) -> tuple[int, list[tuple[User, str, str, str]]]:
+    """Returns (#sent, [(user, symbol, event, summary) for first-ever notifications])."""
+    users_with_history: set[int] = {
+        uid for (uid,) in db.execute(select(NotificationLog.user_id).distinct()).all()
+    }
+    sent = 0
+    first_events: list[tuple[User, str, str, str]] = []
+    for a in alerts:
+        # Stories explain the day's move, so only the daily signal gets one.
+        story = stories.get(a.ticker.id) if a.signal == SIGNAL_DAILY else None
+        if not _send_one_alert(db, a, story):
+            continue
+        sent += 1
+        if a.user.id not in users_with_history:
+            users_with_history.add(a.user.id)
+            first_events.append((
+                a.user, a.ticker.symbol, NotificationEventType.PRICE_CHANGE_RANGE.value, a.summary,
+            ))
+    return sent, first_events
 
 
 def run_intraday_capture(
@@ -343,6 +399,7 @@ def run_intraday_capture(
     if own:
         db = get_session_factory()()
     try:
+        articles.sweep(db)
         tickers = _watched_tickers(db)
         if not tickers:
             log.warning("Intraday capture: no watched tickers — is anyone's watchlist populated?")
@@ -355,8 +412,7 @@ def run_intraday_capture(
         captured = 0
         failed_symbols: list[str] = []
         captured_prices: list[str] = []  # "AAPL=$192.34" for the audit log
-        total_sent = 0
-        first_events_all: list[tuple] = []
+        alerts: list[_Alert] = []
         for t in tickers:
             attempted += 1
             try:
@@ -393,27 +449,24 @@ def run_intraday_capture(
                 # No baseline at all on either signal — first observation,
                 # nothing more to do for this ticker this tick.
                 continue
-            sent_n, first_events = _dispatch_range_alerts(
+            alerts.extend(_detect_range_alerts(
                 db, t, new_price=price,
                 tick_pct=tick_pct, daily_pct=daily_pct,
-                captured_at=now,
-            )
-            total_sent += sent_n
-            first_events_all.extend(first_events)
+                prev_day_close=prev_day_close, captured_at=now,
+            ))
 
+        stories = _stories_for(db, alerts)
+        total_sent, first_events_all = _send_alerts(db, alerts, stories)
         db.commit()
+        # A story that finished just after the wait found no follow-ups to
+        # send (they were committed above), so send them now.
+        for story in stories.values():
+            articles.send_waiting_followups(db, story)
 
         # Admin first-ever notification event — fire AFTER commit so SMTP
         # flakiness doesn't roll back the notification log.
-        for user, evt, summary in first_events_all:
-            alert_event_first_notification(
-                user.notify_email,
-                # Look up symbol via a fresh session is awkward here; the
-                # caller already wrote the summary which includes the symbol.
-                summary.split(" ", 1)[0],
-                evt,
-                summary,
-            )
+        for user, symbol, evt, summary in first_events_all:
+            alert_event_first_notification(user.notify_email, symbol, evt, summary)
 
         if failed_symbols:
             log.warning(
