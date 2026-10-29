@@ -100,6 +100,35 @@ class Settings(BaseSettings):
     # 800 req/day, 8 req/min — ample for ~50 watched tickers).
     twelvedata_api_key: str = ""
 
+    # ---- AI "why it moved" stories ---------------------------------------
+    # When a day-over-day PRICE_CHANGE_RANGE alert fires, an AI-written story
+    # (for parents to share with their kids) explains the move, based on
+    # news from AI_NEWS_DOMAINS. One story per (ticker, day, direction),
+    # shared by every user who gets that alert.
+    ai_articles_enabled: bool = False
+    anthropic_api_key: str = ""
+    ai_article_model: str = "claude-opus-5-5"
+    # How long the alert waits for its story. If it isn't ready by then the
+    # alert goes out with a "still looking" note and the story follows in a
+    # reply email when it's done.
+    ai_article_wait_seconds: int = 120
+    # Promised follow-ups older than this are given up on (e.g. the server
+    # restarted mid-generation).
+    ai_article_followup_give_up_minutes: int = 20
+    ai_article_max_concurrent: int = 4
+    # After the API rejects the key (or the account is out of credit), stop
+    # calling it for this long; alerts keep going out without stories.
+    ai_key_problem_pause_minutes: int = 30
+    # Cap on new stories per trading day; the biggest moves are done first.
+    ai_article_max_per_day: int = 30
+    # Comma-separated. News is searched only on these sites, and only their
+    # links appear in emails.
+    ai_news_domains: str = "finance.yahoo.com,reuters.com"
+    # News older than this many days doesn't count as today's reason.
+    ai_news_max_age_days: int = 2
+    # Whole-market benchmark, so a story can say "most stocks fell today".
+    ai_market_symbol: str = "SPY"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -110,6 +139,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def ai_news_domain_list(self) -> list[str]:
+        return [d.strip().lower() for d in self.ai_news_domains.split(",") if d.strip()]
 
     @property
     def effective_alert_receiver(self) -> str:

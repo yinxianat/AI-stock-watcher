@@ -102,6 +102,9 @@ def client(engine, monkeypatch) -> Iterator[TestClient]:
     monkeypatch.setattr(ce_mod, "send_email", _capture)
     monkeypatch.setattr(notify_mod, "send_email", _capture)
     monkeypatch.setattr(intraday_mod, "send_email", _capture)
+    from app.services.articles import service as articles_mod
+
+    monkeypatch.setattr(articles_mod, "send_email", _capture)
 
     app = create_app()
     with TestClient(app) as tc:
