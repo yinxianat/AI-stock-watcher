@@ -22,7 +22,8 @@ NOON_ET = int(datetime(2026, 10, 29, 16, 0, tzinfo=timezone.utc).timestamp())
 def _free_setup(monkeypatch):
     for k, v in {
         "AI_PROVIDER": "gemini", "AI_NEWS_SOURCE": "finnhub", "AI_ARTICLE_MODEL": "",
-        "AI_API_KEY": "gem-test-key", "FINNHUB_API_KEY": "fh-test-key",
+        "AI_API_KEY": "", "GEMINI_API_KEY": "gem-test-key", "FINNHUB_API_KEY": "fh-test-key",
+        "AI_FALLBACK_PROVIDER": "", "ANTHROPIC_API_KEY": "",
         "AI_FINNHUB_SOURCES": "Yahoo,CNBC", "AI_NEWS_MAX_AGE_DAYS": "2",
     }.items():
         monkeypatch.setenv(k, v)

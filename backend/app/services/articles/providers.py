@@ -108,9 +108,9 @@ class GeminiGenerator:
                 "responseJsonSchema": schema,
             },
         }
-        url = _GEMINI_URL.format(model=settings.story_model)
+        url = _GEMINI_URL.format(model=settings.model_for("gemini"))
         # Key in a header, not the URL, so it never shows up in logs.
-        headers = {"x-goog-api-key": settings.story_api_key}
+        headers = {"x-goog-api-key": settings.key_for("gemini")}
         r: httpx.Response | None = None
         for attempt in range(len(_RETRY_WAITS) + 1):
             try:
@@ -151,7 +151,6 @@ class GeminiGenerator:
         return text, usage
 
 
-def get_generator() -> JSONGenerator:
-    if get_settings().ai_provider == "anthropic":
-        return AnthropicGenerator()
-    return GeminiGenerator()
+def get_generator(provider: str | None = None) -> JSONGenerator:
+    provider = provider or get_settings().ai_provider
+    return AnthropicGenerator() if provider == "anthropic" else GeminiGenerator()

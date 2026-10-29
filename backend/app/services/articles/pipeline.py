@@ -16,6 +16,8 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
+import anthropic
+
 from app.core.settings import get_settings
 from app.services.articles.schemas import (
     ArticleRequest,
@@ -36,11 +38,20 @@ WriteFn = Callable[[ArticleRequest, list[Fact], bool], WriteResult]
 ReviewFn = Callable[[ArticleRequest, list[Fact], Story], ReviewResult]
 
 
+def failed_service(e: Exception) -> str | None:
+    """Which service's error this is, or None if it isn't a service error."""
+    if getattr(e, "service", None):
+        return e.service
+    if isinstance(e, anthropic.APIError):
+        return "Anthropic"
+    return None
+
+
 def key_problem_reason(e: Exception) -> str | None:
     """Plain-English reason if a service refused us because of its API key,
     billing or quota, else None (outages and short rate limits pass)."""
     status = getattr(e, "status_code", None)
-    service = getattr(e, "service", None) or get_settings().ai_provider.capitalize()
+    service = failed_service(e) or "AI service"
     text = str(e).lower()
     if status == 401 or (status == 400 and ("api key not valid" in text or "api_key_invalid" in text)):
         return f"the {service} API key was rejected (wrong, disabled or deleted)"
@@ -137,4 +148,5 @@ def run_pipeline(
         return GenerationResult(
             status="failed", model=settings.story_model, usage=usage,
             error=str(e)[:500], key_problem=key_problem_reason(e),
+            failed_service=failed_service(e),
         )

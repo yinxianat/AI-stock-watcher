@@ -133,3 +133,7 @@ class GenerationResult:
     # Set when the AI service refused us because of the key or billing (not
     # a passing outage). Only the admin is told; users just get no story.
     key_problem: str | None = None
+    # The service whose error failed this story ("Gemini", "Anthropic",
+    # "Finnhub"), so a backup provider can take over. None for content
+    # failures (no clear cause, safety checks).
+    failed_service: str | None = None

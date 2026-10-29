@@ -79,13 +79,13 @@ def _get_client() -> anthropic.Anthropic:
     global _client
     if _client is None:
         _client = anthropic.Anthropic(
-            api_key=get_settings().story_api_key, timeout=_TIMEOUT_S, max_retries=2,
+            api_key=get_settings().key_for("anthropic"), timeout=_TIMEOUT_S, max_retries=2,
         )
     return _client
 
 
 def create(**kwargs: Any):
-    model = get_settings().story_model
+    model = get_settings().model_for("anthropic")
     if model in _FALLBACK_MODELS:
         kwargs.update(betas=[_FALLBACK_BETA], fallbacks="default")
     return _get_client().beta.messages.create(
