@@ -135,6 +135,7 @@ def collect_summary() -> dict:
             select(StockArticle).where(StockArticle.created_at >= since)
         ).scalars().all()
         story_counts = Counter(a.status for a in stories)
+        story_setup, story_cost, story_models = _story_costs(settings, stories)
 
         # ---- DB row counts ----
         row_counts = {
@@ -204,6 +205,9 @@ def collect_summary() -> dict:
                 "by_status": dict(story_counts),
                 "input_tokens": sum(a.input_tokens for a in stories),
                 "output_tokens": sum(a.output_tokens for a in stories),
+                "by_model": story_models,
+                "cost_24h": story_cost,
+                "setup": story_setup,
             },
             "db_rows": row_counts,
             "system": {
@@ -327,15 +331,40 @@ def _format_text(s: dict) -> str:
     return "\n".join(lines)
 
 
+def _story_costs(settings, stories) -> tuple[list[str], float | None, dict[str, int]]:
+    """(setup lines incl. live key checks, estimated cost of these stories,
+    stories per model). Key checks only run when stories are on."""
+    from app.services.articles import costs, health
+
+    statuses = health.check_keys(report=True) if settings.ai_articles_enabled else {}
+    total: float | None = 0.0
+    for a in stories:
+        if not a.model:
+            continue
+        c = costs.token_cost(a.model, a.input_tokens, a.output_tokens, settings)
+        if c is not None and a.model.startswith("claude-") and settings.news_source_for("anthropic") == "web_search":
+            c += settings.ai_article_max_searches * costs.WEB_SEARCH_USD  # upper estimate
+        total = None if c is None or total is None else total + c
+    models = dict(Counter(a.model for a in stories if a.model))
+    return health.setup_lines(settings, statuses), total, models
+
+
 def _story_lines(st: dict) -> list[str]:
+    from app.services.articles.costs import money
+
+    setup = [f"  {line}" if line else "" for line in st["setup"]]
     if not st["enabled"]:
-        return ["  Off (AI_ARTICLES_ENABLED=false)"]
+        return setup
     by = st["by_status"]
-    return [
-        f"  Created (24h):     {st['created_24h']}",
+    used = ", ".join(f"{m} × {n}" for m, n in st["by_model"].items()) or "none"
+    return setup + [
+        "",
+        "  Last 24 hours",
+        f"  Created:           {st['created_24h']}  (by model: {used})",
         f"  Ready / no clear cause / failed / pending:  "
         f"{by.get('ready', 0)} / {by.get('no_clear_cause', 0)} / {by.get('failed', 0)} / {by.get('pending', 0)}",
         f"  Tokens in / out:   {st['input_tokens']:,} / {st['output_tokens']:,}",
+        f"  Estimated cost:    {money(st['cost_24h'])}",
     ]
 
 

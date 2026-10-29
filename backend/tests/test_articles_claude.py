@@ -66,7 +66,9 @@ def fake(monkeypatch):
     # Pin these: settings also read backend/.env, which may override defaults.
     monkeypatch.setenv("AI_PROVIDER", "anthropic")
     monkeypatch.setenv("AI_NEWS_SOURCE", "web_search")
-    monkeypatch.setenv("AI_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("AI_API_KEY", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("AI_FALLBACK_PROVIDER", "")
     monkeypatch.setenv("AI_ARTICLE_MODEL", "claude-haiku-5-5")
     monkeypatch.setenv("AI_ARTICLE_MAX_SEARCHES", "2")
     monkeypatch.setenv("AI_NEWS_DOMAINS", "finance.yahoo.com,reuters.com")
@@ -117,14 +119,22 @@ def test_research_reports_facts_and_every_url_the_search_saw(fake):
 def test_defaults_are_the_cheap_ones():
     from app.core.settings import Settings
     fields = Settings.model_fields
-    assert fields["ai_provider"].default == "gemini"
-    assert fields["ai_news_source"].default == "finnhub"
+    assert fields["ai_provider"].default == "anthropic"
+    assert fields["ai_news_source"].default == "web_search"
+    assert Settings(ai_article_model="").story_model == "claude-haiku-5-5"
     assert fields["ai_article_max_searches"].default == 2
     assert fields["ai_article_always_pct"].default == 5.0
     assert Settings(ai_provider="anthropic", ai_article_model="").story_model == "claude-haiku-5-5"
     assert Settings(ai_provider="gemini", ai_article_model="").story_model == "gemini-3.1-flash-lite"
     # A model from the other provider is ignored rather than sent to the wrong API.
     assert Settings(ai_provider="gemini", ai_article_model="claude-opus-5-5").story_model == "gemini-3.1-flash-lite"
+    # One model per provider: Claude uses Haiku, Gemini its cheapest.
+    both = Settings(ai_provider="gemini", ai_fallback_provider="anthropic", ai_article_model="claude-haiku-5-5")
+    assert both.provider_chain == ["gemini", "anthropic"]
+    assert (both.model_for("gemini"), both.model_for("anthropic")) == ("gemini-3.1-flash-lite", "claude-haiku-5-5")
+    # Per-provider keys win; AI_API_KEY only fills in for the main provider.
+    keys = Settings(ai_provider="gemini", ai_api_key="old", anthropic_api_key="sk-ant", gemini_api_key="")
+    assert (keys.key_for("gemini"), keys.key_for("anthropic")) == ("old", "sk-ant")
 
 
 def test_refusal_fallback_is_used_on_models_that_have_it(fake, monkeypatch):

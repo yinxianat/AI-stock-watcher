@@ -58,20 +58,45 @@ _TREND_DAYS = 30
 _KEY_ALERT_REPEAT = timedelta(hours=6)
 
 
-def _generate_with_ai(req: ArticleRequest) -> GenerationResult:
-    """Research → write → review with the configured provider and news source."""
+def _run_with(provider: str, req: ArticleRequest) -> GenerationResult:
+    """Research → write → review with one provider and its news source."""
     from functools import partial
 
     from app.services.articles import claude, news, stages
     from app.services.articles.pipeline import run_pipeline
     from app.services.articles.providers import get_generator
 
-    gen = get_generator()
+    gen = get_generator(provider)
     research = (
-        claude.research if get_settings().story_news_source == "web_search"
+        claude.research if get_settings().news_source_for(provider) == "web_search"
         else partial(news.research_from_news, gen)
     )
     return run_pipeline(req, research, partial(stages.write, gen), partial(stages.review, gen))
+
+
+def _generate_with_ai(req: ArticleRequest) -> GenerationResult:
+    """Main provider first; if it's down, out of quota or its key is
+    rejected, the backup (AI_FALLBACK_PROVIDER) writes the story and the
+    admin is told. A story the AI rejects on content (no clear cause, safety
+    checks) isn't retried elsewhere: that's the right answer, not a failure."""
+    settings = get_settings()
+    result = GenerationResult(status="failed", error="no AI provider available (missing key or paused)")
+    for i, provider in enumerate(settings.provider_chain):
+        if not settings.key_for(provider) or _is_paused(provider):
+            continue
+        result = _run_with(provider, req)
+        result.model = settings.model_for(provider)
+        failed = (result.failed_service or "").lower()
+        if failed != provider:
+            if failed == "finnhub" and result.key_problem:
+                report_key_problem("finnhub", result.key_problem)
+            elif result.usage.input_tokens > 0:
+                _service_works(provider)
+            return result
+        # This provider is the problem; tell the admin, then try the backup.
+        report_key_problem(provider, result.key_problem or f"unavailable ({result.error})",
+                           pause=bool(result.key_problem))
+    return result
 
 
 # Swappable in tests.
@@ -114,90 +139,128 @@ _futures: dict[int, Future] = {}
 _lock = threading.Lock()
 
 
-_paused_until: datetime | None = None
-_key_alerted_at: datetime | None = None
+# Per-service problem state: "gemini", "anthropic" or "finnhub".
+_paused_until: dict[str, datetime] = {}
+_alerted_at: dict[str, datetime] = {}
+_NAMES = {"gemini": "Gemini", "anthropic": "Anthropic", "finnhub": "Finnhub"}
+_FIX = {
+    "gemini": ("aistudio.google.com/apikey (quota: aistudio.google.com/rate-limit)", "GEMINI_API_KEY"),
+    "anthropic": ("console.anthropic.com (API Keys, Billing / Limits)", "ANTHROPIC_API_KEY"),
+    "finnhub": ("finnhub.io (Dashboard → API key)", "FINNHUB_API_KEY"),
+}
+
+
+def _is_paused(service: str) -> bool:
+    with _lock:
+        until = _paused_until.get(service)
+    return until is not None and utcnow() < until
+
+
+def _usable_providers() -> list[str]:
+    settings = get_settings()
+    return [p for p in settings.provider_chain if settings.key_for(p) and not _is_paused(p)]
 
 
 def stories_paused() -> bool:
-    with _lock:
-        return _paused_until is not None and utcnow() < _paused_until
+    """No provider can run, or the news they need is unavailable."""
+    settings = get_settings()
+    usable = _usable_providers()
+    needs_finnhub = any(settings.news_source_for(p) == "finnhub" for p in usable)
+    finnhub_ok = bool(settings.finnhub_api_key.strip()) and not _is_paused("finnhub")
+    return not usable or (needs_finnhub and not finnhub_ok)
 
 
-def report_key_problem(reason: str) -> None:
-    """Pause stories and tell the admin. Users aren't affected: their alerts
-    go out as plain alerts. Never raises."""
-    global _paused_until, _key_alerted_at
+def report_key_problem(service: str, reason: str, pause: bool = True) -> None:
+    """Tell the admin (only the admin) that a service has a problem, and,
+    for key/quota problems, stop using it for AI_KEY_PROBLEM_PAUSE_MINUTES.
+    If a backup provider can take over, stories keep going on it. At most
+    one email per service every few hours. Never raises."""
     settings = get_settings()
     now = utcnow()
     minutes = settings.ai_key_problem_pause_minutes
     with _lock:
-        _paused_until = now + timedelta(minutes=minutes)
-        due = _key_alerted_at is None or now - _key_alerted_at >= _KEY_ALERT_REPEAT
+        if pause:
+            _paused_until[service] = now + timedelta(minutes=minutes)
+        last = _alerted_at.get(service)
+        due = last is None or now - last >= _KEY_ALERT_REPEAT
         if due:
-            _key_alerted_at = now
-    log.warning("AI stories paused for %d min: %s", minutes, reason)
+            _alerted_at[service] = now
+    name = _NAMES.get(service, service)
+    backup = next(
+        (p for p in _usable_providers() if p != service), None,
+    ) if service in ("gemini", "anthropic") else None
+    log.warning("AI stories: %s problem (%s); backup=%s", name, reason, backup or "none")
     if not due:
         return
-    if "finnhub" in reason.lower():
-        where, var = "finnhub.io (Dashboard → API key)", "FINNHUB_API_KEY"
-    elif settings.ai_provider == "gemini":
-        where, var = "aistudio.google.com/apikey (and your quota at aistudio.google.com/rate-limit)", "AI_API_KEY"
+    where, var = _FIX.get(service, ("the provider's dashboard", "its API key"))
+    if backup:
+        from app.services.articles import costs
+
+        per_story = costs.story_estimate(backup, settings)
+        per_day = None if per_story is None else per_story * costs.max_stories_per_day(settings)
+        subject = f"AI stories: {name} problem, using {_NAMES[backup]} backup"
+        impact = (f"Stories keep working on the backup ({_NAMES[backup]}, "
+                  f"{settings.model_for(backup)}). Users notice nothing.\n"
+                  f"Cost while the backup is in use: about {costs.money(per_story)} per story, "
+                  f"at most {costs.money(per_day)} per day.")
     else:
-        where, var = "console.anthropic.com (API Keys, Billing / Limits)", "AI_API_KEY"
+        subject = f"AI stories paused: {name} problem"
+        impact = ("Price alerts are still sent as usual, just without the "
+                  "\"why it moved\" story. Nobody is told about the problem.")
+    retry = (f"{name} is retried automatically after {minutes} minutes" if pause
+             else f"{name} is tried again for the next story")
     notify_admin(
         "ai_key_problem",
-        "AI stories paused: API key or quota problem",
-        f"Problem: {reason}.\n"
-        f"Provider: {settings.ai_provider} ({settings.story_model}), news: {settings.story_news_source}.\n\n"
-        "What users see: price alerts are still sent as usual, just without "
-        "the \"why it moved\" story. Nobody is told about the problem.\n\n"
-        f"To fix: check the key at {where}. If you make a new key, update {var} "
-        "in Railway Variables (or backend/.env locally); Railway restarts the "
-        "service by itself.\n\n"
-        f"Stories retry automatically every {minutes} minutes. You'll get a "
-        "reminder every 6 hours while the problem lasts, and an email when "
-        "stories work again.",
+        subject,
+        f"Problem: {name}: {reason}.\n\n"
+        f"What users see: {impact}\n\n"
+        f"To fix: check {where}. If you make a new key, update {var} in Railway "
+        "Variables (or backend/.env locally); Railway restarts the service by itself.\n\n"
+        f"{retry}. You'll get a reminder every 6 hours while the problem lasts, "
+        f"and an email when {name} works again.",
         channel=AlertChannel.ERROR,
     )
 
 
-def _key_works() -> None:
-    """The API answered, so any earlier key problem is fixed."""
-    global _paused_until, _key_alerted_at
+def _service_works(service: str) -> None:
+    """The service answered, so any earlier problem with it is fixed."""
     with _lock:
-        was_broken = _key_alerted_at is not None
-        _paused_until = _key_alerted_at = None
+        was_broken = _alerted_at.pop(service, None) is not None
+        _paused_until.pop(service, None)
     if was_broken:
-        log.warning("AI stories working again")
+        name = _NAMES.get(service, service)
+        log.warning("AI stories: %s working again", name)
         notify_admin(
             "ai_key_recovered",
-            "AI stories working again",
-            "The AI service accepted the key again, so new price alerts "
-            "include stories again.",
+            f"AI stories: {name} working again",
+            f"{name} is answering again, so new stories use it as before.",
         )
 
 
-def _missing_key() -> str | None:
-    """What's missing for stories to run, if anything."""
+def _missing_keys() -> list[tuple[str, str]]:
+    """(service, reason) for every key the configured setup needs but lacks."""
     settings = get_settings()
-    if not settings.story_api_key:
-        return f"AI_API_KEY is not set (AI_PROVIDER={settings.ai_provider})"
-    if settings.story_news_source == "finnhub" and not settings.finnhub_api_key.strip():
-        return "FINNHUB_API_KEY is not set (needed for Finnhub news)"
-    return None
+    missing = []
+    for p in settings.provider_chain:
+        if not settings.key_for(p):
+            role = "main" if p == settings.ai_provider else "backup"
+            missing.append((p, f"{_FIX[p][1]} is not set ({role} AI provider)"))
+    needs_finnhub = any(settings.news_source_for(p) == "finnhub" for p in settings.provider_chain)
+    if needs_finnhub and not settings.finnhub_api_key.strip():
+        missing.append(("finnhub", "FINNHUB_API_KEY is not set (needed for news)"))
+    return missing
 
 
 def check_config() -> None:
-    """At startup: stories on but a key missing → tell the admin straight away."""
-    settings = get_settings()
-    if not settings.ai_articles_enabled:
-        return
-    if settings.ai_article_model.strip() and settings.ai_article_model.strip() != settings.story_model:
-        log.warning("AI_ARTICLE_MODEL=%s doesn't match AI_PROVIDER=%s; using %s",
-                    settings.ai_article_model, settings.ai_provider, settings.story_model)
-    missing = _missing_key()
-    if missing:
-        report_key_problem(missing)
+    """At startup: test every key (problems are emailed at once) and email
+    the setup and its cost if anything changed. See `health`."""
+    from app.services.articles import health
+
+    if get_settings().app_env == "test":
+        health.startup_check()
+    else:
+        # Network checks: don't hold up startup (Railway's health check).
+        threading.Thread(target=health.startup_check, name="ai-setup-check", daemon=True).start()
 
 
 def _get_executor() -> Executor:
@@ -259,10 +322,6 @@ def _generate_and_store(article_id: int, req: ArticleRequest) -> None:
             })
         db.commit()
         log.info("Story %s %s: %s", req.symbol, req.direction, result.status)
-        if result.key_problem:
-            report_key_problem(result.key_problem)
-        elif result.usage.input_tokens > 0:
-            _key_works()
         send_waiting_followups(db, row)
     except Exception as e:  # noqa: BLE001
         log.warning("Storing story %d failed: %s", article_id, e)
@@ -314,9 +373,9 @@ def ensure_articles(db: DBSession, candidates: list[Candidate]) -> dict[int, Sto
     settings = get_settings()
     if not settings.ai_articles_enabled or not candidates:
         return {}
-    missing = _missing_key()
-    if missing:
-        report_key_problem(missing)
+    for service, reason in _missing_keys():
+        report_key_problem(service, reason)
+    if stories_paused():
         return {}
     # While paused, today's finished stories are still used; no new ones.
     paused = stories_paused()

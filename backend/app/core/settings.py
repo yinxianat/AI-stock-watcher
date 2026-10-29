@@ -106,19 +106,28 @@ class Settings(BaseSettings):
     # news from AI_NEWS_DOMAINS. One story per (ticker, day, direction),
     # shared by every user who gets that alert.
     ai_articles_enabled: bool = False
-    # Which AI writes the stories: "gemini" (Google; has a free tier) or
-    # "anthropic" (Claude). AI_API_KEY is that provider's key.
-    ai_provider: Literal["gemini", "anthropic"] = "gemini"
-    ai_api_key: str = ""
-    # Older name for the Claude key; still used when AI_PROVIDER=anthropic
-    # and AI_API_KEY is blank.
+    # Which AI writes the stories: "anthropic" (Claude) or "gemini" (Google).
+    # The backup is used for a story when the main one is down, out of quota
+    # or its key is rejected (the admin is emailed). Blank = no backup.
+    # Note: Gemini's API terms bar services likely to be used by under-18s,
+    # so Claude is the default for these kids' stories.
+    ai_provider: Literal["gemini", "anthropic"] = "anthropic"
+    ai_fallback_provider: Literal["", "gemini", "anthropic"] = ""
+    gemini_api_key: str = ""
     anthropic_api_key: str = ""
-    # Blank = the provider's cheapest model (see `story_model`). A model from
-    # the other provider is ignored, so switching AI_PROVIDER can't break.
+    # Older single-key setting: used as the main provider's key when that
+    # provider's own key above is blank.
+    ai_api_key: str = ""
+    # Models, comma-separated, at most one per provider (e.g.
+    # "claude-haiku-5-5"). A provider with none listed uses its cheapest.
     ai_article_model: str = ""
-    # Where news comes from: "finnhub" (free, uses FINNHUB_API_KEY) or
-    # "web_search" (Claude's web search, $0.01 per search; Anthropic only).
-    ai_news_source: Literal["finnhub", "web_search"] = "finnhub"
+    # True while your Gemini project has no billing account (free tier), so
+    # cost estimates show $0 for Gemini. Set false if you enable billing.
+    ai_gemini_free_tier: bool = True
+    # Where news comes from: "web_search" (Claude's web search on
+    # AI_NEWS_DOMAINS, $0.01 per search; Anthropic only) or "finnhub" (free,
+    # uses FINNHUB_API_KEY, but its free plan is licensed for personal use).
+    ai_news_source: Literal["finnhub", "web_search"] = "web_search"
     # Finnhub news publishers whose articles count (comma-separated).
     ai_finnhub_sources: str = "Yahoo,CNBC"
     # Web searches per story when AI_NEWS_SOURCE=web_search.
@@ -163,29 +172,42 @@ class Settings(BaseSettings):
         return [d.strip().lower() for d in self.ai_news_domains.split(",") if d.strip()]
 
     @property
-    def story_api_key(self) -> str:
-        key = self.ai_api_key or (self.anthropic_api_key if self.ai_provider == "anthropic" else "")
-        return key.strip()
+    def provider_chain(self) -> list[str]:
+        """Main provider first, then the backup (if set and different)."""
+        chain = [self.ai_provider]
+        if self.ai_fallback_provider and self.ai_fallback_provider != self.ai_provider:
+            chain.append(self.ai_fallback_provider)
+        return chain
 
-    @property
-    def story_model(self) -> str:
+    def key_for(self, provider: str) -> str:
+        own = self.gemini_api_key if provider == "gemini" else self.anthropic_api_key
+        if not own.strip() and provider == self.ai_provider:
+            own = self.ai_api_key
+        return own.strip()
+
+    def model_for(self, provider: str) -> str:
         default, prefix = {
             "anthropic": ("claude-haiku-5-5", "claude-"),
             "gemini": ("gemini-3.1-flash-lite", "gemini-"),
-        }[self.ai_provider]
-        model = self.ai_article_model.strip()
-        return model if model.startswith(prefix) else default
+        }[provider]
+        listed = [m.strip() for m in self.ai_article_model.split(",")]
+        return next((m for m in listed if m.startswith(prefix)), default)
+
+    def news_source_for(self, provider: str) -> str:
+        """Web search is a Claude tool, so Gemini always uses Finnhub news."""
+        return "web_search" if self.ai_news_source == "web_search" and provider == "anthropic" else "finnhub"
 
     @property
-    def story_news_source(self) -> str:
-        """Web search is a Claude tool, so Gemini always uses Finnhub news."""
-        return "web_search" if self.ai_news_source == "web_search" and self.ai_provider == "anthropic" else "finnhub"
+    def story_model(self) -> str:
+        return self.model_for(self.ai_provider)
 
     @property
     def story_link_domains(self) -> list[str]:
-        """Sites a story may cite and link to. Finnhub links go through its
-        own redirect (finnhub.io/api/news?id=...) to the publisher."""
-        return ["finnhub.io"] if self.story_news_source == "finnhub" else self.ai_news_domain_list
+        """Sites a story may cite and link to, for any provider in use.
+        Finnhub links go through its redirect (finnhub.io/api/news?id=...)."""
+        sources = {self.news_source_for(p) for p in self.provider_chain}
+        domains = ["finnhub.io"] if "finnhub" in sources else []
+        return domains + (self.ai_news_domain_list if "web_search" in sources else [])
 
     @property
     def ai_finnhub_source_list(self) -> list[str]:

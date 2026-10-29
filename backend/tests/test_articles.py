@@ -46,6 +46,7 @@ def _claude_web_search_setup(monkeypatch):
         "AI_PROVIDER": "anthropic", "AI_NEWS_SOURCE": "web_search",
         "AI_NEWS_DOMAINS": "finance.yahoo.com,reuters.com", "AI_ARTICLE_MODEL": "",
         "AI_API_KEY": "sk-ant-test", "FINNHUB_API_KEY": "test-finnhub",
+        "AI_FALLBACK_PROVIDER": "", "GEMINI_API_KEY": "", "ANTHROPIC_API_KEY": "",
         "AI_ARTICLE_MAX_PER_DAY": "30", "AI_ARTICLE_ALWAYS_PCT": "5",
     }.items():
         monkeypatch.setenv(k, v)
@@ -403,8 +404,8 @@ def stories_on(client, monkeypatch):
     monkeypatch.setenv("AI_ARTICLES_ENABLED", "true")
     monkeypatch.setenv("AI_ARTICLE_WAIT_SECONDS", "0")
     get_settings.cache_clear()
-    monkeypatch.setattr(service, "_paused_until", None)
-    monkeypatch.setattr(service, "_key_alerted_at", None)
+    monkeypatch.setattr(service, "_paused_until", {})
+    monkeypatch.setattr(service, "_alerted_at", {})
     monkeypatch.setattr(service, "_executor", service.InlineExecutor())
     monkeypatch.setattr(service, "market_move_pct", lambda: 0.3)
     calls: list[str] = []
@@ -637,78 +638,156 @@ def admin_emails(monkeypatch):
     return sent
 
 
-def _key_rejected(req):
-    return GenerationResult(status="failed", error="401 invalid x-api-key",
-                            key_problem="the API key was rejected (wrong, disabled or deleted)")
+def _ready_story(req):
+    return GenerationResult(status="ready", story=_story(), facts=[_fact()],
+                            usage=Usage(1000, 200))  # the API answered
 
 
-def test_rejected_key_sends_user_a_plain_alert_and_tells_only_admin(
-        client, stories_on, admin_emails, monkeypatch):
-    calls: list = []
-    monkeypatch.setattr(service, "generate_article", lambda req: calls.append(req) or _key_rejected(req))
+def _key_rejected(service_name):
+    return lambda req: GenerationResult(
+        status="failed", error="401 invalid key", failed_service=service_name,
+        key_problem=f"the {service_name} API key was rejected (wrong, disabled or deleted)")
+
+
+@pytest.fixture
+def providers_faked(stories_on, monkeypatch):
+    """Use the real provider chain, with each provider's run faked."""
+    monkeypatch.setattr(service, "generate_article", service._generate_with_ai)
+    runs: list[str] = []
+    behaviour: dict = {}
+
+    def run_with(provider, req):
+        runs.append(provider)
+        return behaviour[provider](req)
+
+    monkeypatch.setattr(service, "_run_with", run_with)
+    return runs, behaviour
+
+
+def _gemini_with_claude_backup(monkeypatch, **extra):
+    for k, v in {"AI_PROVIDER": "gemini", "AI_FALLBACK_PROVIDER": "anthropic",
+                 "AI_API_KEY": "", "GEMINI_API_KEY": "gem-key",
+                 "ANTHROPIC_API_KEY": "sk-ant-key", "AI_NEWS_SOURCE": "finnhub", **extra}.items():
+        monkeypatch.setenv(k, v)
+    get_settings.cache_clear()
+
+
+def _alert_aapl_up():
     _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
-
     run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
 
-    email = client.sent_emails[0]
-    assert email["to"] == "alerts@example.com"
-    assert "6.40%" in email["body_text"]
-    for word in ("STOCK STORY", "still looking", "API", "key"):
-        assert word not in email["body_text"]
-    assert [e for e, _ in admin_emails] == ["ai_key_problem"]
-    assert "price alerts are still sent" in admin_emails[0][1]
 
-    # Paused: the next alert doesn't call the AI and doesn't email the admin again.
+def _clear_alert_history():
     db = get_session_factory()()
     db.query(NotificationLog).delete()
+    db.query(StockArticle).delete()
     db.commit()
     db.close()
+
+
+def test_backup_provider_writes_the_story_and_admin_is_told(
+        client, providers_faked, admin_emails, monkeypatch):
+    runs, behaviour = providers_faked
+    _gemini_with_claude_backup(monkeypatch)
+    behaviour.update(gemini=_key_rejected("Gemini"), anthropic=_ready_story)
+
+    _alert_aapl_up()
+
+    assert runs == ["gemini", "anthropic"]
+    assert "STOCK STORY" in client.sent_emails[0]["body_text"]  # user gets the story anyway
+    assert [a.model for a in _rows(StockArticle)] == ["claude-haiku-5-5"]
+    assert [e for e, _ in admin_emails] == ["ai_key_problem"]
+    assert "Stories keep working on the backup (Anthropic, claude-haiku-5-5)" in admin_emails[0][1]
+
+    # Gemini is paused: the next story goes straight to the backup, no new email.
+    _clear_alert_history()
     run_intraday_capture(fetcher=_fetch({"AAPL": 107.0}), force=True)
-    assert len(calls) == 1
-    assert len(client.sent_emails) == 2
+    assert runs == ["gemini", "anthropic", "anthropic"]
     assert len(admin_emails) == 1
 
 
-def test_missing_key_never_calls_the_ai(client, stories_on, admin_emails, monkeypatch):
+def test_gemini_outage_uses_backup_without_pausing(client, providers_faked, admin_emails, monkeypatch):
+    runs, behaviour = providers_faked
+    _gemini_with_claude_backup(monkeypatch)
+    behaviour.update(
+        gemini=lambda req: GenerationResult(status="failed", error="HTTP 503", failed_service="Gemini"),
+        anthropic=_ready_story)
+
+    _alert_aapl_up()
+
+    assert runs == ["gemini", "anthropic"]
+    assert "STOCK STORY" in client.sent_emails[0]["body_text"]
+    assert "Gemini is tried again for the next story" in admin_emails[0][1]
+    assert not service._is_paused("gemini")
+
+
+def test_content_rejections_are_not_retried_on_the_backup(client, providers_faked, monkeypatch):
+    runs, behaviour = providers_faked
+    _gemini_with_claude_backup(monkeypatch)
+    behaviour.update(gemini=lambda req: GenerationResult(status="no_clear_cause", usage=Usage(500, 50)),
+                     anthropic=_ready_story)
+    _alert_aapl_up()
+    assert runs == ["gemini"]  # an honest "no clear reason" isn't a failure
+
+
+def test_both_providers_down_sends_a_plain_alert_and_tells_only_admin(
+        client, providers_faked, admin_emails, monkeypatch):
+    runs, behaviour = providers_faked
+    _gemini_with_claude_backup(monkeypatch)
+    behaviour.update(gemini=_key_rejected("Gemini"), anthropic=_key_rejected("Anthropic"))
+
+    _alert_aapl_up()
+
+    email = client.sent_emails[0]
+    assert "6.40%" in email["body_text"]
+    for word in ("STOCK STORY", "still looking", "API", "key", "Gemini", "Anthropic"):
+        assert word not in email["body_text"]
+    events = [b for _, b in admin_emails]
+    assert len(events) == 2 and "Price alerts are still sent" in events[1]
+
+    # Both paused: no AI calls at all on the next alert, no more emails.
+    _clear_alert_history()
+    run_intraday_capture(fetcher=_fetch({"AAPL": 107.0}), force=True)
+    assert runs == ["gemini", "anthropic"]
+    assert len(admin_emails) == 2
+
+
+def test_missing_key_never_calls_the_ai(client, providers_faked, admin_emails, monkeypatch):
+    runs, _ = providers_faked
     monkeypatch.setenv("AI_API_KEY", "")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     get_settings.cache_clear()
-    _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
-    _seed_prior_day_close(ticker_id, close=100.0)
 
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
+    _alert_aapl_up()
 
-    assert stories_on == []
+    assert runs == []
     assert _rows(StockArticle) == []
     assert "STOCK STORY" not in client.sent_emails[0]["body_text"]
     assert [e for e, _ in admin_emails] == ["ai_key_problem"]
-    assert "AI_API_KEY is not set" in admin_emails[0][1]
+    assert "ANTHROPIC_API_KEY is not set (main AI provider)" in admin_emails[0][1]
 
 
-def test_admin_hears_when_stories_work_again(client, stories_on, admin_emails, monkeypatch):
-    service.report_key_problem("the API key was rejected")
-    monkeypatch.setattr(service, "_paused_until", None)  # pause is over
-    monkeypatch.setattr(service, "generate_article", lambda req: GenerationResult(
-        status="ready", story=_story(), facts=[_fact()], model="fake",
-        usage=Usage(1000, 200),  # the API answered
-    ))
-    _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
-    _seed_prior_day_close(ticker_id, close=100.0)
+def test_admin_hears_when_a_provider_works_again(client, providers_faked, admin_emails, monkeypatch):
+    runs, behaviour = providers_faked
+    behaviour.update(anthropic=_ready_story)
+    service.report_key_problem("anthropic", "the Anthropic API key was rejected")
+    service._paused_until.clear()  # the pause is over
 
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
+    _alert_aapl_up()
 
     assert [e for e, _ in admin_emails] == ["ai_key_problem", "ai_key_recovered"]
     assert "STOCK STORY" in client.sent_emails[0]["body_text"]
 
 
-def test_reminder_at_most_every_six_hours(client, stories_on, admin_emails, monkeypatch):
-    service.report_key_problem("x")
-    service.report_key_problem("x")
+def test_reminder_at_most_every_six_hours(client, stories_on, admin_emails):
+    service.report_key_problem("gemini", "x")
+    service.report_key_problem("gemini", "x")
     assert len(admin_emails) == 1
-    monkeypatch.setattr(service, "_key_alerted_at", utcnow() - timedelta(hours=7))
-    service.report_key_problem("x")
+    service._alerted_at["gemini"] = utcnow() - timedelta(hours=7)
+    service.report_key_problem("gemini", "x")
     assert len(admin_emails) == 2
+    service.report_key_problem("anthropic", "y")  # each service has its own clock
+    assert len(admin_emails) == 3
 
 
 # ---------------------------------------------------------------------------
