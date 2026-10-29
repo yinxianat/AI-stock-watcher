@@ -20,6 +20,7 @@ every few hours while it lasts, and once more when it works again).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import threading
@@ -40,6 +41,7 @@ from app.models import ArticleFollowup, DailyClose, StockArticle, Ticker, User, 
 from app.services import email_prefs
 from app.services.alerts import AlertChannel, notify_admin
 from app.services.articles import render
+from app.services.articles.preferences import get_age_groups
 from app.services.articles.schemas import (
     ArticleRequest,
     Fact,
@@ -56,13 +58,24 @@ _TREND_DAYS = 30
 _KEY_ALERT_REPEAT = timedelta(hours=6)
 
 
-def _not_configured(req: ArticleRequest) -> GenerationResult:
-    # Replaced by the Claude research + write stages.
-    return GenerationResult(status="failed", error="AI story generation is not configured")
+def _generate_with_ai(req: ArticleRequest) -> GenerationResult:
+    """Research → write → review with the configured provider and news source."""
+    from functools import partial
+
+    from app.services.articles import claude, news, stages
+    from app.services.articles.pipeline import run_pipeline
+    from app.services.articles.providers import get_generator
+
+    gen = get_generator()
+    research = (
+        claude.research if get_settings().story_news_source == "web_search"
+        else partial(news.research_from_news, gen)
+    )
+    return run_pipeline(req, research, partial(stages.write, gen), partial(stages.review, gen))
 
 
 # Swappable in tests.
-generate_article: Callable[[ArticleRequest], GenerationResult] = _not_configured
+generate_article: Callable[[ArticleRequest], GenerationResult] = _generate_with_ai
 
 
 def _default_market_move() -> float | None:  # pragma: no cover (network)
@@ -125,16 +138,22 @@ def report_key_problem(reason: str) -> None:
     log.warning("AI stories paused for %d min: %s", minutes, reason)
     if not due:
         return
+    if "finnhub" in reason.lower():
+        where, var = "finnhub.io (Dashboard → API key)", "FINNHUB_API_KEY"
+    elif settings.ai_provider == "gemini":
+        where, var = "aistudio.google.com/apikey (and your quota at aistudio.google.com/rate-limit)", "AI_API_KEY"
+    else:
+        where, var = "console.anthropic.com (API Keys, Billing / Limits)", "AI_API_KEY"
     notify_admin(
         "ai_key_problem",
-        "AI stories paused: Anthropic API key problem",
-        f"Problem: {reason}.\n\n"
+        "AI stories paused: API key or quota problem",
+        f"Problem: {reason}.\n"
+        f"Provider: {settings.ai_provider} ({settings.story_model}), news: {settings.story_news_source}.\n\n"
         "What users see: price alerts are still sent as usual, just without "
         "the \"why it moved\" story. Nobody is told about the problem.\n\n"
-        "To fix: check the key at console.anthropic.com (API Keys) and the "
-        "account's credit and spending limit (Billing / Limits). If you make a "
-        "new key, update ANTHROPIC_API_KEY in Railway Variables (or backend/.env "
-        "locally); Railway restarts the service by itself.\n\n"
+        f"To fix: check the key at {where}. If you make a new key, update {var} "
+        "in Railway Variables (or backend/.env locally); Railway restarts the "
+        "service by itself.\n\n"
         f"Stories retry automatically every {minutes} minutes. You'll get a "
         "reminder every 6 hours while the problem lasts, and an email when "
         "stories work again.",
@@ -153,16 +172,32 @@ def _key_works() -> None:
         notify_admin(
             "ai_key_recovered",
             "AI stories working again",
-            "The Anthropic API accepted the key again, so new price alerts "
+            "The AI service accepted the key again, so new price alerts "
             "include stories again.",
         )
 
 
-def check_config() -> None:
-    """At startup: stories on but no key → tell the admin straight away."""
+def _missing_key() -> str | None:
+    """What's missing for stories to run, if anything."""
     settings = get_settings()
-    if settings.ai_articles_enabled and not settings.anthropic_api_key.strip():
-        report_key_problem("ANTHROPIC_API_KEY is not set")
+    if not settings.story_api_key:
+        return f"AI_API_KEY is not set (AI_PROVIDER={settings.ai_provider})"
+    if settings.story_news_source == "finnhub" and not settings.finnhub_api_key.strip():
+        return "FINNHUB_API_KEY is not set (needed for Finnhub news)"
+    return None
+
+
+def check_config() -> None:
+    """At startup: stories on but a key missing → tell the admin straight away."""
+    settings = get_settings()
+    if not settings.ai_articles_enabled:
+        return
+    if settings.ai_article_model.strip() and settings.ai_article_model.strip() != settings.story_model:
+        log.warning("AI_ARTICLE_MODEL=%s doesn't match AI_PROVIDER=%s; using %s",
+                    settings.ai_article_model, settings.ai_provider, settings.story_model)
+    missing = _missing_key()
+    if missing:
+        report_key_problem(missing)
 
 
 def _get_executor() -> Executor:
@@ -279,8 +314,9 @@ def ensure_articles(db: DBSession, candidates: list[Candidate]) -> dict[int, Sto
     settings = get_settings()
     if not settings.ai_articles_enabled or not candidates:
         return {}
-    if not settings.anthropic_api_key.strip():
-        report_key_problem("ANTHROPIC_API_KEY is not set")
+    missing = _missing_key()
+    if missing:
+        report_key_problem(missing)
         return {}
     # While paused, today's finished stories are still used; no new ones.
     paused = stories_paused()
@@ -299,9 +335,12 @@ def ensure_articles(db: DBSession, candidates: list[Candidate]) -> dict[int, Sto
         if row is None:
             if paused:
                 continue
-            if created_today >= settings.ai_article_max_per_day:
+            cap = settings.ai_article_max_per_day
+            if abs(c.move_pct) >= settings.ai_article_always_pct:
+                cap *= 2  # big moves: allowed past the cap, up to twice it
+            if created_today >= cap:
                 log.info("Story cap reached (%d today); none for %s",
-                         settings.ai_article_max_per_day, c.ticker.symbol)
+                         created_today, c.ticker.symbol)
                 continue
             if not market_checked:
                 market_checked = True
@@ -353,7 +392,9 @@ def new_message_id() -> str:
     return make_msgid(domain=domain)
 
 
-def _view(db: DBSession, article: StockArticle) -> render.StoryView | None:
+def _view(
+    db: DBSession, article: StockArticle, age_groups: list[str],
+) -> render.StoryView | None:
     if article.status != "ready" or not article.content:
         return None
     try:
@@ -381,7 +422,8 @@ def _view(db: DBSession, article: StockArticle) -> render.StoryView | None:
         story=story,
         facts=facts,
         closes=closes + [article.price],
-        allowed_domains=get_settings().ai_news_domain_list,
+        allowed_domains=get_settings().story_link_domains,
+        age_groups=age_groups,
     )
 
 
@@ -409,7 +451,7 @@ def build_alert_email(
     """(text, html, still_pending) for one alert. `still_pending` means the
     email promised a follow-up, so the caller must record one."""
     if article is not None:
-        view = _view(db, article)
+        view = _view(db, article, get_age_groups(db, user.id))
         if view is not None:
             text = f"{summary}\n\n{render.story_text(view)}\n\n{_footer_text(user)}"
             return text, _html(summary, render.story_html(view), user), False
@@ -457,7 +499,7 @@ def send_waiting_followups(db: DBSession, article: StockArticle) -> int:
     ).scalars().all()
     if not waiting:
         return 0
-    view = _view(db, article)
+    view = _view(db, article, [])
     unsubscribed = email_prefs.opted_out_user_ids(db)
     sent = 0
     for f in waiting:
@@ -471,7 +513,8 @@ def send_waiting_followups(db: DBSession, article: StockArticle) -> int:
             continue
         if not _claim(db, f.id, "sent"):
             continue
-        intro = f"Here's the story behind {view.symbol}'s move today."
+        mine = dataclasses.replace(view, age_groups=get_age_groups(db, user.id))
+        intro = f"Here's the story behind {mine.symbol}'s move today."
         headers = {
             **email_prefs.alert_email_headers(user),
             "Message-ID": new_message_id(),
@@ -481,8 +524,8 @@ def send_waiting_followups(db: DBSession, article: StockArticle) -> int:
         send_email(
             user.notify_email,
             f.subject if f.subject.startswith("Re: ") else f"Re: {f.subject}",
-            f"{intro}\n\n{render.story_text(view)}\n\n{_footer_text(user)}",
-            body_html=_html(intro, render.story_html(view), user),
+            f"{intro}\n\n{render.story_text(mine)}\n\n{_footer_text(user)}",
+            body_html=_html(intro, render.story_html(mine), user),
             headers=headers,
         )
         sent += 1

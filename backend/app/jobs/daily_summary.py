@@ -17,12 +17,15 @@ from sqlalchemy import func, select
 
 from app.core.settings import get_settings
 from app.db.database import get_session_factory
+from app.jobs.heartbeat import scheduled_slots
 from app.models import (
     DailyClose,
     IntradayPrice,
+    JobRun,
     LogEntry,
     NotificationLog,
     PriceSnapshot,
+    StockArticle,
     Ticker,
     TrendAnalysis,
     User,
@@ -53,43 +56,40 @@ def collect_summary() -> dict:
     try:
         since = _last24h(session)
 
-        # ---- Pipeline (from log_entries) ----
-        sched_logs = session.execute(
-            select(LogEntry)
-            .where(LogEntry.logger == "app.jobs.scheduler")
-            .where(LogEntry.created_at >= since)
+        # ---- Pipeline (from job_runs: one row per run, whatever the log level) ----
+        runs = session.execute(
+            select(JobRun)
+            .where(JobRun.job_name == "batch_pipeline")
+            .where(JobRun.started_at >= since)
+            .order_by(JobRun.started_at)
         ).scalars().all()
-        pipeline_starts = sum(1 for r in sched_logs if r.message.startswith("Pipeline start"))
-        pipeline_complete = sum(1 for r in sched_logs if r.message.startswith("Pipeline complete"))
-        pipeline_aborted = sum(1 for r in sched_logs if "Pipeline aborted" in r.message)
-        last_complete = next(
-            (r.created_at for r in sorted(sched_logs, key=lambda r: r.created_at, reverse=True)
-             if r.message.startswith("Pipeline complete")),
-            None,
+        pipeline_expected = len(scheduled_slots(since, datetime.utcnow()))
+        pipeline_starts = len(runs)
+        pipeline_complete = sum(1 for r in runs if r.status == "SUCCESS")
+        pipeline_aborted = sum(1 for r in runs if r.status == "FAILED")
+        last_complete = max(
+            (r.started_at for r in runs if r.status == "SUCCESS"), default=None,
         )
 
-        # ---- Stage outcomes ----
-        stage_logs = [r for r in sched_logs if r.message.startswith("Pipeline stage")]
-        stage_ok = sum(1 for r in stage_logs if " ok " in r.message)
-        stage_fail = sum(1 for r in stage_logs if "failed" in r.message)
+        # ---- Stage outcomes (each run's summary: "ingest=SUCCESS(...) | ...") ----
+        summaries = [r.result_summary or "" for r in runs]
+        stage_ok = sum(s.count("=SUCCESS(") for s in summaries)
+        stage_fail = sum(s.count("=FAILED") for s in summaries)
+        ingest_runs = [p for s in summaries if (p := _stage_part(s, "ingest=SUCCESS("))]
+        notify_runs = [p for s in summaries if (p := _stage_part(s, "notify=SUCCESS("))]
 
-        # ---- Ingest details ----
-        ingest_logs = session.execute(
-            select(LogEntry)
+        # ---- Ingest / notify warnings (WARNING+ is kept in log_entries) ----
+        ingest_failures_total = session.execute(
+            select(func.count(LogEntry.id))
             .where(LogEntry.logger == "app.jobs.ingest")
             .where(LogEntry.created_at >= since)
-        ).scalars().all()
-        ingest_runs = [r for r in ingest_logs if r.message.startswith("Ingest complete")]
-        ingest_failures_total = sum(1 for r in ingest_logs if r.level in ("WARNING", "ERROR", "CRITICAL"))
-
-        # ---- Notify details ----
-        notify_logs = session.execute(
-            select(LogEntry)
+        ).scalar_one()
+        notify_warnings = session.execute(
+            select(func.count(LogEntry.id))
             .where(LogEntry.logger == "app.jobs.notify")
             .where(LogEntry.created_at >= since)
-        ).scalars().all()
-        notify_runs = [r for r in notify_logs if r.message.startswith("Notify complete")]
-        notify_warnings = sum(1 for r in notify_logs if r.level == "WARNING")
+            .where(LogEntry.level == "WARNING")
+        ).scalar_one()
 
         # ---- SMTP ----
         smtp_logs = session.execute(
@@ -130,6 +130,12 @@ def collect_summary() -> dict:
             (r.logger, r.message[:120]) for r in recent_errors
         ).most_common(10)
 
+        # ---- AI stories ----
+        stories = session.execute(
+            select(StockArticle).where(StockArticle.created_at >= since)
+        ).scalars().all()
+        story_counts = Counter(a.status for a in stories)
+
         # ---- DB row counts ----
         row_counts = {
             "users": session.execute(select(func.count(User.id))).scalar_one(),
@@ -156,6 +162,7 @@ def collect_summary() -> dict:
             "generated_at": datetime.utcnow(),
             "window_hours": WINDOW.total_seconds() / 3600,
             "pipeline": {
+                "expected": pipeline_expected,
                 "starts": pipeline_starts,
                 "completed": pipeline_complete,
                 "aborted": pipeline_aborted,
@@ -166,13 +173,13 @@ def collect_summary() -> dict:
             "ingest": {
                 "runs_completed": len(ingest_runs),
                 "warnings_or_errors": ingest_failures_total,
-                "last_run_summary": ingest_runs[-1].message if ingest_runs else None,
+                "last_run_summary": ingest_runs[-1] if ingest_runs else None,
             },
             "notify": {
                 "runs_completed": len(notify_runs),
                 "warnings": notify_warnings,
                 "notifications_sent_24h": notifications_sent_24h,
-                "last_run_summary": notify_runs[-1].message if notify_runs else None,
+                "last_run_summary": notify_runs[-1] if notify_runs else None,
             },
             "smtp": {
                 "failures": smtp_failures,
@@ -190,6 +197,13 @@ def collect_summary() -> dict:
                     {"logger": lg, "message": msg, "count": n}
                     for (lg, msg), n in top_error_messages
                 ],
+            },
+            "stories": {
+                "enabled": settings.ai_articles_enabled,
+                "created_24h": len(stories),
+                "by_status": dict(story_counts),
+                "input_tokens": sum(a.input_tokens for a in stories),
+                "output_tokens": sum(a.output_tokens for a in stories),
             },
             "db_rows": row_counts,
             "system": {
@@ -211,6 +225,22 @@ def collect_summary() -> dict:
         session.close()
 
 
+def _stage_part(summary: str, prefix: str) -> str | None:
+    """The "ingest=SUCCESS(...)" part of a pipeline run's summary, if any."""
+    return next((part for part in summary.split(" | ") if part.startswith(prefix)), None)
+
+
+def health(s: dict) -> str:
+    """HEALTHY / DEGRADED / UNHEALTHY. A day with no scheduled runs (weekend)
+    isn't unhealthy just because nothing ran."""
+    p, e, m = s["pipeline"], s["errors"], s["smtp"]
+    if m["failures"] >= 5 or (p["expected"] > 0 and p["completed"] == 0):
+        return "UNHEALTHY"
+    if p["aborted"] > 0 or p["stages_failed"] > 0 or e["total_24h"] > 0:
+        return "DEGRADED"
+    return "HEALTHY"
+
+
 def _format_text(s: dict) -> str:
     p = s["pipeline"]
     i = s["ingest"]
@@ -222,19 +252,14 @@ def _format_text(s: dict) -> str:
     sched = s["schedule"]
     rows = s["db_rows"]
 
-    health = "HEALTHY"
-    if p["aborted"] > 0 or p["stages_failed"] > 0 or e["total_24h"] > 0:
-        health = "DEGRADED"
-    if m["failures"] >= 5 or p["completed"] == 0:
-        health = "UNHEALTHY"
-
     last_complete = p["last_complete_at"].isoformat() + "Z" if p["last_complete_at"] else "(none in window)"
 
     lines = [
         f"AI Stock Watcher — daily summary  ({s['generated_at'].isoformat()}Z, last {int(s['window_hours'])}h)",
-        f"Overall health: {health}",
+        f"Overall health: {health(s)}",
         "",
         "PIPELINE",
+        f"  Scheduled:        {p['expected']}{'  (none: weekend)' if p['expected'] == 0 else ''}",
         f"  Starts:           {p['starts']}",
         f"  Completed:        {p['completed']}",
         f"  Aborted:          {p['aborted']}",
@@ -260,6 +285,9 @@ def _format_text(s: dict) -> str:
         f"  New signups (24h):   {a['signups_24h']}",
         f"  Logins (24h):        {a['logins_24h']}",
         f"  Active sessions:     {a['active_sessions']}",
+        "",
+        "AI STORIES",
+        *_story_lines(s["stories"]),
         "",
         "ERRORS",
         f"  Total ERROR+/24h:  {e['total_24h']}",
@@ -299,6 +327,18 @@ def _format_text(s: dict) -> str:
     return "\n".join(lines)
 
 
+def _story_lines(st: dict) -> list[str]:
+    if not st["enabled"]:
+        return ["  Off (AI_ARTICLES_ENABLED=false)"]
+    by = st["by_status"]
+    return [
+        f"  Created (24h):     {st['created_24h']}",
+        f"  Ready / no clear cause / failed / pending:  "
+        f"{by.get('ready', 0)} / {by.get('no_clear_cause', 0)} / {by.get('failed', 0)} / {by.get('pending', 0)}",
+        f"  Tokens in / out:   {st['input_tokens']:,} / {st['output_tokens']:,}",
+    ]
+
+
 def run_daily_summary() -> dict:
     """Build + send the daily summary. Returns the data dict (for tests)."""
     import time as _time
@@ -318,21 +358,17 @@ def run_daily_summary() -> dict:
         )
         raise
     body = _format_text(data)
-    health = "HEALTHY"
-    if data["pipeline"]["aborted"] > 0 or data["pipeline"]["stages_failed"] > 0 or data["errors"]["total_24h"] > 0:
-        health = "DEGRADED"
-    if data["smtp"]["failures"] >= 5 or data["pipeline"]["completed"] == 0:
-        health = "UNHEALTHY"
+    status = health(data)
     notify_admin(
         "daily_summary",
-        f"Daily summary — {health}",
+        f"Daily summary — {status}",
         body,
         channel=AlertChannel.SUMMARY,
     )
     elapsed = _time.monotonic() - t0
-    log.info("Daily summary sent (health=%s, %.2fs)", health, elapsed)
+    log.info("Daily summary sent (health=%s, %.2fs)", status, elapsed)
     record_job_run(
         "daily_summary", "SUCCESS", started, elapsed,
-        result_summary=f"health={health}",
+        result_summary=f"health={status}",
     )
     return data

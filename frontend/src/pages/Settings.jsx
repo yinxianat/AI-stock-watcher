@@ -7,6 +7,14 @@ import { suggestEmail } from '../lib/emailTypos.js';
 // Matches the backend's per-user cooldown between confirmation emails.
 const RESEND_COOLDOWN_S = 30;
 
+// Age groups for the "why it moved" stories (backend: app/services/articles).
+const AGE_OPTIONS = [
+  { value: '3-5', label: '🧸 Little ones (3–5)' },
+  { value: '6-9', label: '🎒 Kids (6–9)' },
+  { value: '10-12', label: '🧠 Tweens (10–12)' },
+  { value: '13-17', label: '🎧 Teens (13–17)' },
+];
+
 export default function Settings() {
   const [me, setMe] = useState(null);
   const [newEmail, setNewEmail] = useState('');
@@ -20,6 +28,11 @@ export default function Settings() {
   const [alertsEnabled, setAlertsEnabled] = useState(null);
   const [savingAlerts, setSavingAlerts] = useState(false);
   const [alertsFlash, setAlertsFlash] = useState(null);
+  // null while loading or if it failed; the section is hidden then, and
+  // also while stories are switched off on the server.
+  const [storyPrefs, setStoryPrefs] = useState(null);
+  const [savingStories, setSavingStories] = useState(false);
+  const [storiesFlash, setStoriesFlash] = useState(null);
 
   useEffect(() => {
     api.me().then(setMe).catch(() => setMe(null));
@@ -27,6 +40,10 @@ export default function Settings() {
       .getEmailPreferences()
       .then((p) => setAlertsEnabled(p.alerts_enabled))
       .catch(() => setAlertsEnabled(null));
+    api
+      .getStoryPreferences()
+      .then(setStoryPrefs)
+      .catch(() => setStoryPrefs(null));
   }, []);
 
   async function toggleAlerts(e) {
@@ -40,6 +57,24 @@ export default function Settings() {
       setAlertsFlash(err.message);
     } finally {
       setSavingAlerts(false);
+    }
+  }
+
+  async function toggleAgeGroup(value, checked) {
+    const current = storyPrefs.age_groups;
+    const next = checked ? [...current, value] : current.filter((g) => g !== value);
+    if (next.length === 0) return; // at least one age group is required
+    // Tick the box straight away; undo it if saving fails.
+    setStoryPrefs({ ...storyPrefs, age_groups: next });
+    setSavingStories(true);
+    setStoriesFlash(null);
+    try {
+      setStoryPrefs(await api.setStoryAgeGroups(next));
+    } catch (err) {
+      setStoryPrefs({ ...storyPrefs, age_groups: current });
+      setStoriesFlash(err.message);
+    } finally {
+      setSavingStories(false);
     }
   }
 
@@ -158,6 +193,40 @@ export default function Settings() {
             Sign-in links are always sent.
           </p>
           {alertsFlash && <div className="flash err">{alertsFlash}</div>}
+        </div>
+      )}
+
+      {storyPrefs?.stories_enabled && (
+        <div className="card">
+          <h3>Stories for my kids</h3>
+          <p className="muted">
+            When a stock you watch moves a lot, your alert includes a short story about
+            why, to read together with your kids. Choose the ages it's written for; you
+            can pick more than one.
+          </p>
+          {AGE_OPTIONS.map(({ value, label }) => {
+            const checked = storyPrefs.age_groups.includes(value);
+            const onlyOne = checked && storyPrefs.age_groups.length === 1;
+            return (
+              <label className="toggle" key={value}>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={(e) => toggleAgeGroup(value, e.target.checked)}
+                  disabled={savingStories || onlyOne}
+                  title={onlyOne ? 'Keep at least one age group' : undefined}
+                />
+                <span>{label}</span>
+              </label>
+            );
+          })}
+          <p className="muted">
+            ⚠️ Stories are written by AI from news sources. AI can make mistakes or
+            reflect bias, so please read each story yourself before sharing it with your
+            child. They're for learning and family conversation only, not financial
+            advice.
+          </p>
+          {storiesFlash && <div className="flash err">{storiesFlash}</div>}
         </div>
       )}
     </div>

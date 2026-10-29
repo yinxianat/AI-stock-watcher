@@ -8,27 +8,17 @@ our own template, from our own data).
 
 from __future__ import annotations
 
-import re
 from datetime import date, timedelta
 from urllib.parse import urlsplit
 
-from app.services.articles.schemas import Fact, Story
+from app.services.articles.language import (
+    language_problems,
+    readability_problems,
+    word_count,
+)
+from app.services.articles.schemas import AGE_GROUPS, Fact, KidVersion, Story
 
-_MONEY_OR_PERCENT = re.compile(r"[$%€£]|\bpercent\b", re.IGNORECASE)
-# Not ".com": company names like "Amazon.com" are fine in a story.
-_LINK = re.compile(r"https?://|www\.", re.IGNORECASE)
-_ADVICE = re.compile(
-    r"\b(you should|time to|go) (buy|sell|invest)|\b(buy|sell) (now|today)\b"
-    r"|\bprice target\b|\bguaranteed?\b|\bcan'?t lose\b|\brisk[- ]free\b",
-    re.IGNORECASE,
-)
-_STORY_TEXT_FIELDS = (
-    "headline", "story", "lesson_title", "lesson", "talk_together", "grown_up_summary",
-)
-_MAX_LEN = {
-    "headline": 90, "story": 600, "lesson_title": 60, "lesson": 300,
-    "talk_together": 200, "grown_up_summary": 400,
-}
+_VERSION_FIELDS = ("headline", "story", "lesson_title", "lesson", "talk_together")
 
 
 def normalize_url(url: str) -> str:
@@ -77,8 +67,8 @@ def validate_facts(
     return kept
 
 
-def story_problems(story: Story, facts: list[Fact]) -> list[str]:
-    """Reasons the story can't be sent. Empty list means it's fine."""
+def shared_problems(story: Story, facts: list[Fact]) -> list[str]:
+    """Problems that sink the whole story (every version shares these)."""
     problems: list[str] = []
     fact_ids = {f.id for f in facts}
     if not story.fact_ids:
@@ -86,16 +76,32 @@ def story_problems(story: Story, facts: list[Fact]) -> list[str]:
     unknown = [i for i in story.fact_ids if i not in fact_ids]
     if unknown:
         problems.append(f"cites unknown facts {unknown}")
-    for name in _STORY_TEXT_FIELDS:
-        text = getattr(story, name)
+    summary = story.grown_up_summary
+    if not summary.strip():
+        problems.append("grown_up_summary is empty")
+    if word_count(summary) > 80:
+        problems.append("grown_up_summary too long")
+    problems += [f"grown_up_summary {p}" for p in language_problems(summary)]
+    if not any(v.age_group in AGE_GROUPS for v in story.versions):
+        problems.append("no age-group versions")
+    return problems
+
+
+def version_problems(v: KidVersion) -> list[str]:
+    """Problems with one age group's version. Only that version is dropped."""
+    problems: list[str] = []
+    for name in _VERSION_FIELDS:
+        text = getattr(v, name)
         if not text.strip():
             problems.append(f"{name} is empty")
-        if len(text) > _MAX_LEN[name]:
-            problems.append(f"{name} too long")
-        if _MONEY_OR_PERCENT.search(text):
-            problems.append(f"{name} contains a number about money")
-        if _LINK.search(text):
-            problems.append(f"{name} contains a link")
-        if _ADVICE.search(text):
-            problems.append(f"{name} sounds like investment advice")
+        problems += [f"{name} {p}" for p in language_problems(text, v.age_group)]
+    if len(v.headline) > 90:
+        problems.append("headline too long")
+    if word_count(v.lesson_title) > 8:
+        problems.append("lesson_title too long")
+    if word_count(v.lesson) > 60:
+        problems.append("lesson too long")
+    if word_count(v.talk_together) > 40:
+        problems.append("talk_together too long")
+    problems += readability_problems(v.story, v.age_group)
     return problems

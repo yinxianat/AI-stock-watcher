@@ -434,6 +434,24 @@ class StockArticle(Base):
     ticker: Mapped[Ticker] = relationship()
 
 
+class StoryPreference(Base):
+    """Which age groups' stories a parent wants in their alerts.
+
+    No row means the default (ages 6-9). Only the group is stored, never a
+    child's age, name or other details.
+    """
+
+    __tablename__ = "story_preferences"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    age_groups: Mapped[str] = mapped_column(String(40), nullable=False)  # e.g. "3-5,13-17"
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, onupdate=utcnow
+    )
+
+
 class ArticleFollowup(Base):
     """A user whose alert said "we're still looking", waiting for the story.
 

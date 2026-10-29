@@ -106,8 +106,23 @@ class Settings(BaseSettings):
     # news from AI_NEWS_DOMAINS. One story per (ticker, day, direction),
     # shared by every user who gets that alert.
     ai_articles_enabled: bool = False
+    # Which AI writes the stories: "gemini" (Google; has a free tier) or
+    # "anthropic" (Claude). AI_API_KEY is that provider's key.
+    ai_provider: Literal["gemini", "anthropic"] = "gemini"
+    ai_api_key: str = ""
+    # Older name for the Claude key; still used when AI_PROVIDER=anthropic
+    # and AI_API_KEY is blank.
     anthropic_api_key: str = ""
-    ai_article_model: str = "claude-opus-5-5"
+    # Blank = the provider's cheapest model (see `story_model`). A model from
+    # the other provider is ignored, so switching AI_PROVIDER can't break.
+    ai_article_model: str = ""
+    # Where news comes from: "finnhub" (free, uses FINNHUB_API_KEY) or
+    # "web_search" (Claude's web search, $0.01 per search; Anthropic only).
+    ai_news_source: Literal["finnhub", "web_search"] = "finnhub"
+    # Finnhub news publishers whose articles count (comma-separated).
+    ai_finnhub_sources: str = "Yahoo,CNBC"
+    # Web searches per story when AI_NEWS_SOURCE=web_search.
+    ai_article_max_searches: int = 2
     # How long the alert waits for its story. If it isn't ready by then the
     # alert goes out with a "still looking" note and the story follows in a
     # reply email when it's done.
@@ -121,8 +136,11 @@ class Settings(BaseSettings):
     ai_key_problem_pause_minutes: int = 30
     # Cap on new stories per trading day; the biggest moves are done first.
     ai_article_max_per_day: int = 30
-    # Comma-separated. News is searched only on these sites, and only their
-    # links appear in emails.
+    # Big moves (at least this % either way) still get a story after the
+    # daily cap is reached, up to twice the cap.
+    ai_article_always_pct: float = 5.0
+    # Comma-separated. With web_search, news is searched only on these sites,
+    # and only their links appear in emails.
     ai_news_domains: str = "finance.yahoo.com,reuters.com"
     # News older than this many days doesn't count as today's reason.
     ai_news_max_age_days: int = 2
@@ -143,6 +161,35 @@ class Settings(BaseSettings):
     @property
     def ai_news_domain_list(self) -> list[str]:
         return [d.strip().lower() for d in self.ai_news_domains.split(",") if d.strip()]
+
+    @property
+    def story_api_key(self) -> str:
+        key = self.ai_api_key or (self.anthropic_api_key if self.ai_provider == "anthropic" else "")
+        return key.strip()
+
+    @property
+    def story_model(self) -> str:
+        default, prefix = {
+            "anthropic": ("claude-haiku-5-5", "claude-"),
+            "gemini": ("gemini-3.1-flash-lite", "gemini-"),
+        }[self.ai_provider]
+        model = self.ai_article_model.strip()
+        return model if model.startswith(prefix) else default
+
+    @property
+    def story_news_source(self) -> str:
+        """Web search is a Claude tool, so Gemini always uses Finnhub news."""
+        return "web_search" if self.ai_news_source == "web_search" and self.ai_provider == "anthropic" else "finnhub"
+
+    @property
+    def story_link_domains(self) -> list[str]:
+        """Sites a story may cite and link to. Finnhub links go through its
+        own redirect (finnhub.io/api/news?id=...) to the publisher."""
+        return ["finnhub.io"] if self.story_news_source == "finnhub" else self.ai_news_domain_list
+
+    @property
+    def ai_finnhub_source_list(self) -> list[str]:
+        return [x.strip().lower() for x in self.ai_finnhub_sources.split(",") if x.strip()]
 
     @property
     def effective_alert_receiver(self) -> str:
