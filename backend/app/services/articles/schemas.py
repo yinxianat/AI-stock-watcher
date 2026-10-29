@@ -32,18 +32,46 @@ class Research(BaseModel):
     facts: list[Fact] = Field(default_factory=list)
 
 
-class Story(BaseModel):
-    """What the writer stage returns. Text only: no numbers, no links."""
+AgeGroup = Literal["3-5", "6-9", "10-12", "13-17"]
+AGE_GROUPS: tuple[str, ...] = ("3-5", "6-9", "10-12", "13-17")
+DEFAULT_AGE_GROUPS: tuple[str, ...] = ("6-9",)
 
+
+class KidVersion(BaseModel):
+    """The story told for one age group."""
+
+    age_group: AgeGroup
     headline: str
-    story: str  # for the child
+    story: str
     lesson_title: str
-    lesson: str  # one investing idea, for the child
+    lesson: str  # one investing idea
     talk_together: str  # a question the parent can ask
+
+
+class Story(BaseModel):
+    """What the writer stage returns. Text only: no numbers, no links.
+
+    One version per age group (all four are written at once, so any parent
+    gets their choice whenever their alert fires); the grown-up part, tone
+    and sources are shared.
+    """
+
+    versions: list[KidVersion]
     grown_up_summary: str
     tone: Literal["playful", "gentle"]
     category: Category
     fact_ids: list[str]
+
+    def version(self, age_group: str) -> KidVersion | None:
+        return next((v for v in self.versions if v.age_group == age_group), None)
+
+
+class Review(BaseModel):
+    """The independent AI reviewer's verdict."""
+
+    grown_up_ok: bool
+    approved_age_groups: list[AgeGroup]
+    problems: list[str] = Field(default_factory=list)
 
 
 @dataclass
@@ -84,6 +112,12 @@ class ResearchResult:
 @dataclass
 class WriteResult:
     story: Story
+    usage: Usage = field(default_factory=Usage)
+
+
+@dataclass
+class ReviewResult:
+    review: Review
     usage: Usage = field(default_factory=Usage)
 
 

@@ -15,6 +15,7 @@ from .models import (  # noqa: F401
     PriceSnapshot,
     Session,
     StockArticle,
+    StoryPreference,
     Ticker,
     TickerType,
     TrendAnalysis,
