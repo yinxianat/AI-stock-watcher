@@ -177,8 +177,15 @@ export default function Help() {
         <details>
           <summary>I didn't get my sign-in email</summary>
           <p>
-            Check your spam or promotions folder. Links expire after 15 minutes;
-            you can request a new one after 30 seconds.
+            It usually arrives within a minute. Check your spam or promotions
+            folder, and check the address shown after you pressed <em>Send link</em>{' '}
+            is spelled right; if it isn't, choose <em>Use a different email</em>.
+            Links expire after 15 minutes; you can request a new one after 30
+            seconds.
+          </p>
+          <p>
+            It's fine to switch to your mail app straight after pressing{' '}
+            <em>Send link</em>. The link is still sent.
           </p>
         </details>
 

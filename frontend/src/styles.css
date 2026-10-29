@@ -350,3 +350,6 @@ button.link-button:disabled:hover { background: none; color: var(--muted); text-
 .help details p, .help details ul { color: var(--muted); margin: 8px 0 0; }
 /* Section links shouldn't hide the heading under the top of the screen. */
 .help section { scroll-margin-top: 16px; }
+
+/* "Did you mean …?" under an email input */
+.hint { margin: 6px 0 0; font-size: 0.9em; color: var(--muted); }

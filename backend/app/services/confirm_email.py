@@ -11,6 +11,7 @@ from __future__ import annotations
 import secrets
 from datetime import timedelta
 
+from fastapi import BackgroundTasks
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as DBSession
 
@@ -64,11 +65,17 @@ def _check_send_limit(db: DBSession, user_id: int) -> None:
     enforce_send_limit(sent)
 
 
-def request_notify_email_change(db: DBSession, user: User, new_email: str) -> str:
+def request_notify_email_change(
+    db: DBSession,
+    user: User,
+    new_email: str,
+    background_tasks: BackgroundTasks | None = None,
+) -> str:
     """Start a notification-address change by emailing a confirmation link.
 
     Raises SameNotifyEmail, EmailInUse, or TooManyConfirmationEmails. Requesting
     the address that is already pending confirmation re-sends the link.
+    With `background_tasks`, the email is sent after the response goes out.
     """
     settings = get_settings()
     new_email = new_email.strip().lower()
@@ -100,10 +107,11 @@ def request_notify_email_change(db: DBSession, user: User, new_email: str) -> st
         f"to send your notifications. The link expires in "
         f"{settings.email_confirm_ttl_minutes} minutes.\n\n{link}"
     )
-    try:
+    # send_email logs SMTP failures instead of raising.
+    if background_tasks is not None:
+        background_tasks.add_task(send_email, new_email, "Confirm your notification email", body)
+    else:
         send_email(new_email, "Confirm your notification email", body)
-    except Exception:  # pragma: no cover
-        pass
 
     return token
 
