@@ -32,6 +32,7 @@ export default function Settings() {
   // also while stories are switched off on the server.
   const [storyPrefs, setStoryPrefs] = useState(null);
   const [savingStories, setSavingStories] = useState(false);
+  // { kind: 'ok' | 'err', msg }
   const [storiesFlash, setStoriesFlash] = useState(null);
 
   useEffect(() => {
@@ -69,10 +70,14 @@ export default function Settings() {
     setSavingStories(true);
     setStoriesFlash(null);
     try {
-      setStoryPrefs(await api.setStoryAgeGroups(next));
+      const saved = await api.setStoryAgeGroups(next);
+      setStoryPrefs(saved);
+      // Confirm from what the server saved, not from what was ticked.
+      const labels = AGE_OPTIONS.filter((o) => saved.age_groups.includes(o.value)).map((o) => o.label);
+      setStoriesFlash({ kind: 'ok', msg: `Saved. Stories will be written for: ${labels.join(', ')}.` });
     } catch (err) {
       setStoryPrefs({ ...storyPrefs, age_groups: current });
-      setStoriesFlash(err.message);
+      setStoriesFlash({ kind: 'err', msg: `Not saved: ${err.message}` });
     } finally {
       setSavingStories(false);
     }
@@ -226,7 +231,12 @@ export default function Settings() {
             child. They're for learning and family conversation only, not financial
             advice.
           </p>
-          {storiesFlash && <div className="flash err">{storiesFlash}</div>}
+          {savingStories && <p className="muted" role="status">Saving…</p>}
+          {storiesFlash && (
+            <div className={`flash ${storiesFlash.kind}`} role={storiesFlash.kind === 'err' ? 'alert' : 'status'}>
+              {storiesFlash.msg}
+            </div>
+          )}
         </div>
       )}
     </div>
