@@ -41,14 +41,19 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/request-link", status_code=204, response_class=Response)
-def request_link(payload: LoginRequest, db: DBSession = Depends(get_db)):
+def request_link(
+    payload: LoginRequest,
+    background_tasks: BackgroundTasks,
+    db: DBSession = Depends(get_db),
+):
     """Email the user a magic link.
 
     Always returns 204 — even if the email is unknown — so we don't leak
     which addresses are registered. Account creation is implicit on verify.
+    The email itself is sent after the 204, so the reply doesn't wait on SMTP.
     """
     try:
-        request_magic_link(db, payload.email)
+        request_magic_link(db, payload.email, background_tasks)
     except TooManySignInEmails as e:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
@@ -97,11 +102,12 @@ def me(user: User = Depends(current_user)) -> UserOut:
 @router.post("/notify-email", status_code=204, response_class=Response)
 def change_notify_email(
     payload: UpdateNotifyEmailRequest,
+    background_tasks: BackgroundTasks,
     user: User = Depends(current_user),
     db: DBSession = Depends(get_db),
 ):
     try:
-        request_notify_email_change(db, user, payload.new_email)
+        request_notify_email_change(db, user, payload.new_email, background_tasks)
     except SameNotifyEmail:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,

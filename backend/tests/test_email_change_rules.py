@@ -169,3 +169,45 @@ def test_confirm_fails_if_address_was_taken_meanwhile(client):
 
     r = client.post("/auth/notify-email/confirm", json={"token": confirm_token})
     assert r.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Emails are sent after the reply, not before
+# ---------------------------------------------------------------------------
+
+
+def test_sign_in_email_is_sent_after_the_reply(client):
+    """The route queues the email, so the 204 doesn't wait on SMTP."""
+    import asyncio
+
+    from fastapi import BackgroundTasks
+
+    from app.services.auth import request_magic_link
+
+    tasks = BackgroundTasks()
+    db = get_session_factory()()
+    request_magic_link(db, "bob@example.com", tasks)
+    db.close()
+
+    assert client.sent_emails == []  # nothing sent yet: the reply would go out now
+    asyncio.run(tasks())
+    assert client.sent_emails[-1]["to"] == "bob@example.com"
+
+
+def test_confirmation_email_is_sent_after_the_reply(signed_in):
+    import asyncio
+
+    from fastapi import BackgroundTasks
+
+    from app.services.confirm_email import request_notify_email_change
+
+    c = signed_in["client"]
+    before = len(c.sent_emails)
+    tasks = BackgroundTasks()
+    db = get_session_factory()()
+    request_notify_email_change(db, db.get(User, signed_in["user"]["id"]), "new@example.com", tasks)
+    db.close()
+
+    assert len(c.sent_emails) == before
+    asyncio.run(tasks())
+    assert c.sent_emails[-1]["subject"] == "Confirm your notification email"

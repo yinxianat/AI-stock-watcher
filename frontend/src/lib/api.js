@@ -38,8 +38,13 @@ async function request(path, { method = 'GET', body, auth = false, signal, timeo
       signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
     });
   } catch(err){
-    // Caller cancelled on purpose: pass it through so the UI can ignore it.
-    if (err.name === "AbortError") throw err;
+    if (err.name === "AbortError") {
+      // Caller cancelled on purpose: pass it through so the UI can ignore it.
+      if (signal?.aborted) throw err;
+      // Otherwise the browser dropped it, e.g. a phone suspending the page
+      // when the user switches to their mail app.
+      throw new NetworkError(err, {path, method});
+    }
     if (err.name === "TimeoutError") throw new TimeoutError(err, {path, method, timeoutMs});
     // fetch only throws TypeError when no response arrived (offline, DNS, CORS).
     if (err instanceof TypeError) throw new NetworkError(err, {path, method});
