@@ -100,6 +100,62 @@ class Settings(BaseSettings):
     # 800 req/day, 8 req/min — ample for ~50 watched tickers).
     twelvedata_api_key: str = ""
 
+    # ---- AI "why it moved" stories ---------------------------------------
+    # When a day-over-day PRICE_CHANGE_RANGE alert fires, an AI-written story
+    # (for parents to share with their kids) explains the move, based on
+    # news from AI_NEWS_DOMAINS. One story per (ticker, day, direction),
+    # shared by every user who gets that alert.
+    ai_articles_enabled: bool = False
+    # Which AI writes the stories: "anthropic" (Claude) or "gemini" (Google).
+    # The backup is used for a story when the main one is down, out of quota
+    # or its key is rejected (the admin is emailed). Blank = no backup.
+    # Note: Gemini's API terms bar services likely to be used by under-18s,
+    # so Claude is the default for these kids' stories.
+    ai_provider: Literal["gemini", "anthropic"] = "anthropic"
+    ai_fallback_provider: Literal["", "gemini", "anthropic"] = ""
+    gemini_api_key: str = ""
+    anthropic_api_key: str = ""
+    # Older single-key setting: used as the main provider's key when that
+    # provider's own key above is blank.
+    ai_api_key: str = ""
+    # Models, comma-separated, at most one per provider (e.g.
+    # "claude-haiku-5-5"). A provider with none listed uses its cheapest.
+    ai_article_model: str = ""
+    # True while your Gemini project has no billing account (free tier), so
+    # cost estimates show $0 for Gemini. Set false if you enable billing.
+    ai_gemini_free_tier: bool = True
+    # Where news comes from: "web_search" (Claude's web search on
+    # AI_NEWS_DOMAINS, $0.01 per search; Anthropic only) or "finnhub" (free,
+    # uses FINNHUB_API_KEY, but its free plan is licensed for personal use).
+    ai_news_source: Literal["finnhub", "web_search"] = "web_search"
+    # Finnhub news publishers whose articles count (comma-separated).
+    ai_finnhub_sources: str = "Yahoo,CNBC"
+    # Web searches per story when AI_NEWS_SOURCE=web_search.
+    ai_article_max_searches: int = 2
+    # How long the alert waits for its story. If it isn't ready by then the
+    # alert goes out with a "still looking" note and the story follows in a
+    # reply email when it's done.
+    ai_article_wait_seconds: int = 120
+    # Promised follow-ups older than this are given up on (e.g. the server
+    # restarted mid-generation).
+    ai_article_followup_give_up_minutes: int = 20
+    ai_article_max_concurrent: int = 4
+    # After the API rejects the key (or the account is out of credit), stop
+    # calling it for this long; alerts keep going out without stories.
+    ai_key_problem_pause_minutes: int = 30
+    # Cap on new stories per trading day; the biggest moves are done first.
+    ai_article_max_per_day: int = 30
+    # Big moves (at least this % either way) still get a story after the
+    # daily cap is reached, up to twice the cap.
+    ai_article_always_pct: float = 5.0
+    # Comma-separated. With web_search, news is searched only on these sites,
+    # and only their links appear in emails.
+    ai_news_domains: str = "finance.yahoo.com,reuters.com"
+    # News older than this many days doesn't count as today's reason.
+    ai_news_max_age_days: int = 2
+    # Whole-market benchmark, so a story can say "most stocks fell today".
+    ai_market_symbol: str = "SPY"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -110,6 +166,52 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def ai_news_domain_list(self) -> list[str]:
+        return [d.strip().lower() for d in self.ai_news_domains.split(",") if d.strip()]
+
+    @property
+    def provider_chain(self) -> list[str]:
+        """Main provider first, then the backup (if set and different)."""
+        chain = [self.ai_provider]
+        if self.ai_fallback_provider and self.ai_fallback_provider != self.ai_provider:
+            chain.append(self.ai_fallback_provider)
+        return chain
+
+    def key_for(self, provider: str) -> str:
+        own = self.gemini_api_key if provider == "gemini" else self.anthropic_api_key
+        if not own.strip() and provider == self.ai_provider:
+            own = self.ai_api_key
+        return own.strip()
+
+    def model_for(self, provider: str) -> str:
+        default, prefix = {
+            "anthropic": ("claude-haiku-5-5", "claude-"),
+            "gemini": ("gemini-3.1-flash-lite", "gemini-"),
+        }[provider]
+        listed = [m.strip() for m in self.ai_article_model.split(",")]
+        return next((m for m in listed if m.startswith(prefix)), default)
+
+    def news_source_for(self, provider: str) -> str:
+        """Web search is a Claude tool, so Gemini always uses Finnhub news."""
+        return "web_search" if self.ai_news_source == "web_search" and provider == "anthropic" else "finnhub"
+
+    @property
+    def story_model(self) -> str:
+        return self.model_for(self.ai_provider)
+
+    @property
+    def story_link_domains(self) -> list[str]:
+        """Sites a story may cite and link to, for any provider in use.
+        Finnhub links go through its redirect (finnhub.io/api/news?id=...)."""
+        sources = {self.news_source_for(p) for p in self.provider_chain}
+        domains = ["finnhub.io"] if "finnhub" in sources else []
+        return domains + (self.ai_news_domain_list if "web_search" in sources else [])
+
+    @property
+    def ai_finnhub_source_list(self) -> list[str]:
+        return [x.strip().lower() for x in self.ai_finnhub_sources.split(",") if x.strip()]
 
     @property
     def effective_alert_receiver(self) -> str:

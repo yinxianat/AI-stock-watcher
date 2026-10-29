@@ -3,6 +3,8 @@ and first-notification event hook."""
 
 from __future__ import annotations
 
+import pytest
+
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
@@ -65,37 +67,72 @@ def test_cleanup_invalid_lifetime_returns_zero(client, monkeypatch):
 # -----------------------------------------------------------------------------
 
 
-def test_heartbeat_ok_when_recent_pipeline_complete(client):
+ET = __import__("zoneinfo").ZoneInfo("America/New_York")
+
+
+def _utc(y, mo, d, h, mi):
+    """A US/Eastern wall-clock time as naive UTC (how the DB stores times)."""
+    from datetime import timezone as _tz
+    return datetime(y, mo, d, h, mi, tzinfo=ET).astimezone(_tz.utc).replace(tzinfo=None)
+
+
+def _pipeline_run(started_at, status="SUCCESS", summary=None):
     db = get_session_factory()()
-    db.add(
-        JobRun(
-            job_name="batch_pipeline",
-            status="SUCCESS",
-            started_at=datetime.utcnow() - timedelta(hours=1),
-        )
-    )
+    db.add(JobRun(job_name="batch_pipeline", status=status, started_at=started_at,
+                  result_summary=summary))
     db.commit()
     db.close()
-    assert run_heartbeat() is True
 
 
-def test_heartbeat_alerts_when_no_recent_pipeline(client):
-    # No JobRun rows exist at all → heartbeat should report missing.
-    assert run_heartbeat() is False
+@pytest.fixture
+def heartbeat_alerts(monkeypatch, caplog):
+    from app.jobs import heartbeat as hb
+    monkeypatch.setattr(hb, "_reported", set())
+    caplog.set_level("INFO", logger="app.jobs.heartbeat")
+    return lambda: [r for r in caplog.records
+                    if r.name == "app.jobs.heartbeat" and r.levelname == "CRITICAL"]
 
 
-def test_heartbeat_ignores_old_pipeline_completes(client):
-    db = get_session_factory()()
-    db.add(
-        JobRun(
-            job_name="batch_pipeline",
-            status="SUCCESS",
-            started_at=datetime.utcnow() - timedelta(hours=48),
-        )
-    )
-    db.commit()
-    db.close()
-    assert run_heartbeat() is False
+def test_heartbeat_ok_when_the_last_scheduled_run_started(client, heartbeat_alerts):
+    _pipeline_run(_utc(2026, 10, 29, 12, 30))  # Thu 12:30 slot
+    assert run_heartbeat(now_utc=_utc(2026, 10, 29, 13, 20)) is True
+    assert heartbeat_alerts() == []
+
+
+def test_heartbeat_quiet_on_monday_morning(client, heartbeat_alerts):
+    """Friday 16:05 ran; nothing is due again until Monday 09:35. The old
+    "26 hours" rule sent ~10 false alarms here every Monday."""
+    _pipeline_run(_utc(2026, 10, 30, 16, 5))  # Fri
+    for hour in range(0, 10):  # Mon 00:20 .. 09:20 ET
+        assert run_heartbeat(now_utc=_utc(2026, 11, 2, hour, 20)) is True
+    assert heartbeat_alerts() == []
+
+
+def test_heartbeat_alerts_once_per_missed_run(client, heartbeat_alerts):
+    _pipeline_run(_utc(2026, 10, 28, 16, 5))  # Wed ran; Thu 09:35 never started
+    assert run_heartbeat(now_utc=_utc(2026, 10, 29, 10, 20)) is False
+    assert run_heartbeat(now_utc=_utc(2026, 10, 29, 11, 20)) is False  # still missed
+    alerts = heartbeat_alerts()
+    assert len(alerts) == 1
+    assert "Thu 2026-10-29 09:35" in alerts[0].getMessage()
+
+
+def test_heartbeat_waits_until_a_run_is_late(client, heartbeat_alerts):
+    _pipeline_run(_utc(2026, 10, 28, 16, 5))
+    # 09:50: the 09:35 run could still be going; Wed 16:05 is what's checked.
+    assert run_heartbeat(now_utc=_utc(2026, 10, 29, 9, 50)) is True
+
+
+def test_heartbeat_does_not_repeat_alerts_for_failed_runs(client, heartbeat_alerts):
+    _pipeline_run(_utc(2026, 10, 29, 9, 35), status="FAILED")
+    assert run_heartbeat(now_utc=_utc(2026, 10, 29, 10, 20)) is True
+    assert heartbeat_alerts() == []  # the pipeline already alerted when it failed
+
+
+def test_no_runs_are_scheduled_at_weekends():
+    from app.jobs.heartbeat import scheduled_slots
+    assert scheduled_slots(_utc(2026, 10, 31, 0, 0), _utc(2026, 11, 2, 0, 0)) == []
+    assert len(scheduled_slots(_utc(2026, 10, 29, 0, 0), _utc(2026, 10, 30, 0, 0))) == 3
 
 
 # -----------------------------------------------------------------------------
@@ -302,3 +339,36 @@ def test_run_daily_summary_calls_notify_admin(client, monkeypatch):
     assert "AI Stock Watcher" in body
     assert "PIPELINE" in body
     assert "DATABASE ROW COUNTS" in body
+
+
+def test_summary_counts_pipeline_runs_from_job_runs(client):
+    now = datetime.utcnow()
+    _pipeline_run(now - timedelta(hours=3),
+                  summary="ingest=SUCCESS(elapsed=1.0s, result=12) | compute=SUCCESS(elapsed=0.2s) "
+                          "| notify=SUCCESS(elapsed=0.1s, emails_sent=2)")
+    _pipeline_run(now - timedelta(hours=1), status="FAILED",
+                  summary="ingest=FAILED | compute=SKIPPED | notify=SKIPPED")
+    p = collect_summary()["pipeline"]
+    assert (p["starts"], p["completed"], p["aborted"]) == (2, 1, 1)
+    assert (p["stages_ok"], p["stages_failed"]) == (3, 1)
+    i = collect_summary()["ingest"]
+    assert i["runs_completed"] == 1
+    assert i["last_run_summary"].startswith("ingest=SUCCESS(")
+
+
+def _summary_data(expected, completed, aborted=0, errors=0, smtp=0):
+    return {
+        "pipeline": {"expected": expected, "completed": completed, "aborted": aborted,
+                     "stages_failed": 0},
+        "errors": {"total_24h": errors},
+        "smtp": {"failures": smtp},
+    }
+
+
+def test_summary_health():
+    from app.jobs.daily_summary import health
+    assert health(_summary_data(expected=3, completed=3)) == "HEALTHY"
+    assert health(_summary_data(expected=0, completed=0)) == "HEALTHY"  # weekend
+    assert health(_summary_data(expected=3, completed=0)) == "UNHEALTHY"
+    assert health(_summary_data(expected=3, completed=2, aborted=1)) == "DEGRADED"
+    assert health(_summary_data(expected=3, completed=3, smtp=5)) == "UNHEALTHY"

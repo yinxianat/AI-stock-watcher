@@ -228,6 +228,9 @@ def start_scheduler() -> BackgroundScheduler:
     # if the cron schedule wakes it slightly outside the bounded window.
     if settings.intraday_ingest_enabled:
         from app.jobs.intraday import run_intraday_capture
+        from app.services.articles.service import check_config
+
+        check_config()
 
         tick = max(1, int(settings.intraday_tick_minutes))
         open_h, _ = settings.intraday_market_open
@@ -243,6 +246,10 @@ def start_scheduler() -> BackgroundScheduler:
             ),
             id="intraday_capture",
             replace_existing=True,
+            # A run can wait AI_ARTICLE_WAIT_SECONDS for stories; never let
+            # the next tick start while one is still going.
+            max_instances=1,
+            coalesce=True,
         )
         log.info(
             "Registered job: intraday_capture (Mon-Fri %02d:%02d-%02d:%02d ET, every %d min)",

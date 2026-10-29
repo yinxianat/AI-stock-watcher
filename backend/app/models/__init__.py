@@ -1,4 +1,5 @@
 from .models import (  # noqa: F401
+    ArticleFollowup,
     Base,
     ConfirmationToken,
     DailyClose,
@@ -13,6 +14,8 @@ from .models import (  # noqa: F401
     NotificationRule,
     PriceSnapshot,
     Session,
+    StockArticle,
+    StoryPreference,
     Ticker,
     TickerType,
     TrendAnalysis,
