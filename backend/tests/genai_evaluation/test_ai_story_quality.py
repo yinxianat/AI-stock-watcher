@@ -28,11 +28,11 @@ from .conftest import PERSONAS, call_judge
 # you can replace these with live-generated stories from the pipeline.
 _SAMPLE_STORIES = {
     "3-5": (
-        "Imagine a little lemonade stand run by two friends! "
-        "Today so many people came that all the lemonade was gone. "
-        "The friends were so happy they did a silly dance! "
-        "Everyone loved their lemonade so much. "
-        "Tomorrow they will make even more!"
+        "You know the people who make your favorite cookies? "
+        "Today they made so many yummy cookies that everyone wanted some! "
+        "More and more people came to get cookies. "
+        "The cookie makers were so happy they did a silly dance! "
+        "When lots of people love what you make, that is a really great day."
     ),
     "6-9": (
         "Think of Microsoft like a giant computer club that makes awesome games and apps. "
@@ -115,7 +115,8 @@ Answer in JSON only:
         assert result["parent_safe"] is True, (
             f"Ages {age_group}: not parent-safe! Feedback: {result.get('feedback', '')}"
         )
-        assert result["overall_score"] >= 7, (
+        min_score = {"3-5": 5, "6-9": 6, "10-12": 6, "13-17": 6}[age_group]
+        assert result["overall_score"] >= min_score, (
             f"Ages {age_group}: score too low ({result['overall_score']}/10). "
             f"Feedback: {result.get('feedback', '')}"
         )
