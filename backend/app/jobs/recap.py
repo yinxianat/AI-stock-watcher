@@ -53,6 +53,7 @@ from app.models import (
     WatchlistItem,
     utcnow,
 )
+from app.api.feedback_routes import feedback_links_html, feedback_links_text
 from app.services import email_prefs, money_ideas
 from app.services.articles import render
 from app.services.articles import service as articles
@@ -377,6 +378,33 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
     ages = get_age_groups(db, user.id)
     ideas_url = f"{get_settings().frontend_base_url}/money-ideas"
 
+    idea_content_id = f"{idea.key}:{day.isoformat()}"
+    idea_context = {"idea_key": idea.key, "position": money_ideas.position(idea)}
+    idea_fb_text = feedback_links_text(
+        user.id, "money_idea", idea_content_id,
+        age_group=ages[0] if ages else None, context=idea_context,
+    )
+    idea_fb_html = feedback_links_html(
+        user.id, "money_idea", idea_content_id,
+        age_group=ages[0] if ages else None, context=idea_context,
+    )
+
+    story_fb_text, story_fb_html = "", ""
+    if story is not None:
+        art_context = {
+            "ticker": top.ticker.symbol, "move_pct": round(top.pct, 2),
+            "direction": "up" if top.pct >= 0 else "down",
+            "trading_date": day.isoformat(),
+        }
+        story_fb_text = "\n" + feedback_links_text(
+            user.id, "article", str(story.id),
+            age_group=ages[0] if ages else None, context=art_context,
+        )
+        story_fb_html = feedback_links_html(
+            user.id, "article", str(story.id),
+            age_group=ages[0] if ages else None, context=art_context,
+        )
+
     subject = f"[🐵 Little Money Monkey] Your watchlist today: {top.ticker.symbol} {top.pct:+.1f}%"
     intro = f"Here's how your {len(moves)} stock{'s' if len(moves) != 1 else ''} did today."
     headers = email_prefs.alert_email_headers(user)
@@ -385,13 +413,15 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
         message_id = articles.new_message_id()
         headers = {**headers, "Message-ID": message_id}
     quiet_text = f"{_quiet_text(quiet)}\n\n" if quiet else ""
-    body = (f"{intro}\n\n{_text(moves, market_pct, alerted, kids_text, day)}\n\n"
-            f"{money_ideas.idea_text(idea, ages, ideas_url)}\n\n"
+    kids_text_with_fb = (kids_text or "") + story_fb_text if kids_text or story_fb_text else None
+    kids_html_with_fb = (kids_html or "") + story_fb_html if kids_html or story_fb_html else None
+    body = (f"{intro}\n\n{_text(moves, market_pct, alerted, kids_text_with_fb, day)}\n\n"
+            f"{money_ideas.idea_text(idea, ages, ideas_url, feedback_text=idea_fb_text)}\n\n"
             f"{quiet_text}{_footer_text(user)}")
     html = render.email_html(
         intro,
-        _html(moves, market_pct, alerted, kids_html)
-        + money_ideas.idea_html(idea, ages, ideas_url)
+        _html(moves, market_pct, alerted, kids_html_with_fb)
+        + money_ideas.idea_html(idea, ages, ideas_url, feedback_html=idea_fb_html)
         + (_quiet_html(quiet) if quiet else ""),
         f"{get_settings().frontend_base_url}/settings", email_prefs.unsubscribe_url(user),
         reason="You're receiving this daily recap because you have stocks on your watchlist.",

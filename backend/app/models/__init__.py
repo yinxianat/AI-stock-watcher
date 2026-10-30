@@ -2,6 +2,7 @@ from .models import (  # noqa: F401
     ArticleFollowup,
     Base,
     ConfirmationToken,
+    ContentFeedback,
     DailyClose,
     EmailOptOut,
     InfoLog,

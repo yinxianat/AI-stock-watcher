@@ -13,7 +13,7 @@ DailyClose     — durable per-day closing price per ticker. SOURCE OF TRUTH
                   for daily history; retention bounded by PRICE_HISTORY_LIFETIME
                   (default 365 days). Pruned daily by `app.jobs.cleanup`.
 IntradayPrice  — high-frequency price ticks (every INTRADAY_TICK_MINUTES, default
-                  10 min) during US market hours. The day-over-day
+                  30 min) during US market hours. The day-over-day
                   PRICE_CHANGE_RANGE alerts run on each tick. Retention bounded by
                   INTRADAY_RETENTION (default 7 days).
 PriceSnapshot  — derived "current view" per ticker, replaced each batch run.
@@ -30,6 +30,7 @@ LogEntry       — durable application log (WARNING+), auto-pruned per LOG_LIFET
 RecapOptOut    — user who turned the daily watchlist recap off.
 RecapSend      — one row per (user, trading day) recap sent; stops repeats.
 MoneyIdeaSend  — which Money Idea of the Day each user got, per trading day.
+ContentFeedback — parent like/neutral/dislike on AI stories and Money Ideas.
 """
 
 from __future__ import annotations
@@ -297,13 +298,49 @@ class MoneyIdeaSend(Base):
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
 
 
+class ContentFeedback(Base):
+    """Parent feedback on AI stories and Money Ideas.
+
+    One rating per (user, content_type, content_id). The latest rating
+    wins; the user can change their mind from the frontend.
+
+    RAG-ready fields:
+    * ``age_group`` — the age group the content was rendered for (enables
+      filtering in a future retrieval pipeline).
+    * ``context_json`` — structured metadata at rating time (ticker,
+      move_pct, direction for articles; idea_key, position for curriculum).
+      Stored as a JSON string so the RAG pipeline can enrich its
+      embeddings without re-joining multiple tables.
+    """
+
+    __tablename__ = "content_feedback"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "content_type", "content_id",
+            name="uq_feedback_user_content",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    content_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    content_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    rating: Mapped[str] = mapped_column(String(10), nullable=False)
+    age_group: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    context_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, onupdate=utcnow)
+
+
 # ---------- Batch outputs ----------
 
 
 class IntradayPrice(Base):
     """One row per (ticker, capture timestamp) intraday tick.
 
-    Written every INTRADAY_TICK_MINUTES (default 10) during US market hours
+    Written every INTRADAY_TICK_MINUTES (default 30) during US market hours
     by `app.jobs.intraday.run_intraday_capture`. The notification path for
     PRICE_CHANGE_RANGE rules compares each new tick against the prior tick
     for the same ticker — tick-over-tick % change.
