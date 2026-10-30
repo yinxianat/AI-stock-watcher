@@ -150,7 +150,7 @@ class Settings(BaseSettings):
     ai_article_always_pct: float = 5.0
     # Comma-separated. With web_search, news is searched only on these sites,
     # and only their links appear in emails.
-    ai_news_domains: str = "finance.yahoo.com,reuters.com"
+    ai_news_domains: str = "finance.yahoo.com"
     # News older than this many days doesn't count as today's reason.
     ai_news_max_age_days: int = 2
     # Whole-market benchmark, so a story can say "most stocks fell today".
