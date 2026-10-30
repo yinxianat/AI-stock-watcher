@@ -4,13 +4,26 @@ import { api } from '../lib/api.js';
 
 export default function MoneyIdeas() {
   const [ideas, setIdeas] = useState(null);
+  const [feedback, setFeedback] = useState({});
   const [error, setError] = useState(null);
 
   useEffect(() => {
     api.listMoneyIdeas()
       .then((d) => setIdeas(d.ideas))
       .catch((e) => setError(e.message || 'Failed to load'));
+    api.listFeedback('money_idea')
+      .then((d) => {
+        const map = {};
+        d.feedback.forEach((f) => { map[f.content_id] = f.rating; });
+        setFeedback(map);
+      })
+      .catch(() => {});
   }, []);
+
+  const handleRate = (contentId, rating) => {
+    setFeedback((prev) => ({ ...prev, [contentId]: rating }));
+    api.updateFeedback('money_idea', contentId, rating).catch(() => {});
+  };
 
   if (error) return <div className="container"><p className="flash warn">{error}</p></div>;
   if (!ideas) return <div className="container"><p>Loading…</p></div>;
@@ -32,23 +45,49 @@ export default function MoneyIdeas() {
         )}
       </div>
 
-      {ideas.map((item, i) => (
-        <div className="card" key={`${item.key}-${item.date}`}>
-          <p style={{ margin: '0 0 4px', fontSize: '12px', letterSpacing: '.04em', color: '#6e7781' }}>
-            🌱 {item.position} of {item.total} · {new Date(item.date + 'T00:00:00').toLocaleDateString(undefined, {
-              weekday: 'short', month: 'short', day: 'numeric', year: 'numeric'
-            })}
-          </p>
-          <h3 style={{ margin: '0 0 8px' }}>{item.title}</h3>
-          {item.versions.map((v) => (
-            <details key={v.age_group} open={i === 0}>
-              <summary>Ages {v.age_group}</summary>
-              <p>{v.idea}</p>
-              <p><strong>🗣️ Ask your kid:</strong> {v.question}</p>
-            </details>
-          ))}
-        </div>
-      ))}
+      {ideas.map((item, i) => {
+        const contentId = `${item.key}:${item.date}`;
+        const current = feedback[contentId];
+        return (
+          <div className="card" key={contentId}>
+            <p style={{ margin: '0 0 4px', fontSize: '12px', letterSpacing: '.04em', color: '#6e7781' }}>
+              🌱 {item.position} of {item.total} · {new Date(item.date + 'T00:00:00').toLocaleDateString(undefined, {
+                weekday: 'short', month: 'short', day: 'numeric', year: 'numeric'
+              })}
+            </p>
+            <h3 style={{ margin: '0 0 8px' }}>{item.title}</h3>
+            {item.versions.map((v) => (
+              <details key={v.age_group} open={i === 0}>
+                <summary>Ages {v.age_group}</summary>
+                <p>{v.idea}</p>
+                <p><strong>🗣️ Ask your kid:</strong> {v.question}</p>
+              </details>
+            ))}
+            <div style={{ display: 'flex', gap: '8px', marginTop: '10px', alignItems: 'center' }}>
+              <span style={{ fontSize: '13px', color: '#6e7781' }}>Was this helpful?</span>
+              {[
+                { rating: 'like', emoji: '👍', label: 'Love it' },
+                { rating: 'neutral', emoji: '😐', label: 'So-so' },
+                { rating: 'dislike', emoji: '👎', label: 'Not great' },
+              ].map(({ rating, emoji, label }) => (
+                <button
+                  key={rating}
+                  type="button"
+                  onClick={() => handleRate(contentId, rating)}
+                  style={{
+                    padding: '4px 10px', borderRadius: '6px', border: '1px solid #d0d7de',
+                    background: current === rating ? '#dafbe1' : '#fff', cursor: 'pointer',
+                    fontSize: '13px', fontWeight: current === rating ? 'bold' : 'normal',
+                  }}
+                  title={label}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })}
 
       {ideas.length > 0 && (
         <p style={{ textAlign: 'center', fontSize: '14px', color: '#6e7781', margin: '8px 0 24px' }}>

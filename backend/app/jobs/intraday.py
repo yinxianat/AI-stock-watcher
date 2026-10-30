@@ -56,8 +56,10 @@ from app.models import (
     WatchlistItem,
     utcnow,
 )
+from app.api.feedback_routes import feedback_links_html, feedback_links_text
 from app.services.alerts import alert_event_first_notification
 from app.services.articles import service as articles
+from app.services.articles.preferences import get_age_groups
 from app.services.emailer import send_email
 from app.services.email_prefs import alert_email_headers, opted_out_user_ids
 
@@ -222,6 +224,24 @@ def _send_one_alert(db: DBSession, alert: _Alert, story: StockArticle | None) ->
     body, body_html, story_pending = articles.build_alert_email(
         db, user, alert.summary, story, small_move=small_move,
     )
+    if story is not None:
+        ages = get_age_groups(db, user.id)
+        art_ctx = {
+            "ticker": ticker.symbol, "move_pct": round(alert.pct, 2),
+            "direction": "up" if alert.pct >= 0 else "down",
+            "trading_date": story.trading_date.isoformat(),
+        }
+        fb_text = feedback_links_text(
+            user.id, "article", str(story.id),
+            age_group=ages[0] if ages else None, context=art_ctx,
+        )
+        fb_html = feedback_links_html(
+            user.id, "article", str(story.id),
+            age_group=ages[0] if ages else None, context=art_ctx,
+        )
+        body = body.replace("\n━━━━━━━━━━━━━━━━━━━━\n", f"\n{fb_text}\n━━━━━━━━━━━━━━━━━━━━\n", 1)
+        if body_html:
+            body_html = body_html.replace("</div>\n</div>", f"{fb_html}</div>\n</div>", 1)
     headers = alert_email_headers(user)
     message_id = None
     if story is not None:

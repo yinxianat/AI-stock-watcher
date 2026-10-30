@@ -649,15 +649,23 @@ def _heading(idea: MoneyIdea) -> str:
     return f"MONEY IDEA OF THE DAY · {position(idea)} of {len(CURRICULUM)}"
 
 
-def idea_text(idea: MoneyIdea, age_groups: list[str], history_url: str) -> str:
+def idea_text(
+    idea: MoneyIdea, age_groups: list[str], history_url: str,
+    feedback_text: str | None = None,
+) -> str:
     lines = [f"\U0001f331 {_heading(idea)}", idea.title]
     for label, text, question in _chosen(idea, age_groups):
         lines += ["", label, text, f"\U0001f5e3️ Ask your kid: {question}"]
+    if feedback_text:
+        lines += ["", feedback_text]
     lines += ["", f"Every money idea you've had so far: {history_url}"]
     return "\n".join(lines)
 
 
-def idea_html(idea: MoneyIdea, age_groups: list[str], history_url: str) -> str:
+def idea_html(
+    idea: MoneyIdea, age_groups: list[str], history_url: str,
+    feedback_html: str | None = None,
+) -> str:
     muted = "#6e7781"
     kids = "".join(
         f"""\
@@ -668,10 +676,12 @@ def idea_html(idea: MoneyIdea, age_groups: list[str], history_url: str) -> str:
 </div>"""
         for label, text, question in _chosen(idea, age_groups)
     )
+    fb = feedback_html or ""
     return f"""\
 <div style="border:1px solid #b7e1c1;background:#f3fbf5;border-radius:10px;padding:16px;margin:16px 0">
 <p style="margin:0 0 4px;font-size:12px;letter-spacing:.04em;color:{muted}">\U0001f331 {escape(_heading(idea))}</p>
 <h2 style="margin:0;font-size:19px">{escape(idea.title)}</h2>
 {kids}
+{fb}
 <p style="margin:12px 0 0;font-size:13px"><a href="{escape(history_url, quote=True)}">Every money idea you've had so far ↗</a></p>
 </div>"""

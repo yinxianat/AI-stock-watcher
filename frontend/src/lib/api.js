@@ -102,4 +102,11 @@ export const api = {
 
   // money ideas
   listMoneyIdeas: (opts) => request('/money-ideas', { auth: true, ...opts }),
+
+  // feedback
+  rateFeedback: (token) => request('/feedback/rate', { method: 'POST', body: { token } }),
+  updateFeedback: (content_type, content_id, rating) =>
+    request('/feedback', { method: 'PUT', body: { content_type, content_id, rating }, auth: true }),
+  listFeedback: (content_type, opts) =>
+    request(`/feedback${content_type ? `?content_type=${content_type}` : ''}`, { auth: true, ...opts }),
 };
