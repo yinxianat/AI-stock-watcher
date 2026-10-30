@@ -13,7 +13,7 @@ DailyClose     — durable per-day closing price per ticker. SOURCE OF TRUTH
                   for daily history; retention bounded by PRICE_HISTORY_LIFETIME
                   (default 365 days). Pruned daily by `app.jobs.cleanup`.
 IntradayPrice  — high-frequency price ticks (every INTRADAY_TICK_MINUTES, default
-                  10 min) during US market hours. The day-over-day
+                  30 min) during US market hours. The day-over-day
                   PRICE_CHANGE_RANGE alerts run on each tick. Retention bounded by
                   INTRADAY_RETENTION (default 7 days).
 PriceSnapshot  — derived "current view" per ticker, replaced each batch run.
@@ -340,7 +340,7 @@ class ContentFeedback(Base):
 class IntradayPrice(Base):
     """One row per (ticker, capture timestamp) intraday tick.
 
-    Written every INTRADAY_TICK_MINUTES (default 10) during US market hours
+    Written every INTRADAY_TICK_MINUTES (default 30) during US market hours
     by `app.jobs.intraday.run_intraday_capture`. The notification path for
     PRICE_CHANGE_RANGE rules compares each new tick against the prior tick
     for the same ticker — tick-over-tick % change.
