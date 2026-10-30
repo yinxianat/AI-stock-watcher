@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { api, getToken } from '../lib/api.js';
+import { logError } from '../lib/log.js';
 
 export default function MoneyIdeas() {
   const [params] = useSearchParams();
@@ -15,7 +16,11 @@ export default function MoneyIdeas() {
     const load = token ? api.listMoneyIdeasByToken(token) : api.listMoneyIdeas();
     load
       .then((d) => setIdeas(d.ideas))
-      .catch((e) => setError(e.message || 'Failed to load'));
+      .catch((e) => {
+        setError(e.message || 'Failed to load');
+        // 400 on a bad/expired token is a user outcome, not a bug.
+        if (e?.status !== 400) logError('money-ideas', e, 'load');
+      });
     // Ratings need a session; arriving from an email link we skip them.
     if (!signedIn) return;
     api.listFeedback('money_idea')
@@ -24,14 +29,19 @@ export default function MoneyIdeas() {
         d.feedback.forEach((f) => { map[f.content_id] = f.rating; });
         setFeedback(map);
       })
-      .catch(() => {});
+      .catch((e) => logError('money-ideas', e, 'load-feedback'));
   }, [token, signedIn]);
 
   if (!token && !signedIn) return <Navigate to="/" replace />;
 
   const handleRate = (contentId, rating) => {
+    const previous = feedback[contentId];
     setFeedback((prev) => ({ ...prev, [contentId]: rating }));
-    api.updateFeedback('money_idea', contentId, rating).catch(() => {});
+    api.updateFeedback('money_idea', contentId, rating).catch((e) => {
+      // Roll back the optimistic update and report the failure.
+      setFeedback((prev) => ({ ...prev, [contentId]: previous }));
+      logError('money-ideas', e, `rate=${rating}`);
+    });
   };
 
   if (error) return <div className="container"><p className="flash warn">{error}</p></div>;

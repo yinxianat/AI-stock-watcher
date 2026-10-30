@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { api } from '../lib/api.js';
+import { logError } from '../lib/log.js';
 
 export default function Feedback() {
   const [params] = useSearchParams();
@@ -15,7 +16,13 @@ export default function Feedback() {
     }
     api.rateFeedback(token)
       .then((r) => { setResult(r); setStatus('done'); })
-      .catch(() => setStatus('error'));
+      .catch((err) => {
+        // A 400 means the token is bad or expired — a user outcome, not a
+        // bug — so we show the "invalid link" page without alerting. Any
+        // other failure (500, network) is a real problem: report it.
+        if (err?.status !== 400) logError('feedback', err, 'rate-from-token');
+        setStatus('error');
+      });
   }, [token]);
 
   if (status === 'loading') {

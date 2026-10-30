@@ -519,8 +519,10 @@ def _footer_text(user: User) -> str:
 
 
 def _html(intro: str, block: str, user: User) -> str:
+    from app.services.email_links import settings_url
+
     return render.email_html(
-        intro, block, get_settings().frontend_base_url, email_prefs.unsubscribe_url(user),
+        intro, block, settings_url(user.id), email_prefs.unsubscribe_url(user),
     )
 
 

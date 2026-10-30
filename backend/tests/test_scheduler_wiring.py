@@ -66,6 +66,40 @@ def test_intraday_skipped_when_disabled(monkeypatch):
         sched.shutdown(wait=False)
 
 
+def test_every_cron_trigger_is_pinned_to_eastern(monkeypatch):
+    """Regression: APScheduler does NOT propagate the scheduler's `timezone`
+    to a CronTrigger built without `timezone=`; it falls back to the host's
+    local tz via `tzlocal`. On Railway (whose TZ env resolved to Pacific)
+    that made every job fire 3 hours late. Each trigger must declare its
+    own timezone."""
+    monkeypatch.setenv("TZ", "America/Los_Angeles")  # simulate the Railway tz
+    import time as _time
+    try:
+        _time.tzset()
+    except AttributeError:
+        pass
+
+    monkeypatch.setenv("DAILY_SUMMARY_ENABLED", "true")
+    monkeypatch.setenv("INTRADAY_INGEST_ENABLED", "true")
+    monkeypatch.setenv("RECAP_ENABLED", "true")
+    from app.core.settings import get_settings
+    get_settings.cache_clear()
+
+    sched = start_scheduler()
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+        cron_jobs = [j for j in sched.get_jobs() if isinstance(j.trigger, CronTrigger)]
+        assert cron_jobs, "expected cron-triggered jobs"
+        for job in cron_jobs:
+            name = str(job.trigger.timezone)
+            # Accept any form that resolves to US Eastern.
+            assert name in ("US/Eastern", "America/New_York"), (
+                f"{job.id} fires in {name}, not Eastern"
+            )
+    finally:
+        sched.shutdown(wait=False)
+
+
 def test_recap_skipped_when_disabled(monkeypatch):
     """Setting RECAP_ENABLED=false omits the watchlist recap job."""
     monkeypatch.setenv("RECAP_ENABLED", "false")

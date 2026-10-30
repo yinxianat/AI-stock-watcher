@@ -28,6 +28,20 @@ def _rules(client, auth):
     return r.json()
 
 
+def _rules_for(client, auth, ticker_id):
+    """Rules for one ticker. New users start with a rule on the default
+    index fund (SPY), so these tests scope to the stock under test."""
+    return [r for r in _rules(client, auth) if r["ticker_id"] == ticker_id]
+
+
+def _ticker_id(symbol):
+    db = get_session_factory()()
+    try:
+        return db.execute(select(Ticker.id).where(Ticker.symbol == symbol)).scalar_one()
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # Default rule
 # ---------------------------------------------------------------------------
@@ -38,7 +52,7 @@ def test_adding_stock_creates_default_band_rule(signed_in):
     c, auth = signed_in["client"], signed_in["auth"]
     item = c.post("/watchlist", json={"symbol": "AAPL"}, headers=auth).json()
 
-    rules = _rules(c, auth)
+    rules = _rules_for(c, auth, item["ticker"]["id"])
     assert len(rules) == 1
     rule = rules[0]
     assert rule["ticker_id"] == item["ticker"]["id"]
@@ -50,9 +64,7 @@ def test_adding_stock_creates_default_band_rule(signed_in):
 def test_default_rule_skipped_when_user_already_has_a_rule(signed_in):
     seed()
     c, auth = signed_in["client"], signed_in["auth"]
-    db = get_session_factory()()
-    ticker_id = db.execute(select(Ticker.id).where(Ticker.symbol == "AAPL")).scalar_one()
-    db.close()
+    ticker_id = _ticker_id("AAPL")
     c.post(
         "/rules",
         json={"ticker_id": ticker_id, "event_type": "month_high", "enabled": True},
@@ -61,7 +73,7 @@ def test_default_rule_skipped_when_user_already_has_a_rule(signed_in):
 
     c.post("/watchlist", json={"symbol": "AAPL"}, headers=auth)
 
-    rules = _rules(c, auth)
+    rules = _rules_for(c, auth, ticker_id)
     assert [r["event_type"] for r in rules] == ["month_high"]
 
 
@@ -73,7 +85,7 @@ def test_default_rule_can_be_disabled_by_setting(signed_in, monkeypatch):
 
     c.post("/watchlist", json={"symbol": "AAPL"}, headers=auth)
 
-    assert _rules(c, auth) == []
+    assert _rules_for(c, auth, _ticker_id("AAPL")) == []
 
 
 def test_adding_same_stock_twice_keeps_one_rule(signed_in):
@@ -82,7 +94,7 @@ def test_adding_same_stock_twice_keeps_one_rule(signed_in):
     c.post("/watchlist", json={"symbol": "AAPL"}, headers=auth)
     c.post("/watchlist", json={"symbol": "AAPL"}, headers=auth)
 
-    assert len(_rules(c, auth)) == 1
+    assert len(_rules_for(c, auth, _ticker_id("AAPL"))) == 1
 
 
 def test_removing_stock_deletes_its_rules_only(signed_in):
@@ -94,8 +106,8 @@ def test_removing_stock_deletes_its_rules_only(signed_in):
     r = c.delete(f"/watchlist/{aapl['id']}", headers=auth)
     assert r.status_code == 204
 
-    rules = _rules(c, auth)
-    assert [r["ticker_id"] for r in rules] == [msft["ticker"]["id"]]
+    assert _rules_for(c, auth, aapl["ticker"]["id"]) == []
+    assert len(_rules_for(c, auth, msft["ticker"]["id"])) == 1
 
 
 # ---------------------------------------------------------------------------

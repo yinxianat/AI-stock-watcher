@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from html import escape
 
 from app.services.articles.schemas import AGE_GROUPS, Fact, KidVersion, Story
-from app.services.articles.validate import is_allowed_url
+from app.services.articles.validate import is_allowed_url, site_root_url
 
 # Shown on every story. Kept in code (not written by the AI) so it's always
 # present and always worded the same.
@@ -89,14 +89,23 @@ def versions_for(story: Story, age_groups: list[str]) -> list[KidVersion]:
 
 
 def _links(v: StoryView) -> list[tuple[str, str]]:
-    """(site name, url) per source, allowed sites only, no duplicates."""
+    """(site name, publisher-homepage url) per source, no duplicates.
+
+    We link to the publisher's homepage, not the exact article: deep links
+    from AI search results can 404 by the time a reader clicks them
+    (articles move or get pulled), and a publisher homepage is always
+    live. The quote + source name still tells the reader where the fact
+    came from, so citation isn't lost."""
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for f in v.facts:
-        if f.source_url in seen or not is_allowed_url(f.source_url, v.allowed_domains):
+        if not is_allowed_url(f.source_url, v.allowed_domains):
             continue
-        seen.add(f.source_url)
-        out.append((f.source_name or "Source", f.source_url))
+        root = site_root_url(f.source_url)
+        if root in seen:
+            continue
+        seen.add(root)
+        out.append((f.source_name or "Source", root))
     return out
 
 

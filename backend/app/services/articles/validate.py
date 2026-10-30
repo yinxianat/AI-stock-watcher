@@ -41,6 +41,17 @@ def is_allowed_url(url: str, allowed_domains: list[str]) -> bool:
     return any(host == d or host.endswith("." + d) for d in allowed_domains)
 
 
+def site_root_url(url: str) -> str:
+    """Publisher homepage for a given article URL (`https://cnbc.com/foo` →
+    `https://www.cnbc.com`). We link to the publisher's homepage rather
+    than the exact article so a reader never hits a 404 for a page that
+    was moved or removed between when the AI found it and when the email
+    is opened."""
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower()
+    return f"https://{host}" if host else url
+
+
 def validate_facts(
     facts: list[Fact],
     *,
