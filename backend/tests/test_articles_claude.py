@@ -72,6 +72,7 @@ def fake(monkeypatch):
     monkeypatch.setenv("AI_ARTICLE_MODEL", "claude-haiku-5-5")
     monkeypatch.setenv("AI_ARTICLE_MAX_SEARCHES", "2")
     monkeypatch.setenv("AI_NEWS_DOMAINS", "finance.yahoo.com,reuters.com")
+    monkeypatch.setattr(claude, "_blocked_domains", set())
     get_settings.cache_clear()
 
     def install(*responses):
@@ -116,6 +117,46 @@ def test_research_reports_facts_and_every_url_the_search_saw(fake):
     assert "fallbacks" not in call  # Haiku has no refusal fallback
 
 
+def _blocked_error(*domains):
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    message = f"The following domains are not accessible to our user agent: {list(domains)}."
+    return anthropic.BadRequestError(
+        message, response=httpx2.Response(400, request=request), body=None,
+    )
+
+
+def test_site_blocking_the_crawler_is_dropped_and_search_retried(fake, caplog):
+    client = fake(_blocked_error("reuters.com"),
+                  _resp(_search_result(GOOD_URL), _report(), stop="tool_use"),
+                  _resp(_search_result(GOOD_URL), _report(), stop="tool_use"))
+
+    assert claude.research(_request()).research.facts
+    assert claude.research(_request()).research.facts
+
+    assert [c["tools"][0]["allowed_domains"] for c in client.calls] == [
+        ["finance.yahoo.com", "reuters.com"], ["finance.yahoo.com"], ["finance.yahoo.com"],
+    ]
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1 and "reuters.com" in errors[0].getMessage()
+
+
+def test_every_site_blocked_fails_without_a_key_problem(fake):
+    fake(_blocked_error("finance.yahoo.com", "reuters.com"))
+    result = run_pipeline(_request(), claude.research, *_claude_stages())
+    assert result.status == "failed"
+    assert not result.key_problem
+
+
+def test_other_bad_requests_still_raise(fake):
+    fake(_blocked_error().__class__(
+        "something else", response=httpx2.Response(
+            400, request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages")),
+        body=None,
+    ))
+    with pytest.raises(anthropic.BadRequestError):
+        claude.research(_request())
+
+
 def test_defaults_are_the_cheap_ones():
     from app.core.settings import Settings
     fields = Settings.model_fields
@@ -124,6 +165,7 @@ def test_defaults_are_the_cheap_ones():
     assert Settings(ai_article_model="").story_model == "claude-haiku-5-5"
     assert fields["ai_article_max_searches"].default == 2
     assert fields["ai_article_always_pct"].default == 5.0
+    assert fields["ai_news_domains"].default == "finance.yahoo.com"  # reuters.com blocks web search
     assert Settings(ai_provider="anthropic", ai_article_model="").story_model == "claude-haiku-5-5"
     assert Settings(ai_provider="gemini", ai_article_model="").story_model == "gemini-3.1-flash-lite"
     # A model from the other provider is ignored rather than sent to the wrong API.
