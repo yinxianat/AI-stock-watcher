@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from sqlalchemy import select
 
 from app.core.settings import get_settings
@@ -9,6 +11,7 @@ from app.db.database import get_session_factory
 from app.db.seed import seed
 from app.jobs.intraday import run_intraday_capture
 from app.models import (
+    DailyClose,
     EmailOptOut,
     NotificationEventType,
     NotificationRule,
@@ -40,7 +43,7 @@ def test_adding_stock_creates_default_band_rule(signed_in):
     rule = rules[0]
     assert rule["ticker_id"] == item["ticker"]["id"]
     assert rule["event_type"] == "price_change_range"
-    assert (rule["pct_low"], rule["pct_high"]) == (-5.0, 5.0)
+    assert (rule["pct_low"], rule["pct_high"]) == (-1.5, 1.5)
     assert rule["enabled"] is True
 
 
@@ -102,17 +105,17 @@ def test_removing_stock_deletes_its_rules_only(signed_in):
 
 def test_alerts_enabled_by_default_and_can_be_toggled(signed_in):
     c, auth = signed_in["client"], signed_in["auth"]
-    assert c.get("/auth/email-preferences", headers=auth).json() == {"alerts_enabled": True}
+    assert c.get("/auth/email-preferences", headers=auth).json()["alerts_enabled"] is True
 
     r = c.put("/auth/email-preferences", json={"alerts_enabled": False}, headers=auth)
-    assert r.json() == {"alerts_enabled": False}
-    assert c.get("/auth/email-preferences", headers=auth).json() == {"alerts_enabled": False}
+    assert r.json()["alerts_enabled"] is False
+    assert c.get("/auth/email-preferences", headers=auth).json()["alerts_enabled"] is False
 
     # Turning off twice is fine (idempotent).
     c.put("/auth/email-preferences", json={"alerts_enabled": False}, headers=auth)
 
     c.put("/auth/email-preferences", json={"alerts_enabled": True}, headers=auth)
-    assert c.get("/auth/email-preferences", headers=auth).json() == {"alerts_enabled": True}
+    assert c.get("/auth/email-preferences", headers=auth).json()["alerts_enabled"] is True
 
 
 def test_email_preferences_require_sign_in(client):
@@ -138,7 +141,7 @@ def test_unsubscribe_link_turns_alerts_off_without_sign_in(signed_in):
 
     r = c.post("/auth/unsubscribe", json={"token": token})
     assert r.status_code == 204
-    assert c.get("/auth/email-preferences", headers=auth).json() == {"alerts_enabled": False}
+    assert c.get("/auth/email-preferences", headers=auth).json()["alerts_enabled"] is False
 
     # Clicking the same link again still succeeds.
     assert c.post("/auth/unsubscribe", json={"token": token}).status_code == 204
@@ -175,6 +178,7 @@ def _user_with_band_rule() -> int:
         event_type=NotificationEventType.PRICE_CHANGE_RANGE,
         pct_low=-1.0, pct_high=1.0, enabled=True,
     ))
+    db.add(DailyClose(ticker_id=t.id, date=date.today() - timedelta(days=1), close=100.0))
     db.commit()
     uid = user.id
     db.close()
@@ -217,3 +221,8 @@ def test_unsubscribed_user_still_gets_sign_in_links(client):
     client.post("/auth/request-link", json={"email": "a@example.com"})
     assert len(client.sent_emails) == 1
     assert "token=" in client.sent_emails[0]["body_text"]
+
+
+def test_default_band_is_one_and_a_half_percent():
+    from app.core.settings import Settings
+    assert Settings.model_fields["default_rule_band_pct"].default == 1.5

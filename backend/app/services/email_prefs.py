@@ -1,8 +1,9 @@
 """Alert-email subscription status.
 
 Users can turn stock-alert emails off (Settings page, or the unsubscribe
-link in every alert). Only alerts are affected — sign-in links and
-email-confirmation messages are transactional and always sent.
+link in every alert). That covers alerts and the daily watchlist recap —
+sign-in links and email-confirmation messages are transactional and always
+sent. The recap also has its own switch in Settings.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.core.security import issue_token, verify_token
 from app.core.settings import get_settings
-from app.models import EmailOptOut, User
+from app.models import EmailOptOut, RecapOptOut, User
 
 UNSUBSCRIBE_PURPOSE = "unsubscribe"
 
@@ -33,6 +34,25 @@ def set_alerts_enabled(db: DBSession, user: User, enabled: bool) -> None:
         db.delete(row)
     elif not enabled and row is None:
         db.add(EmailOptOut(user_id=user.id))
+    db.commit()
+
+
+def recap_enabled(db: DBSession, user_id: int) -> bool:
+    """The daily watchlist recap's own switch (on unless turned off)."""
+    return db.get(RecapOptOut, user_id) is None
+
+
+def recap_opted_out_user_ids(db: DBSession) -> set[int]:
+    return set(db.execute(select(RecapOptOut.user_id)).scalars().all())
+
+
+def set_recap_enabled(db: DBSession, user: User, enabled: bool) -> None:
+    """Turn the daily recap on or off. Idempotent; commits."""
+    row = db.get(RecapOptOut, user.id)
+    if enabled and row is not None:
+        db.delete(row)
+    elif not enabled and row is None:
+        db.add(RecapOptOut(user_id=user.id))
     db.commit()
 
 

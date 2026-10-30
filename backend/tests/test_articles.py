@@ -14,7 +14,7 @@ from sqlalchemy import select
 from app.core.settings import get_settings
 from app.db.database import get_session_factory
 from app.jobs.intraday import run_intraday_capture
-from app.models import ArticleFollowup, NotificationLog, StockArticle, utcnow
+from app.models import ArticleFollowup, NotificationLog, StockArticle, User, utcnow
 from app.services.articles import render, service
 from app.services.articles.pipeline import run_pipeline
 from app.services.articles.schemas import (
@@ -458,14 +458,60 @@ def test_one_story_is_shared_by_everyone_watching(client, stories_on):
     assert all("STOCK STORY" in e["body_text"] for e in client.sent_emails)
 
 
-def test_ten_minute_spike_alone_gets_no_story(client, stories_on):
-    _setup_user_with_range_rule("AAPL", -1.0, 1.0)  # no prior close: tick signal only
-    run_intraday_capture(fetcher=_fetch({"AAPL": 100.0}), force=True)
-    run_intraday_capture(fetcher=_fetch({"AAPL": 105.0}), force=True)
+def test_small_stock_move_gets_the_fixed_note_not_an_ai_story(client, stories_on):
+    """Under AI_ARTICLE_MIN_PCT_STOCK (1%): no AI call, fixed note instead."""
+    _, ticker_id = _setup_user_with_range_rule("AAPL", -0.5, 0.5)
+    _seed_prior_day_close(ticker_id, close=100.0)
 
-    assert len(client.sent_emails) == 1
+    run_intraday_capture(fetcher=_fetch({"AAPL": 100.8}), force=True)
+
     assert stories_on == []
-    assert "STOCK STORY" not in client.sent_emails[0]["body_text"]
+    assert _rows(StockArticle) == []
+    email = client.sent_emails[0]
+    assert "SMALL MOVE" in email["body_text"]
+    assert "inside the small range of ±1%" in email["body_text"]
+    assert "less than 1%" in email["body_text"]
+    assert "SMALL MOVE" in email["body_html"]
+    assert "STOCK STORY" not in email["body_text"]
+
+
+def test_small_move_note_uses_the_parents_age_groups(client, stories_on):
+    from app.services.articles.preferences import set_age_groups
+
+    user_id, ticker_id = _setup_user_with_range_rule("AAPL", -0.5, 0.5)
+    _seed_prior_day_close(ticker_id, close=100.0)
+    db = get_session_factory()()
+    set_age_groups(db, db.get(User, user_id), ["13-17"])
+    db.close()
+
+    run_intraday_capture(fetcher=_fetch({"AAPL": 99.3}), force=True)
+
+    body = client.sent_emails[0]["body_text"]
+    assert "ages 13–17" in body and "ages 3–5" not in body
+    assert "moved down 0.7% today, within ±1%" in body
+
+
+def test_funds_get_a_story_from_half_a_percent(client, stories_on):
+    """AI_ARTICLE_MIN_PCT_FUND (0.5%) applies to ETFs: SPY +0.6% gets a story,
+    the same move in a single stock doesn't."""
+    _, spy_id = _setup_user_with_range_rule("SPY", -0.3, 0.3, email="a@example.com")
+    _, aapl_id = _setup_user_with_range_rule("AAPL", -0.3, 0.3, email="b@example.com")
+    _seed_prior_day_close(spy_id, close=100.0)
+    _seed_prior_day_close(aapl_id, close=100.0)
+
+    run_intraday_capture(fetcher=_fetch({"SPY": 100.6, "AAPL": 100.6}), force=True)
+
+    assert stories_on == ["SPY"]
+    bodies = {e["to"]: e["body_text"] for e in client.sent_emails}
+    assert "STOCK STORY" in bodies["a@example.com"]
+    assert "SMALL MOVE" in bodies["b@example.com"]
+
+
+def test_no_small_move_note_when_stories_are_off(client):
+    _, ticker_id = _setup_user_with_range_rule("AAPL", -0.5, 0.5)
+    _seed_prior_day_close(ticker_id, close=100.0)
+    run_intraday_capture(fetcher=_fetch({"AAPL": 100.8}), force=True)
+    assert "SMALL MOVE" not in client.sent_emails[0]["body_text"]
 
 
 def test_no_clear_cause_sends_the_plain_alert(client, stories_on, monkeypatch):
