@@ -336,7 +336,7 @@ def test_run_daily_summary_calls_notify_admin(client, monkeypatch):
     assert len(captured) == 1
     event, subject, body = captured[0]
     assert event == "daily_summary"
-    assert "AI Stock Watcher" in body
+    assert "Little Money Monkey" in body
     assert "PIPELINE" in body
     assert "DATABASE ROW COUNTS" in body
 

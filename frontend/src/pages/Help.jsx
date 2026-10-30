@@ -10,17 +10,19 @@ export default function Help() {
   return (
     <div className="container help">
       <div className="card">
-        <h2>How AI Stock Watcher works</h2>
+        <h2>How Little Money Monkey works</h2>
         <p>
-          AI Stock Watcher keeps an eye on the stocks you care about and emails
-          you when something worth knowing happens, such as a big price move
-          or a new yearly high. You don't need to check prices yourself.
+          Little Money Monkey keeps an eye on the stocks you care about and
+          emails you when something worth knowing happens, like a big price move
+          or a new yearly high. You and your family learn about money together,
+          one fun idea at a time. You don't need to check prices yourself.
         </p>
         <nav aria-label="On this page" className="help-toc">
           <a href="#start">Getting started</a>
           <a href="#dashboard">Your dashboard</a>
           <a href="#alerts">Alerts and rules</a>
           <a href="#stories">Stock Stories for kids</a>
+          <a href="#money-ideas">Money Ideas</a>
           <a href="#emails">Emails</a>
           <a href="#faq">Common questions</a>
         </nav>
@@ -187,6 +189,42 @@ export default function Help() {
         </div>
       </section>
 
+      <section className="card" id="money-ideas" aria-labelledby="money-ideas-h">
+        <h3 id="money-ideas-h">Money Ideas</h3>
+        <p>
+          Every daily recap includes a <strong>Money Idea of the Day</strong>: a
+          short, age-appropriate lesson about how money and investing work. Over a
+          few weeks, you and your kids work through a 20-idea curriculum that
+          starts with the basics (what a company is, what a share is) and builds
+          up to ideas like compounding, risk and diversification.
+        </p>
+        <ul>
+          <li>
+            <strong>One idea per recap, basics first.</strong> The first few ideas
+            lay the foundation. After that, the idea picks itself: on a day the
+            whole market moves together, you might get the idea about how everything
+            moves together; on a big-news day, the one about news and prices.
+          </li>
+          <li>
+            <strong>Written for your kids' ages.</strong> Each idea has a version
+            for each age group you chose in Settings, with an analogy they'll
+            recognise and a question you can ask them.
+          </li>
+          <li>
+            <strong>Look them up any time.</strong> Every idea you've received is
+            saved on your{' '}
+            {signedIn
+              ? <Link to="/money-ideas">Money Ideas</Link>
+              : 'Money Ideas'}{' '}
+            page, so you can re-read one with your kids whenever you like.
+          </li>
+          <li>
+            <strong>Not advice.</strong> Money Ideas describe how things work. They
+            never tell you or your child what to buy, sell or do with money.
+          </li>
+        </ul>
+      </section>
+
       <section className="card" id="emails" aria-labelledby="emails-h">
         <h3 id="emails-h">Emails</h3>
         <h4>Where alerts are sent</h4>
@@ -277,7 +315,7 @@ export default function Help() {
         <details>
           <summary>Is this financial advice?</summary>
           <p>
-            No. AI Stock Watcher only tells you when prices move. It doesn't
+            No. Little Money Monkey only tells you when prices move. It doesn't
             recommend buying or selling anything.
           </p>
         </details>
