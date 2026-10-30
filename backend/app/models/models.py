@@ -29,6 +29,7 @@ NotificationLog — audit trail of sent notifications (used to suppress dupes).
 LogEntry       — durable application log (WARNING+), auto-pruned per LOG_LIFETIME.
 RecapOptOut    — user who turned the daily watchlist recap off.
 RecapSend      — one row per (user, trading day) recap sent; stops repeats.
+MoneyIdeaSend  — which Money Idea of the Day each user got, per trading day.
 """
 
 from __future__ import annotations
@@ -272,6 +273,26 @@ class RecapSend(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    trading_date: Mapped[date_] = mapped_column(Date, nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+
+
+class MoneyIdeaSend(Base):
+    """A Money Idea of the Day sent to a user in their daily recap.
+
+    Durable history: drives each user's progress through the curriculum
+    (`app.services.money_ideas`) and the "Money ideas" page where parents
+    re-read past ideas with their kids. One per user per trading day.
+    """
+
+    __tablename__ = "money_idea_sends"
+    __table_args__ = (
+        UniqueConstraint("user_id", "trading_date", name="uq_money_idea_user_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    idea_key: Mapped[str] = mapped_column(String(40), nullable=False)
     trading_date: Mapped[date_] = mapped_column(Date, nullable=False)
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
 

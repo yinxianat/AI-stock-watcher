@@ -11,6 +11,7 @@ import Settings from './pages/Settings.jsx';
 import ConfirmEmail from './pages/ConfirmEmail.jsx';
 import Unsubscribe from './pages/Unsubscribe.jsx';
 import Help from './pages/Help.jsx';
+import MoneyIdeas from './pages/MoneyIdeas.jsx';
 
 function RequireAuth({ children }) {
   return getToken() ? children : <Navigate to="/" replace />;
@@ -21,11 +22,12 @@ function Header() {
   const signedIn = !!getToken();
   return (
     <header className="app-header">
-      <h1>AI Stock Watcher</h1>
+      <h1>🐵 Little Money Monkey</h1>
       <nav>
         {signedIn ? (
           <>
             <Link to="/dashboard">Dashboard</Link>
+            <Link to="/money-ideas">Money Ideas</Link>
             <Link to="/settings">Settings</Link>
             <Link to="/help">Help</Link>
             <button
@@ -74,6 +76,7 @@ export default function App() {
         <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />
         <Route path="/rules/:tickerId" element={<RequireAuth><Rules /></RequireAuth>} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
+        <Route path="/money-ideas" element={<RequireAuth><MoneyIdeas /></RequireAuth>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       </ErrorBoundary>

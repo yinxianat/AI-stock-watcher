@@ -21,6 +21,7 @@ from slowapi.util import get_remote_address
 
 from app.api import (
     auth_routes,
+    money_ideas_routes,
     rules_routes,
     tickers_routes,
     trends_routes,
@@ -167,7 +168,7 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
-        title="AI Stock Watcher API",
+        title="Little Money Monkey API",
         version="0.1.0",
         debug=settings.app_debug,
         lifespan=lifespan,
@@ -197,6 +198,7 @@ def create_app() -> FastAPI:
     app.include_router(watchlist_routes.router)
     app.include_router(rules_routes.router)
     app.include_router(trends_routes.router)
+    app.include_router(money_ideas_routes.router)
     return app
 
 

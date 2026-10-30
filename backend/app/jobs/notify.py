@@ -135,7 +135,7 @@ def run_notify(db: DBSession | None = None) -> int:
             try:
                 send_email(
                     user.notify_email,
-                    f"[AI Stock Watcher] {ticker.symbol}",
+                    f"[🐵 Little Money Monkey] {ticker.symbol}",
                     body,
                     headers=alert_email_headers(user),
                 )

@@ -529,6 +529,82 @@ def test_no_clear_cause_sends_the_plain_alert(client, stories_on, monkeypatch):
     assert _rows(ArticleFollowup) == []
 
 
+def test_no_clear_cause_on_a_whole_market_day_gets_the_market_note(
+        client, stories_on, monkeypatch):
+    """No company news, but the stock fell about as much as the S&P 500:
+    the fixed "whole-market day" note, in the parent's age groups."""
+    from app.services.articles.preferences import set_age_groups
+
+    monkeypatch.setattr(service, "generate_article",
+                        lambda req: GenerationResult(status="no_clear_cause"))
+    monkeypatch.setattr(service, "market_move_pct", lambda: -1.8)
+    user_id, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
+    _seed_prior_day_close(ticker_id, close=100.0)
+    db = get_session_factory()()
+    set_age_groups(db, db.get(User, user_id), ["3-5", "13-17"])
+    db.close()
+
+    run_intraday_capture(fetcher=_fetch({"AAPL": 98.25}), force=True)
+
+    email = client.sent_emails[0]
+    body = email["body_text"]
+    assert "WHOLE-MARKET DAY" in body
+    assert "AAPL -1.75% today · S&P 500 -1.80%" in body
+    assert "when the tide goes out, all the boats go down together" in body
+    assert "ages 13–17" in body and "ages 6–9" not in body
+    assert "isn't written by AI" in body
+    assert "WHOLE-MARKET DAY" in email["body_html"]
+    assert "STOCK STORY" not in body
+
+
+def test_failed_story_on_a_whole_market_day_gets_the_market_note(
+        client, stories_on, monkeypatch):
+    monkeypatch.setattr(service, "generate_article", lambda req: GenerationResult(
+        status="failed", error="reviewer rejected the grown-up summary"))
+    monkeypatch.setattr(service, "market_move_pct", lambda: -1.8)
+    _, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
+    _seed_prior_day_close(ticker_id, close=100.0)
+
+    run_intraday_capture(fetcher=_fetch({"AAPL": 98.3}), force=True)
+
+    assert "WHOLE-MARKET DAY" in client.sent_emails[0]["body_text"]
+
+
+def test_reviewer_gets_our_price_data_for_market_claims():
+    from app.services.articles.prompts import REVIEW_SYSTEM, review_prompt
+    req = _request(move_pct=-1.67, market_pct=-1.79)
+    prompt = review_prompt(req, [_fact()], _story())
+    assert "AAPL moved -1.67% today. The S&P 500 (the whole market) moved -1.79% today." in prompt
+    assert "checked against the price data" in REVIEW_SYSTEM
+
+
+@pytest.mark.parametrize("move, market, expected", [
+    (-1.75, -1.79, True),   # today's MSFT
+    (-2.5, -1.8, True),
+    (0.3, 0.1, True),       # small market moves: within 0.5 points
+    (-4.78, -1.79, False),  # NVDA: fell much more than the market
+    (1.5, -1.5, False),     # opposite directions
+    (2.0, None, False),     # market unknown
+])
+def test_moved_with_market(move, market, expected):
+    assert service.moved_with_market(move, market) is expected
+
+
+def test_default_news_sites_are_reachable_family_friendly_newsrooms():
+    from app.core.settings import Settings
+    domains = Settings(ai_news_domains=Settings.model_fields["ai_news_domains"].default)
+    assert domains.ai_news_domain_list == [
+        "finance.yahoo.com", "cnbc.com", "cnn.com", "axios.com", "npr.org", "techcrunch.com",
+    ]
+    # Blocked by Claude's web search (the API rejects the whole request).
+    assert not {"reuters.com", "apnews.com", "marketwatch.com"} & set(domains.ai_news_domain_list)
+
+
+def test_research_looks_for_the_market_reason_when_no_company_news():
+    from app.services.articles.prompts import RESEARCH_SYSTEM
+    assert "why the overall" in RESEARCH_SYSTEM and "whole market" in RESEARCH_SYSTEM
+
+
 def test_slow_story_follows_up_in_the_same_thread(client, stories_on, monkeypatch):
     later = _Later()
     monkeypatch.setattr(service, "_executor", later)
@@ -876,3 +952,19 @@ def test_alert_email_uses_the_parents_age_groups(client, stories_on):
     body = client.sent_emails[0]["body_text"]
     assert "For your little one" in body and "For your teen" in body
     assert "For your kid (ages 6–9)" not in body
+
+
+def test_writer_sentence_limits_stay_under_the_code_check():
+    """The writer is told stricter sentence limits than language.py enforces,
+    so honest stories aren't thrown away for one long sentence."""
+    import re
+
+    from app.services.articles.language import AGE_LIMITS
+    from app.services.articles.prompts import WRITER_SYSTEM
+
+    text = " ".join(WRITER_SYSTEM.split())
+    for group, (max_words, max_sentence) in AGE_LIMITS.items():
+        m = re.search(rf'"{group}" \([^)]*\): .*?at most (\d+) words, at most (\d+) '
+                      r"words in any sentence", text)
+        assert m, group
+        assert int(m.group(1)) < max_words and int(m.group(2)) < max_sentence, group
