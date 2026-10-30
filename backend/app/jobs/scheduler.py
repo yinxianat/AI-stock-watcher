@@ -21,6 +21,19 @@ from app.models import utcnow
 
 log = logging.getLogger(__name__)
 
+# All cron jobs run in Eastern (US market time). We MUST pass this to every
+# CronTrigger: APScheduler does NOT propagate the scheduler's timezone to a
+# trigger that was constructed without its own `timezone=` argument — the
+# trigger falls back to the host's local tz via `tzlocal`, which on Railway
+# is whatever `TZ` resolves to (we hit this: jobs fired in Pacific instead
+# of Eastern until this was pinned).
+SCHED_TZ = "US/Eastern"
+
+
+def _cron(**kwargs) -> CronTrigger:
+    """CronTrigger pinned to SCHED_TZ so it never inherits the host tz."""
+    return CronTrigger(timezone=SCHED_TZ, **kwargs)
+
 
 # ---------------------------------------------------------------------------
 # Keepalive self-ping — prevents Railway from sleeping the container.
@@ -159,7 +172,7 @@ def run_full_pipeline() -> None:
 
 def start_scheduler() -> BackgroundScheduler:
     settings = get_settings()
-    sched = BackgroundScheduler(timezone="US/Eastern")
+    sched = BackgroundScheduler(timezone=SCHED_TZ)
 
     # ---- Log configuration summary so prod deploys are self-documenting ----
     log.info(
@@ -179,7 +192,7 @@ def start_scheduler() -> BackgroundScheduler:
     for hour, minute in settings.batch_times:
         sched.add_job(
             run_full_pipeline,
-            CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute),
+            _cron(day_of_week="mon-fri", hour=hour, minute=minute),
             id=f"pipeline_{hour:02d}{minute:02d}",
             replace_existing=True,
         )
@@ -192,7 +205,7 @@ def start_scheduler() -> BackgroundScheduler:
         sh, sm = settings.daily_summary_time
         sched.add_job(
             run_daily_summary,
-            CronTrigger(hour=sh, minute=sm),
+            _cron(hour=sh, minute=sm),
             id="daily_summary",
             replace_existing=True,
         )
@@ -208,7 +221,7 @@ def start_scheduler() -> BackgroundScheduler:
         rh, rm = settings.recap_time
         sched.add_job(
             run_watchlist_recap,
-            CronTrigger(day_of_week="mon-fri", hour=rh, minute=rm),
+            _cron(day_of_week="mon-fri", hour=rh, minute=rm),
             id="watchlist_recap",
             replace_existing=True,
             max_instances=1,
@@ -223,7 +236,7 @@ def start_scheduler() -> BackgroundScheduler:
 
     sched.add_job(
         run_cleanup,
-        CronTrigger(hour=3, minute=15),
+        _cron(hour=3, minute=15),
         id="log_cleanup",
         replace_existing=True,
     )
@@ -235,7 +248,7 @@ def start_scheduler() -> BackgroundScheduler:
 
     sched.add_job(
         run_heartbeat,
-        CronTrigger(day_of_week="mon-fri", minute=20),
+        _cron(day_of_week="mon-fri", minute=20),
         id="pipeline_heartbeat",
         replace_existing=True,
     )
@@ -257,7 +270,7 @@ def start_scheduler() -> BackgroundScheduler:
         # the job 144 times/day to no-op.
         sched.add_job(
             run_intraday_capture,
-            CronTrigger(
+            _cron(
                 day_of_week="mon-fri",
                 hour=f"{open_h}-{close_h}",
                 minute=f"*/{tick}",

@@ -31,7 +31,12 @@ from app.services.articles.schemas import (
     Usage,
     WriteResult,
 )
-from app.services.articles.validate import shared_problems, validate_facts, version_problems
+from app.services.articles.validate import (
+    shared_problems,
+    site_root_url,
+    validate_facts,
+    version_problems,
+)
 from tests.test_intraday import _seed_prior_day_close, _setup_user_with_range_rule
 
 TODAY = date(2026, 10, 29)
@@ -143,6 +148,21 @@ def test_facts_must_be_real_allowed_and_recent():
     kept = validate_facts(facts, seen_urls=seen, allowed_domains=DOMAINS,
                           today=TODAY, max_age_days=2)
     assert [f.id for f in kept] == ["ok"]
+
+
+# ---------------------------------------------------------------------------
+# Links in the email go to the publisher's homepage, not the article page
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("url,root", [
+    ("https://finance.yahoo.com/news/apple-123.html", "https://finance.yahoo.com"),
+    ("https://www.cnbc.com/2026/10/29/apple.html", "https://www.cnbc.com"),
+    ("https://cnn.com/2026/10/30/stocks/foo", "https://cnn.com"),
+    ("https://techcrunch.com/x?y=z#frag", "https://techcrunch.com"),
+])
+def test_site_root_strips_path_and_query(url, root):
+    assert site_root_url(url) == root
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +323,8 @@ def test_pipeline_never_raises():
     assert "API down" in result.error
 
 
+
+
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
@@ -354,9 +376,24 @@ def test_html_escapes_everything_the_ai_wrote():
 def test_only_allowed_source_links_are_shown():
     facts = [_fact(), _fact(id="f2", source_url="https://phish.example/x", source_name="Phish")]
     v = _view(facts=facts)
-    assert "phish.example" not in render.story_html(v)
-    assert "phish.example" not in render.story_text(v)
-    assert GOOD_URL in render.story_text(v)
+    txt = render.story_text(v)
+    html = render.story_html(v)
+    assert "phish.example" not in html and "phish.example" not in txt
+    # Links go to the publisher's homepage, not the article page.
+    assert "https://www.reuters.com" in txt and "https://www.reuters.com" in html
+    assert GOOD_URL not in txt and GOOD_URL not in html
+
+
+def test_duplicate_sources_from_same_site_collapse_to_one_link():
+    """Two facts from different reuters articles → one Reuters link."""
+    facts = [
+        _fact(id="f1", source_url="https://www.reuters.com/a/one.html",
+              source_name="Reuters"),
+        _fact(id="f2", source_url="https://www.reuters.com/b/two.html",
+              source_name="Reuters"),
+    ]
+    txt = render.story_text(_view(facts=facts))
+    assert txt.count("https://www.reuters.com") == 1
 
 
 def test_numbers_and_emoji_come_from_our_data():

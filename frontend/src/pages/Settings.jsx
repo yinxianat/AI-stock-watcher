@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Navigate, useSearchParams } from 'react-router-dom';
 import { api, getToken } from '../lib/api.js';
+import { logError } from '../lib/log.js';
 import { formatCountdown } from '../api/errors.js';
 import { sendEmailRequest, useCooldown } from '../lib/emailSend.js';
 import { suggestEmail } from '../lib/emailTypos.js';
@@ -44,18 +45,33 @@ export default function Settings() {
 
   useEffect(() => {
     if (!linkToken && !signedIn) return;
-    if (signedIn) api.me().then(setMe).catch(() => setMe(null));
+    if (signedIn) {
+      api.me().then(setMe).catch((e) => {
+        setMe(null);
+        if (e?.status !== 401) logError('settings', e, 'load-me');
+      });
+    }
     api
       .getEmailPreferences(undefined, linkToken)
       .then((p) => {
         setAlertsEnabled(p.alerts_enabled);
         setRecapEnabled(p.recap_enabled);
       })
-      .catch(() => setAlertsEnabled(null));
+      .catch((e) => {
+        setAlertsEnabled(null);
+        if (e?.status !== 400 && e?.status !== 401) {
+          logError('settings', e, 'load-email-prefs');
+        }
+      });
     api
       .getStoryPreferences(undefined, linkToken)
       .then(setStoryPrefs)
-      .catch(() => setStoryPrefs(null));
+      .catch((e) => {
+        setStoryPrefs(null);
+        if (e?.status !== 400 && e?.status !== 401) {
+          logError('settings', e, 'load-story-prefs');
+        }
+      });
   }, [linkToken, signedIn]);
 
   async function savePrefs(save) {
@@ -129,7 +145,7 @@ export default function Settings() {
       // Also after 'unsure': the server may have sent it and would refuse
       // another one this soon anyway.
       startCooldown(RESEND_COOLDOWN_S);
-      api.me().then(setMe).catch(() => {});
+      api.me().then(setMe).catch((e) => logError('settings', e, 'refresh-me'));
     } catch (err) {
       setFlash({ kind: 'err', msg: err.message });
       // Wait as long as the server asked (could be minutes after the burst cap).
