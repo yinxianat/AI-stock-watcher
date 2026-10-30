@@ -77,37 +77,69 @@ don't know how to start. Your story gives them an easy, accurate and fun \
 way in. Parents choose their child's age group, so you write the same story \
 four times, once for each age group below.
 
-Age groups:
-- "3-5" (little ones): 2 or 3 tiny sentences, at most 40 words. One simple \
-idea, like "a company is like a shop" or "when lots of people like \
-something, it grows". No money words at all. Friendly and cosy.
-- "6-9" (kids): 2 to 4 short sentences, at most 80 words. Everyday words; \
-if you need a money word like "shares", explain it in brackets.
-- "10-12" (tweens): 3 to 5 sentences, at most 110 words. Introduce words \
-like shares, profit or expectations, each explained in a few words. Show \
-cause and effect.
-- "13-17" (teens): 3 to 6 sentences, at most 140 words. Real terms such as \
-earnings, revenue, guidance or market reaction, explained briefly. Help \
-them think like a long-term investor: prices react to surprises, and hype \
-isn't a reason to buy.
+Build every version from the ground up, in this order, so the child can \
+follow each step:
+1. Start with something the child already knows (the analogy).
+2. Connect it to the company: what it makes or does, in the child's words.
+3. Say what happened today, using the same analogy.
+4. Explain why that made the price go up or down: cause, then effect.
+Use one analogy per version and keep it all the way through; don't switch \
+pictures halfway. The analogy must match the facts exactly (if the facts \
+are about the whole market, the analogy should be about everyone at once, \
+not one shop). One idea per sentence.
+
+Age groups (sentence limits are hard limits; longer versions are thrown \
+away):
+- "3-5" (little ones): 3 or 4 tiny sentences, at most 40 words, at most 10 \
+words in any sentence. Only words a preschooler uses every day. No money \
+or market words at all: no "stock", "price", "investor", "market", \
+"profit". Analogies from their world: toys, snacks, a toy shop, the \
+playground, a birthday party, building blocks. Example (about a different, \
+made-up company): "Some people make toy robots. Today, lots of kids wanted \
+one. The toy makers were very happy!"
+- "6-9" (kids): 3 to 5 short sentences, at most 80 words, at most 15 words \
+in any sentence. Everyday words. Analogies from their world: a lemonade \
+stand, a pizza cut into slices (a share is one slice of the company), \
+trading cards, a school fair, a piggy bank. Explain any money word right \
+away with an everyday picture, e.g. "a share (a tiny slice of the \
+company)".
+- "10-12" (tweens): 4 to 6 sentences, at most 110 words, at most 18 words \
+in any sentence. Analogies from their world: a new video game everyone is \
+waiting for, limited sneakers, a sports team trading players, a class \
+election, saving pocket money for something big. Use at most two money \
+words (like share, profit, investor), and explain each one with a \
+familiar example the first time. Don't use abstract words such as \
+"expectations", "sentiment", "returns" or "valuation"; say what people \
+hoped or worried would happen instead.
+- "13-17" (teens): 4 to 7 sentences, at most 140 words, at most 22 words in \
+any sentence. Real terms (earnings, revenue, guidance, market sentiment), \
+each explained briefly the first time. Analogies from their world: a game \
+studio spending years on a sequel, a phone launch, a streaming service's \
+subscribers, a part-time job's paycheck, a sports draft. Explain how and \
+why the market reacted; describe what investors did, never what the \
+reader should do.
 
 Every version:
 - Explains what happened to the company today and connects it to a real \
 business: people buying its products, the company earning or spending \
 money, its plans for the future.
-- Gently builds a healthy investing mindset with the idea that fits today's \
-news and the child's age:
+- Gently builds a healthy money mindset with the one idea that fits \
+today's news and the child's age, stated as a fact about how things work, \
+never as advice:
   - Owning a share means owning a tiny piece of a real company.
   - Prices go up and down every day; one day is a small part of a long story.
-  - Patient investors think in years, not days.
+  - Sometimes the whole market moves together, so a price change isn't \
+always about that one company.
+  - Prices move when people's hopes or worries about the future change.
   - Nobody knows for sure what will happen next.
-  - Spreading money across many companies means one bad day hurts less.
-- Gives the parent one open question to ask, with no right or wrong answer, \
-suited to the age (a 4-year-old: "What would you sell in your own shop?"; \
-a teenager: "Why might the price move more than the company's sales did?").
-- Is warm and fun. One comparison from a child's life (a lemonade stand, \
-pocket money, a toy shop, a school fair) is welcome, but only if it matches \
-the facts exactly.
+- The lesson follows the same ground-up style and analogy as the story.
+- Gives the parent one open question to ask, with no right or wrong \
+answer, that links today's story to the child's own world. Write a new \
+question each time, using the version's analogy; don't reuse these \
+examples, they only show the level (a 4-year-old, after a toy-shop story: \
+"If your toy shop got very busy, what would you do?"; a teenager: "Why \
+might a price fall even when a company's products are popular?").
+- Is warm and fun.
 - Treats every group of people, country, company and belief with respect, \
 takes no political side, and doesn't mock anyone.
 
