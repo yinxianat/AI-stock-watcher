@@ -54,7 +54,7 @@ from app.models import (
     utcnow,
 )
 from app.api.feedback_routes import feedback_links_html, feedback_links_text
-from app.api.money_ideas_routes import money_ideas_url
+from app.services.email_links import money_ideas_url, settings_url
 from app.services import email_prefs, money_ideas
 from app.services.articles import render
 from app.services.articles import service as articles
@@ -177,6 +177,24 @@ def _quiet_rules(db: DBSession, user_id: int, moves: dict[int, Move],
         and (r.pct_low < -band or r.pct_high > band)
     ]
     return sorted(quiet, key=lambda q: abs(q.move.pct), reverse=True)
+
+
+def _starter_recipients(db: DBSession, day: date) -> list[User]:
+    """Confirmed users with an empty watchlist who are still due a recap.
+
+    New accounts get the default index fund, so this is mostly people who
+    deliberately cleared their watchlist — they'd otherwise hear nothing
+    from us at all.
+    """
+    off = email_prefs.opted_out_user_ids(db) | email_prefs.recap_opted_out_user_ids(db)
+    done = set(db.execute(
+        select(RecapSend.user_id).where(RecapSend.trading_date == day)
+    ).scalars().all())
+    users = db.execute(
+        select(User).where(User.notify_email_confirmed.is_(True))
+        .where(User.id.notin_(select(WatchlistItem.user_id)))
+    ).scalars().all()
+    return [u for u in users if u.id not in off and u.id not in done]
 
 
 def _recipients(db: DBSession, day: date) -> list[User]:
@@ -356,10 +374,9 @@ def _day_tags(top: Move, market_pct: float | None) -> set[str]:
 
 
 def _footer_text(user: User) -> str:
-    base = get_settings().frontend_base_url
     return (
         "You're receiving this daily recap because you have stocks on your watchlist.\n"
-        f"Turn the recap off in Settings: {base}/settings\n"
+        f"Turn the recap off in Settings: {settings_url(user.id)}\n"
         f"Stop all alert emails: {email_prefs.unsubscribe_url(user)}"
     )
 
@@ -424,7 +441,7 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
         _html(moves, market_pct, alerted, kids_html_with_fb)
         + money_ideas.idea_html(idea, ages, ideas_url, feedback_html=idea_fb_html)
         + (_quiet_html(quiet) if quiet else ""),
-        f"{get_settings().frontend_base_url}/settings", email_prefs.unsubscribe_url(user),
+        settings_url(user.id), email_prefs.unsubscribe_url(user),
         reason="You're receiving this daily recap because you have stocks on your watchlist.",
     )
     try:
@@ -442,6 +459,108 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
         ).scalar_one_or_none()
         if already is None:  # an alert today may already be waiting for it
             articles.add_followup(db, story, user, message_id, subject)
+    try:
+        db.commit()
+    except IntegrityError:  # another run sent it first
+        db.rollback()
+    return True
+
+
+def _starter_tags(market_pct: float | None) -> set[str]:
+    """Which money idea fits a market-only day."""
+    tags = {money_ideas.MARKET_DAY}
+    if market_pct is None:
+        return tags
+    if abs(market_pct) >= _BIG_MOVE_PCT:
+        tags.add(money_ideas.BIG_MOVE)
+    elif abs(market_pct) < 1.0:
+        tags.add(money_ideas.SMALL_DAY)
+    return tags
+
+
+_STARTER_REASON = (
+    "You're receiving this because you have no stocks on your watchlist yet."
+)
+
+
+def _starter_footer_text(user: User) -> str:
+    return (
+        f"{_STARTER_REASON}\n"
+        f"Turn the recap off in Settings: {settings_url(user.id)}\n"
+        f"Stop all alert emails: {email_prefs.unsubscribe_url(user)}"
+    )
+
+
+def _send_starter_recap(
+    db: DBSession, user: User, market_pct: float | None, day: date,
+) -> bool:
+    """Market-only recap for a user with an empty watchlist: how the whole
+    market did, today's money idea, and an invitation to pick their own
+    stocks. No AI story, so it costs nothing to send."""
+    ages = get_age_groups(db, user.id)
+    idea = money_ideas.next_idea(db, user.id, _starter_tags(market_pct))
+    ideas_url = money_ideas_url(user.id)
+    add_url = get_settings().frontend_base_url
+
+    content_id = f"{idea.key}:{day.isoformat()}"
+    context = {"idea_key": idea.key, "position": money_ideas.position(idea)}
+    fb_text = feedback_links_text(
+        user.id, "money_idea", content_id,
+        age_group=ages[0] if ages else None, context=context,
+    )
+    fb_html = feedback_links_html(
+        user.id, "money_idea", content_id,
+        age_group=ages[0] if ages else None, context=context,
+    )
+
+    market = _market_line(market_pct) or "The market is closed for today."
+    subject = (
+        f"[🐵 Little Money Monkey] The market today: {market_pct:+.1f}%"
+        if market_pct is not None
+        else "[🐵 Little Money Monkey] Today's money idea"
+    )
+    intro = "Here's how the whole market did today, plus one money idea to share."
+
+    body = "\n".join([
+        f"📊 THE MARKET TODAY · {day:%a %b} {day.day}",
+        market,
+        "",
+        "You don't follow any stocks yet, so this is the big picture.",
+        "",
+        money_ideas.idea_text(idea, ages, ideas_url, feedback_text=fb_text),
+        "",
+        "➕ Want to follow your own stocks?",
+        f"   Pick them here (sign in first): {add_url}",
+        "",
+        _starter_footer_text(user),
+    ])
+
+    block = f"""\
+<div style="border:1px solid #d0d7de;border-radius:10px;padding:16px;margin:16px 0">
+<p style="margin:0 0 8px;font-size:12px;letter-spacing:.04em;color:{_MUTED}">📊 THE MARKET TODAY</p>
+<p style="margin:0 0 4px;font-size:17px">{escape(market)}</p>
+<p style="margin:0;font-size:14px;color:{_MUTED}">You don't follow any stocks yet, so this is the big picture.</p>
+</div>"""
+    cta = f"""\
+<div style="border:1px solid #b7e1c1;background:#f3fbf5;border-radius:10px;padding:16px;margin:16px 0;text-align:center">
+<p style="margin:0 0 10px;font-size:15px">➕ <strong>Want to follow your own stocks?</strong></p>
+<p style="margin:0;font-size:14px;color:{_MUTED}">Pick the companies your family knows and we'll explain their moves.</p>
+<p style="margin:10px 0 0"><a href="{escape(add_url, quote=True)}" style="display:inline-block;padding:8px 16px;border-radius:6px;background:#1a7f37;color:#fff;text-decoration:none;font-size:14px">Choose my stocks</a></p>
+</div>"""
+    html = render.email_html(
+        intro,
+        block + money_ideas.idea_html(idea, ages, ideas_url, feedback_html=fb_html) + cta,
+        settings_url(user.id), email_prefs.unsubscribe_url(user),
+        reason=_STARTER_REASON,
+    )
+    try:
+        send_email(user.notify_email, subject, body, body_html=html,
+                   headers=email_prefs.alert_email_headers(user))
+    except Exception as e:  # pragma: no cover
+        log.warning("Starter recap failed for user=%d: %s", user.id, e)
+        return False
+    db.add(RecapSend(user_id=user.id, trading_date=day))
+    money_ideas.record(db, user.id, idea, day)
     try:
         db.commit()
     except IntegrityError:  # another run sent it first
@@ -490,6 +609,14 @@ def run_watchlist_recap(db: DBSession | None = None) -> int:
         for user in users:
             if _send_recap(db, user, watch[user.id], market_pct, stories, day, moves):
                 sent += 1
+
+        # Users with an empty watchlist get the market-only version, so they
+        # still hear from us and get the day's money idea.
+        starter_sent = 0
+        for user in _starter_recipients(db, day):
+            if _send_starter_recap(db, user, market_pct, day):
+                starter_sent += 1
+        sent += starter_sent
         # A story that finished just after the wait found no follow-ups to
         # send (they were committed above), so send them now.
         for story in stories.values():
@@ -497,7 +624,8 @@ def run_watchlist_recap(db: DBSession | None = None) -> int:
 
         elapsed = time.monotonic() - t0
         summary = (f"day={day}, recipients={len(users)}, emails_sent={sent}, "
-                   f"stocks={len(moves)}, stories={len(stories)}")
+                   f"starter_sent={starter_sent}, stocks={len(moves)}, "
+                   f"stories={len(stories)}")
         log.info("Watchlist recap complete (%.2fs): %s", elapsed, summary)
         from app.jobs.audit import record_job_run
 

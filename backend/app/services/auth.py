@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import timedelta
 
@@ -19,13 +20,28 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.core.security import hash_session_token, issue_token, verify_token
 from app.core.settings import get_settings
-from app.models import LoginToken, Session, User, utcnow
+from app.models import (
+    LoginToken,
+    NotificationEventType,
+    NotificationRule,
+    Session,
+    Ticker,
+    User,
+    WatchlistItem,
+    utcnow,
+)
 from app.services.alerts import alert_event_signup
 from app.services.emailer import send_email
 from app.services.send_limits import TooManyEmails, enforce_send_limit, window_start
 
+log = logging.getLogger(__name__)
+
 LOGIN_PURPOSE = "login"
 CONFIRM_PURPOSE = "confirm-email"
+
+# A brand-new account starts watching the broad market, so the dashboard
+# isn't empty and the first daily recap has something to teach from.
+DEFAULT_WATCH_SYMBOL = "SPY"
 
 
 def _now():
@@ -105,6 +121,7 @@ def verify_magic_link(db: DBSession, token: str) -> User | None:
         user = User(email=email, notify_email=email, notify_email_confirmed=True)
         db.add(user)
         db.flush()
+        add_default_watchlist(db, user)
 
     user.last_login_at = _now()
     db.commit()
@@ -114,6 +131,31 @@ def verify_magic_link(db: DBSession, token: str) -> User | None:
         alert_event_signup(email)
 
     return user
+
+
+def add_default_watchlist(db: DBSession, user: User) -> bool:
+    """Put the default index fund on a new user's watchlist, with a starter
+    price-change rule. Caller commits. True iff anything was added.
+
+    Only ever called for a just-created user, so it never touches the
+    watchlist of someone who deliberately emptied theirs.
+    """
+    ticker = db.execute(
+        select(Ticker).where(Ticker.symbol == DEFAULT_WATCH_SYMBOL)
+    ).scalar_one_or_none()
+    if ticker is None:
+        log.warning("Default watch symbol %s is not seeded; new user starts empty",
+                    DEFAULT_WATCH_SYMBOL)
+        return False
+    db.add(WatchlistItem(user_id=user.id, ticker_id=ticker.id))
+    band = get_settings().default_rule_band_pct
+    if band > 0:
+        db.add(NotificationRule(
+            user_id=user.id, ticker_id=ticker.id,
+            event_type=NotificationEventType.PRICE_CHANGE_RANGE,
+            pct_low=-band, pct_high=band, enabled=True,
+        ))
+    return True
 
 
 def issue_session(db: DBSession, user: User) -> tuple[str, Session]:
