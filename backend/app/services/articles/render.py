@@ -317,12 +317,16 @@ def still_looking_text(symbol: str) -> str:
     )
 
 
-def email_html(intro: str, block_html: str, manage_url: str, unsubscribe_url: str) -> str:
+ALERT_REASON = "You're receiving this because you set a price-change rule for this stock."
+
+
+def email_html(intro: str, block_html: str, manage_url: str, unsubscribe_url: str,
+               reason: str = ALERT_REASON) -> str:
     """Whole HTML email around a story block (or a short note)."""
     return f"""\
 <div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;max-width:560px;color:#1f2328">
 <p style="font-size:15px">{escape(intro)}</p>
 {block_html}
-<p style="font-size:12px;color:{_MUTED}">You're receiving this because you set a price-change rule for this stock.<br>
+<p style="font-size:12px;color:{_MUTED}">{escape(reason)}<br>
 <a href="{escape(manage_url, quote=True)}">Manage your watchlist, rules and story ages</a> · <a href="{escape(unsubscribe_url, quote=True)}">Stop all alert emails</a></p>
 </div>"""

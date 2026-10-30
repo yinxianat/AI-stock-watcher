@@ -1,5 +1,5 @@
 """APScheduler setup — fires ingest -> compute -> notify three times per day,
-plus daily summary, log retention, heartbeat health-check, and a keepalive
+plus the users' watchlist recap, daily summary, log retention, heartbeat health-check, and a keepalive
 self-ping that prevents Railway from sleeping the container."""
 
 from __future__ import annotations
@@ -199,6 +199,24 @@ def start_scheduler() -> BackgroundScheduler:
         log.info("Registered job: daily_summary (daily %02d:%02d ET)", sh, sm)
     else:
         log.warning("Daily summary DISABLED — skipping registration")
+
+    # Daily watchlist recap for users — Mon-Fri after the close. Skips market
+    # holidays by itself (no closes for the day).
+    if settings.recap_enabled:
+        from app.jobs.recap import run_watchlist_recap
+
+        rh, rm = settings.recap_time
+        sched.add_job(
+            run_watchlist_recap,
+            CronTrigger(day_of_week="mon-fri", hour=rh, minute=rm),
+            id="watchlist_recap",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        log.info("Registered job: watchlist_recap (Mon-Fri %02d:%02d ET)", rh, rm)
+    else:
+        log.warning("Watchlist recap DISABLED — skipping registration")
 
     # Log retention cleanup — daily at 03:15 ET (off-peak).
     from app.jobs.cleanup import run_cleanup

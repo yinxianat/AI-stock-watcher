@@ -51,8 +51,16 @@ class UpdateNotifyEmailRequest(BaseModel):
 
 
 class EmailPreferences(BaseModel):
-    # False = the user unsubscribed from stock-alert emails.
+    # False = the user unsubscribed from stock-alert emails (recap included).
     alerts_enabled: bool
+    # The daily watchlist recap's own switch.
+    recap_enabled: bool = True
+
+
+class EmailPreferencesUpdate(BaseModel):
+    # Only the fields sent are changed.
+    alerts_enabled: bool | None = None
+    recap_enabled: bool | None = None
 
 
 class StoryPreferences(BaseModel):

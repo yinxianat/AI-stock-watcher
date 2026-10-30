@@ -10,6 +10,7 @@ from app.db.database import get_db
 from app.models import User
 from app.schemas.schemas import (
     EmailPreferences,
+    EmailPreferencesUpdate,
     LoginRequest,
     MagicLinkVerify,
     SessionResponse,
@@ -36,7 +37,9 @@ from app.services.confirm_email import (
 )
 from app.services.email_prefs import (
     is_unsubscribed,
+    recap_enabled,
     set_alerts_enabled,
+    set_recap_enabled,
     user_id_from_unsubscribe_token,
 )
 from app.services.signin_backfill import kickoff_signin_backfill
@@ -147,21 +150,31 @@ def confirm_change(
     return UserOut.model_validate(user)
 
 
+def _email_preferences(db: DBSession, user: User) -> EmailPreferences:
+    return EmailPreferences(
+        alerts_enabled=not is_unsubscribed(db, user.id),
+        recap_enabled=recap_enabled(db, user.id),
+    )
+
+
 @router.get("/email-preferences", response_model=EmailPreferences)
 def get_email_preferences(
     user: User = Depends(current_user), db: DBSession = Depends(get_db)
 ) -> EmailPreferences:
-    return EmailPreferences(alerts_enabled=not is_unsubscribed(db, user.id))
+    return _email_preferences(db, user)
 
 
 @router.put("/email-preferences", response_model=EmailPreferences)
 def update_email_preferences(
-    payload: EmailPreferences,
+    payload: EmailPreferencesUpdate,
     user: User = Depends(current_user),
     db: DBSession = Depends(get_db),
 ) -> EmailPreferences:
-    set_alerts_enabled(db, user, payload.alerts_enabled)
-    return EmailPreferences(alerts_enabled=payload.alerts_enabled)
+    if payload.alerts_enabled is not None:
+        set_alerts_enabled(db, user, payload.alerts_enabled)
+    if payload.recap_enabled is not None:
+        set_recap_enabled(db, user, payload.recap_enabled)
+    return _email_preferences(db, user)
 
 
 @router.get("/story-preferences", response_model=StoryPreferencesOut)

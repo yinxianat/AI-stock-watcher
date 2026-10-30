@@ -26,6 +26,7 @@ export default function Settings() {
   const inFlight = useRef(false);
   // null while loading or if it failed to load; the toggle is hidden then.
   const [alertsEnabled, setAlertsEnabled] = useState(null);
+  const [recapEnabled, setRecapEnabled] = useState(null);
   const [savingAlerts, setSavingAlerts] = useState(false);
   const [alertsFlash, setAlertsFlash] = useState(null);
   // null while loading or if it failed; the section is hidden then, and
@@ -39,7 +40,10 @@ export default function Settings() {
     api.me().then(setMe).catch(() => setMe(null));
     api
       .getEmailPreferences()
-      .then((p) => setAlertsEnabled(p.alerts_enabled))
+      .then((p) => {
+        setAlertsEnabled(p.alerts_enabled);
+        setRecapEnabled(p.recap_enabled);
+      })
       .catch(() => setAlertsEnabled(null));
     api
       .getStoryPreferences()
@@ -47,19 +51,22 @@ export default function Settings() {
       .catch(() => setStoryPrefs(null));
   }, []);
 
-  async function toggleAlerts(e) {
-    const enabled = e.target.checked;
+  async function savePrefs(save) {
     setSavingAlerts(true);
     setAlertsFlash(null);
     try {
-      const p = await api.setAlertsEnabled(enabled);
+      const p = await save();
       setAlertsEnabled(p.alerts_enabled);
+      setRecapEnabled(p.recap_enabled);
     } catch (err) {
       setAlertsFlash(err.message);
     } finally {
       setSavingAlerts(false);
     }
   }
+
+  const toggleAlerts = (e) => savePrefs(() => api.setAlertsEnabled(e.target.checked));
+  const toggleRecap = (e) => savePrefs(() => api.setRecapEnabled(e.target.checked));
 
   async function toggleAgeGroup(value, checked) {
     const current = storyPrefs.age_groups;
@@ -197,6 +204,22 @@ export default function Settings() {
               : 'Alerts are off. Your rules are kept, but no alert emails will be sent until you turn this back on.'}{' '}
             Sign-in links are always sent.
           </p>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={alertsEnabled && recapEnabled}
+              onChange={toggleRecap}
+              disabled={savingAlerts || !alertsEnabled}
+            />
+            <span>Send me a daily recap of my watchlist</span>
+          </label>
+          <p className="muted">
+            {!alertsEnabled
+              ? 'Turn alert emails on to get the daily recap.'
+              : recapEnabled
+                ? 'Every trading day after the market closes (about 4:30 PM Eastern): how each of your stocks did, and a story about your biggest mover to talk about with your kids.'
+                : 'The daily recap is off. Alerts from your rules still arrive.'}
+          </p>
           {alertsFlash && <div className="flash err">{alertsFlash}</div>}
         </div>
       )}
@@ -205,8 +228,8 @@ export default function Settings() {
         <div className="card">
           <h3>Stories for my kids</h3>
           <p className="muted">
-            When a stock you watch moves a lot, your alert includes a short story about
-            why, to read together with your kids. Choose the ages it's written for; you
+            When a stock you watch moves a lot, your alert and daily recap include a
+            short story about why, to read together with your kids. Choose the ages it's written for; you
             can pick more than one.
           </p>
           {AGE_OPTIONS.map(({ value, label }) => {

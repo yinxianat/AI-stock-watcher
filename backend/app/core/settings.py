@@ -46,7 +46,16 @@ class Settings(BaseSettings):
     # Rule created automatically when a stock is added to a watchlist, so new
     # stocks alert on big moves without the user setting anything up. Emails
     # when the move is below -N% or above +N%. Set to 0 to disable.
-    default_rule_band_pct: float = 5.0
+    default_rule_band_pct: float = 1.5
+
+    # Daily watchlist recap: one email per user each trading day after the
+    # close, with every watched stock's move and a kids' story about the
+    # biggest mover. Users can turn it off in Settings.
+    recap_enabled: bool = True
+    recap_time_et: str = "16:30"  # after the 16:05 batch saves today's closes
+    # Seconds the recap waits for new stories (it's after the close, so it
+    # can wait longer than an alert). Late ones follow as a reply.
+    recap_story_wait_seconds: int = 300
 
     # SMTP
     smtp_host: str = "localhost"
@@ -167,6 +176,11 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @property
+    def recap_time(self) -> tuple[int, int]:
+        h, m = self.recap_time_et.split(":")
+        return int(h), int(m)
 
     @property
     def cors_origin_list(self) -> list[str]:

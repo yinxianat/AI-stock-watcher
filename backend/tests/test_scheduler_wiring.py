@@ -29,7 +29,8 @@ def test_start_scheduler_registers_all_jobs(monkeypatch):
         assert "pipeline_heartbeat" in ids
         assert "intraday_capture" in ids
         assert "keepalive_self_ping" in ids
-        assert len(ids) == 8
+        assert "watchlist_recap" in ids
+        assert len(ids) == 9
     finally:
         sched.shutdown(wait=False)
 
@@ -61,6 +62,19 @@ def test_intraday_skipped_when_disabled(monkeypatch):
     try:
         ids = [j.id for j in sched.get_jobs()]
         assert "intraday_capture" not in ids
+    finally:
+        sched.shutdown(wait=False)
+
+
+def test_recap_skipped_when_disabled(monkeypatch):
+    """Setting RECAP_ENABLED=false omits the watchlist recap job."""
+    monkeypatch.setenv("RECAP_ENABLED", "false")
+    from app.core.settings import get_settings
+    get_settings.cache_clear()
+
+    sched = start_scheduler()
+    try:
+        assert "watchlist_recap" not in [j.id for j in sched.get_jobs()]
     finally:
         sched.shutdown(wait=False)
 
