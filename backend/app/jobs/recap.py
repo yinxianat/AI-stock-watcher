@@ -54,6 +54,7 @@ from app.models import (
     utcnow,
 )
 from app.api.feedback_routes import feedback_links_html, feedback_links_text
+from app.api.money_ideas_routes import money_ideas_url
 from app.services import email_prefs, money_ideas
 from app.services.articles import render
 from app.services.articles import service as articles
@@ -376,7 +377,7 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
     quiet = _quiet_rules(db, user.id, all_moves, alerted)
     idea = money_ideas.next_idea(db, user.id, _day_tags(top, market_pct))
     ages = get_age_groups(db, user.id)
-    ideas_url = f"{get_settings().frontend_base_url}/money-ideas"
+    ideas_url = money_ideas_url(user.id)
 
     idea_content_id = f"{idea.key}:{day.isoformat()}"
     idea_context = {"idea_key": idea.key, "position": money_ideas.position(idea)}

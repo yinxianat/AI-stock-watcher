@@ -111,6 +111,9 @@ class FeedbackResponse(BaseModel):
     rating: str
     content_type: str
     content_id: str
+    # Only set on the email path: lets the thank-you page link onward to the
+    # user's history without a login.
+    money_ideas_url: str | None = None
 
 
 @router.post("/rate", response_model=FeedbackResponse)
@@ -134,7 +137,12 @@ def rate_from_token(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid rating or content type")
 
     _upsert(db, user_id, content_type, content_id, rating, age_group, context)
-    return FeedbackResponse(ok=True, rating=rating, content_type=content_type, content_id=content_id)
+    from app.api.money_ideas_routes import money_ideas_url
+
+    return FeedbackResponse(
+        ok=True, rating=rating, content_type=content_type, content_id=content_id,
+        money_ideas_url=money_ideas_url(user_id),
+    )
 
 
 # ---------------------------------------------------------------------------

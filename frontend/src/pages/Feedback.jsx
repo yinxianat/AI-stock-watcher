@@ -52,7 +52,9 @@ export default function Feedback() {
         <p style={{ color: '#6e7781', fontSize: '14px' }}>
           Your feedback helps us make better content for your family.
         </p>
-        <p><Link to="/money-ideas">See your Money Ideas</Link></p>
+        {result.money_ideas_url && (
+          <p><a href={result.money_ideas_url}>See your Money Ideas</a></p>
+        )}
       </div>
     </div>
   );
