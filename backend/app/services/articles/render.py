@@ -258,15 +258,96 @@ def _pct(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".") + "%"
 
 
-def _small_move_versions(m: SmallMove) -> list[tuple[str, str, str, str]]:
+@dataclass
+class MarketMove:
+    """No company news explains the move, but the whole market moved about as
+    much: gets a fixed "whole-market day" note instead of a story."""
+
+    symbol: str
+    move_pct: float
+    market_pct: float
+    age_groups: list[str]  # the parent's choice
+
+
+# Fixed text, not AI-written; placeholders as in _SMALL_MOVE_TEXT, plus
+# {market} (size of the S&P 500's move) and {tide} (in/out).
+_MARKET_MOVE_TEXT = {
+    "3-5": (
+        "Lots of stocks went {way} today",
+        "Today {symbol}'s price went {way}, and so did the prices of most other "
+        "companies. It's like boats on the water: when the tide goes {tide}, all "
+        "the boats go {way} together.",
+        "Can you think of something that changes for everybody at once, like a rainy day?",
+    ),
+    "6-9": (
+        "{symbol} went {way} with the whole market",
+        "{symbol}'s price went {way} {pct} today. The S&P 500, a group of 500 big "
+        "companies, went {way} {market} too. So this wasn't really about {symbol}: "
+        "most stocks moved together. Sometimes big news, like news about the "
+        "economy, moves almost all prices at once.",
+        "Why might lots of different companies' prices go {way} on the same day?",
+    ),
+    "10-12": (
+        "A whole-market day for {symbol}",
+        "{symbol} moved {way} {pct} today, about the same as the S&P 500 ({market}), "
+        "which tracks 500 large companies. When nearly everything moves together, "
+        "the reason is usually something that affects all companies, like interest "
+        "rates or news about the economy, rather than news about one company.",
+        "If your stock and the whole market both go {way}, is it about your company? How could you tell?",
+    ),
+    "13-17": (
+        "{symbol} moved with the market",
+        "{symbol} moved {way} {pct} today, in line with the S&P 500 ({market}). Moves "
+        "like this usually come from market-wide forces, such as interest rates, "
+        "economic data or investors' mood, rather than company news. It's why even "
+        "a mix of different stocks can rise and fall together.",
+        "What's the difference between risk from one company and risk from the whole market?",
+    ),
+}
+
+
+def _versions(texts: dict[str, tuple[str, str, str]], age_groups: list[str],
+              fill: dict[str, str]) -> list[tuple[str, str, str, str]]:
     """(age label, headline, story, question) per chosen age group."""
-    fill = dict(symbol=m.symbol, way="up" if m.move_pct >= 0 else "down",
-                pct=_pct(abs(m.move_pct)), bar=_pct(m.bar_pct))
-    groups = [g for g in m.age_groups if g in _SMALL_MOVE_TEXT] or ["6-9"]
-    return [
-        (AGE_LABELS[g], *(part.format(**fill) for part in _SMALL_MOVE_TEXT[g]))
-        for g in groups
-    ]
+    groups = [g for g in age_groups if g in texts] or ["6-9"]
+    return [(AGE_LABELS[g], *(part.format(**fill) for part in texts[g])) for g in groups]
+
+
+def _note_text(title: str, numbers: str, emoji: str,
+               versions: list[tuple[str, str, str, str]], note: str) -> str:
+    lines = ["━━━━━━━━━━━━━━━━━━━━", f"{title}: read it together with your kids", numbers]
+    for label, headline, story, question in versions:
+        lines += ["", label, f"{emoji} {headline}", story, f"🗣️ Ask your kid: {question}"]
+    lines += ["", f"🧐 For grown-ups: {note}", "━━━━━━━━━━━━━━━━━━━━"]
+    return "\n".join(lines)
+
+
+def _note_html(title: str, numbers: str, emoji: str,
+               versions: list[tuple[str, str, str, str]], note: str) -> str:
+    """`numbers` is our own HTML (no AI text)."""
+    kids = "".join(
+        f"""\
+<div style="border-top:1px solid #eaeef2;margin-top:14px;padding-top:10px">
+<p style="margin:0;font-size:13px;color:{_MUTED}">{escape(label)}</p>
+<h2 style="margin:4px 0 8px;font-size:19px">{emoji} {escape(headline)}</h2>
+<p style="font-size:16px;line-height:1.5;margin:0 0 8px">{escape(story)}</p>
+<p style="background:#fff8c5;border-radius:8px;padding:10px;margin:0">🗣️ <strong>Ask your kid:</strong> {escape(question)}</p>
+</div>"""
+        for label, headline, story, question in versions
+    )
+    return f"""\
+<div style="border:1px solid #d0d7de;border-radius:10px;padding:16px;margin:16px 0">
+<p style="margin:0 0 8px;font-size:12px;letter-spacing:.04em;color:{_MUTED}">{escape(title)} · READ IT TOGETHER WITH YOUR KIDS</p>
+<p style="margin:0;font-size:15px">{numbers}</p>
+{kids}
+<p style="font-size:12px;line-height:1.45;color:#57606a;background:#f6f8fa;border-radius:8px;padding:10px;margin:14px 0 0">🧐 {escape(note)}</p>
+</div>"""
+
+
+def _small_move_versions(m: SmallMove) -> list[tuple[str, str, str, str]]:
+    return _versions(_SMALL_MOVE_TEXT, m.age_groups, dict(
+        symbol=m.symbol, way="up" if m.move_pct >= 0 else "down",
+        pct=_pct(abs(m.move_pct)), bar=_pct(m.bar_pct)))
 
 
 def _small_move_note(m: SmallMove) -> str:
@@ -279,35 +360,51 @@ def _small_move_note(m: SmallMove) -> str:
 
 
 def small_move_text(m: SmallMove) -> str:
-    lines = [
-        "━━━━━━━━━━━━━━━━━━━━",
-        "📏 SMALL MOVE: read it together with your kids",
+    return _note_text(
+        "📏 SMALL MOVE",
         f"{m.symbol} {m.move_pct:+.2f}% today, inside the small range of ±{_pct(m.bar_pct)}",
-    ]
-    for label, headline, story, question in _small_move_versions(m):
-        lines += ["", label, f"😐 {headline}", story, f"🗣️ Ask your kid: {question}"]
-    lines += ["", f"🧐 For grown-ups: {_small_move_note(m)}", "━━━━━━━━━━━━━━━━━━━━"]
-    return "\n".join(lines)
+        "😐", _small_move_versions(m), _small_move_note(m))
 
 
 def small_move_html(m: SmallMove) -> str:
-    kids = "".join(
-        f"""\
-<div style="border-top:1px solid #eaeef2;margin-top:14px;padding-top:10px">
-<p style="margin:0;font-size:13px;color:{_MUTED}">{escape(label)}</p>
-<h2 style="margin:4px 0 8px;font-size:19px">😐 {escape(headline)}</h2>
-<p style="font-size:16px;line-height:1.5;margin:0 0 8px">{escape(story)}</p>
-<p style="background:#fff8c5;border-radius:8px;padding:10px;margin:0">🗣️ <strong>Ask your kid:</strong> {escape(question)}</p>
-</div>"""
-        for label, headline, story, question in _small_move_versions(m)
+    return _note_html(
+        "📏 SMALL MOVE",
+        f"<strong>{escape(m.symbol)} {m.move_pct:+.2f}% today</strong>, inside the "
+        f"small range of ±{_pct(m.bar_pct)}",
+        "😐", _small_move_versions(m), _small_move_note(m))
+
+
+def _market_move_versions(m: MarketMove) -> list[tuple[str, str, str, str]]:
+    way = "up" if m.move_pct >= 0 else "down"
+    return _versions(_MARKET_MOVE_TEXT, m.age_groups, dict(
+        symbol=m.symbol, way=way, tide="in" if way == "up" else "out",
+        pct=_pct(abs(m.move_pct)), market=_pct(abs(m.market_pct))))
+
+
+def _market_move_note(m: MarketMove) -> str:
+    return (
+        f"Our news sources had no company news explaining {m.symbol}'s move, but "
+        f"it moved about as much as the S&P 500 ({m.market_pct:+.2f}%), so the "
+        "whole market is the likely reason. This note is the same for every such "
+        "day: it isn't written by AI, and it isn't financial advice."
     )
-    return f"""\
-<div style="border:1px solid #d0d7de;border-radius:10px;padding:16px;margin:16px 0">
-<p style="margin:0 0 8px;font-size:12px;letter-spacing:.04em;color:{_MUTED}">📏 SMALL MOVE · READ IT TOGETHER WITH YOUR KIDS</p>
-<p style="margin:0;font-size:15px"><strong>{escape(m.symbol)} {m.move_pct:+.2f}% today</strong>, inside the small range of ±{_pct(m.bar_pct)}</p>
-{kids}
-<p style="font-size:12px;line-height:1.45;color:#57606a;background:#f6f8fa;border-radius:8px;padding:10px;margin:14px 0 0">🧐 {escape(_small_move_note(m))}</p>
-</div>"""
+
+
+def market_move_text(m: MarketMove) -> str:
+    return _note_text(
+        "🌊 WHOLE-MARKET DAY",
+        f"{m.symbol} {m.move_pct:+.2f}% today · S&P 500 {m.market_pct:+.2f}%",
+        "🌊", _market_move_versions(m), _market_move_note(m))
+
+
+def market_move_html(m: MarketMove) -> str:
+    color = _UP if m.move_pct >= 0 else _DOWN
+    numbers = (
+        f'<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%">'
+        f"{_bar(m.symbol, m.move_pct, color)}{_bar('S&P 500', m.market_pct, _MUTED)}</table>"
+    )
+    return _note_html("🌊 WHOLE-MARKET DAY", numbers, "🌊",
+                      _market_move_versions(m), _market_move_note(m))
 
 
 def still_looking_text(symbol: str) -> str:

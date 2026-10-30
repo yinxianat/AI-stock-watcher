@@ -27,7 +27,11 @@ the allowed news sites are available to you.
 (for example "shares rose after the company reported..."). A story that \
 merely mentions the company is not a cause.
 - If the whole market moved about as much as this stock, set \
-moved_with_market to true. That alone can be the honest explanation.
+moved_with_market to true. That alone can be the honest explanation. If \
+you found no company news, use your next search to find why the overall \
+stock market moved today (for example "stocks fell after the jobs report"). \
+A source that clearly explains the whole market's move today counts as the \
+cause: report it, with the claim saying it's about the whole market.
 - If you can't find a clear reason, set cause_found to false and return no \
 facts. Never guess. An honest "not found" is a good answer; a confident \
 wrong one misleads a family.
@@ -148,7 +152,9 @@ only approve or reject.
 Reject a version (leave its age group out of approved_age_groups) if any of \
 these is true:
 - It states something the facts in <facts> don't support, or gets a fact \
-wrong.
+wrong. Exception: saying the stock moved along with the whole market (or \
+didn't) is checked against the price data given above the facts, which \
+comes from our own records, not the writer.
 - It suggests buying, selling or holding, predicts the price, or makes \
 investing sound like a bet, a game or a way to get rich quickly.
 - It isn't suitable for that age group: too hard to understand, too long, \
@@ -225,9 +231,14 @@ def review_prompt(req: ArticleRequest, facts: list[Fact], story: Story) -> str:
          for f in facts],
         ensure_ascii=False, indent=1,
     )
+    market = (
+        f"The S&P 500 (the whole market) moved {req.market_pct:+.2f}% today."
+        if req.market_pct is not None else "The whole market's move today is unknown."
+    )
     return (
         f"Company: {req.company} (stock symbol {req.symbol}); its price "
-        f"{'went up' if req.direction == 'up' else 'went down'} today.\n\n"
+        f"{'went up' if req.direction == 'up' else 'went down'} today.\n"
+        f"Price data: {req.symbol} moved {req.move_pct:+.2f}% today. {market}\n\n"
         f"<facts>\n{facts_json}\n</facts>\n\n"
         f"<stories>\n{story.model_dump_json(indent=1)}\n</stories>\n\n"
         "Review these stories."

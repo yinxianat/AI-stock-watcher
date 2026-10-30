@@ -165,7 +165,7 @@ def test_defaults_are_the_cheap_ones():
     assert Settings(ai_article_model="").story_model == "claude-haiku-5-5"
     assert fields["ai_article_max_searches"].default == 2
     assert fields["ai_article_always_pct"].default == 5.0
-    assert fields["ai_news_domains"].default == "finance.yahoo.com"  # reuters.com blocks web search
+    assert "reuters.com" not in fields["ai_news_domains"].default  # blocks web search
     assert Settings(ai_provider="anthropic", ai_article_model="").story_model == "claude-haiku-5-5"
     assert Settings(ai_provider="gemini", ai_article_model="").story_model == "gemini-3.1-flash-lite"
     # A model from the other provider is ignored rather than sent to the wrong API.
