@@ -259,7 +259,7 @@ export default function Help() {
         <details>
           <summary>Why didn't my alert include a Stock Story?</summary>
           <ul>
-            <li>We couldn't find a clear reason for the move in trusted news. We'd rather say nothing than guess.</li>
+            <li>We couldn't find a clear reason for the move in trusted news. We'd rather say nothing than guess. If the whole market moved the same way that day, you get a short "whole-market day" note for your kids instead.</li>
             <li>The move was small: under 1% for a stock, or under 0.5% for a fund (ETF or index). Small moves rarely have a news reason, so you get a short "small move" note for your kids instead.</li>
             <li>The story didn't pass our safety checks, so we didn't send it.</li>
             <li>We'd already written a lot of stories that day. The biggest moves get stories first.</li>
