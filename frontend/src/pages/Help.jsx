@@ -3,7 +3,7 @@ import { getToken } from '../lib/api.js';
 
 // User guide. Public, so people can read it before signing in. Keep the
 // numbers here in sync with the backend (check times, 3-hour repeat window,
-// default ±5% rule, sign-in link expiry, story age groups).
+// default ±1.5% rule, sign-in link expiry, story age groups).
 export default function Help() {
   const signedIn = !!getToken();
 
@@ -41,7 +41,7 @@ export default function Help() {
           </li>
           <li>
             <strong>That's it.</strong> Every stock you add starts with an alert
-            that emails you if it moves <strong>more than 5% up or down</strong>.
+            that emails you if it moves <strong>more than 1.5% up or down</strong>.
             You can change or add alerts any time with the <em>Rules</em> button.
           </li>
         </ol>
@@ -75,8 +75,8 @@ export default function Help() {
           </dd>
           <dt>Alerts</dt>
           <dd>
-            When this stock will email you, for example <em>🔔 Moves below −5% or
-            above +5%</em>. <em>No alerts set</em> means you won't get emails for
+            When this stock will email you, for example <em>🔔 Moves below −1.5% or
+            above +1.5%</em>. <em>No alerts set</em> means you won't get emails for
             that stock.
           </dd>
         </dl>
@@ -94,7 +94,7 @@ export default function Help() {
         </p>
         <p>
           <strong>Removing a stock</strong> also deletes its alerts. If you add it
-          back later, it starts again with the default ±5% alert.
+          back later, it starts again with the default ±1.5% alert.
         </p>
       </section>
 
@@ -109,7 +109,7 @@ export default function Help() {
         <h4>Price change outside a range</h4>
         <p>
           Emails you when the price moves outside the range you set, for example
-          below −5% or above +5%, compared with the previous trading day's close
+          below −1.5% or above +1.5%, compared with the previous trading day's close
           (the day's overall move). It's checked <strong>every 10 minutes</strong>{' '}
           while the market is open.
         </p>
@@ -126,6 +126,18 @@ export default function Help() {
           To avoid flooding your inbox, you get <strong>at most one email per
           stock, per alert type, every 3 hours</strong>, even if the price keeps
           moving.
+        </p>
+
+        <h4>Daily watchlist recap</h4>
+        <p>
+          Every trading day after the market closes (about <strong>4:30 PM
+          Eastern</strong>), you get one email showing how each stock on your
+          watchlist did, biggest move first, plus any new highs or lows. It ends
+          with a short story about your biggest mover, written for the ages you
+          chose, so you have something to talk about with your kids even on quiet
+          days. If a price range you set is wide and didn't go off that day, the
+          recap says so and links to that stock's rules, in case you'd like a
+          smaller range and more alerts. Turn the recap off any time in Settings.
         </p>
       </section>
 

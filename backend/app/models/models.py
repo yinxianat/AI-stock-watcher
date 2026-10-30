@@ -13,8 +13,8 @@ DailyClose     — durable per-day closing price per ticker. SOURCE OF TRUTH
                   for daily history; retention bounded by PRICE_HISTORY_LIFETIME
                   (default 365 days). Pruned daily by `app.jobs.cleanup`.
 IntradayPrice  — high-frequency price ticks (every INTRADAY_TICK_MINUTES, default
-                  10 min) during US market hours. Drives the tick-over-tick
-                  PRICE_CHANGE_RANGE notification path. Retention bounded by
+                  10 min) during US market hours. The day-over-day
+                  PRICE_CHANGE_RANGE alerts run on each tick. Retention bounded by
                   INTRADAY_RETENTION (default 7 days).
 PriceSnapshot  — derived "current view" per ticker, replaced each batch run.
                   `previous_price` is the prior TRADING DAY's close (sourced
@@ -27,6 +27,8 @@ TrendAnalysis  — per (user, ticker) booleans derived from PriceSnapshot.
                   Replaced each compute run.
 NotificationLog — audit trail of sent notifications (used to suppress dupes).
 LogEntry       — durable application log (WARNING+), auto-pruned per LOG_LIFETIME.
+RecapOptOut    — user who turned the daily watchlist recap off.
+RecapSend      — one row per (user, trading day) recap sent; stops repeats.
 """
 
 from __future__ import annotations
@@ -241,6 +243,37 @@ class EmailOptOut(Base):
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+
+
+class RecapOptOut(Base):
+    """A user who turned the daily watchlist recap email off.
+
+    No row means the recap is on (the default). Own table for the same
+    reason as `EmailOptOut`. Turning all alert emails off (EmailOptOut)
+    stops the recap too.
+    """
+
+    __tablename__ = "recap_opt_outs"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+
+
+class RecapSend(Base):
+    """A daily watchlist recap that went out. Durable; unique per (user,
+    trading day), so a re-run or restart never sends the same day twice."""
+
+    __tablename__ = "recap_sends"
+    __table_args__ = (
+        UniqueConstraint("user_id", "trading_date", name="uq_recap_user_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    trading_date: Mapped[date_] = mapped_column(Date, nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
 
 
 # ---------- Batch outputs ----------

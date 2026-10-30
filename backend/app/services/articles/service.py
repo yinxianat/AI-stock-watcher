@@ -516,30 +516,40 @@ def _html(intro: str, block: str, user: User) -> str:
     )
 
 
-def build_alert_email(
-    db: DBSession, user: User, summary: str, article: StockArticle | None,
+def kid_block(
+    db: DBSession, user: User, article: StockArticle | None,
     small_move: tuple[Ticker, float] | None = None,
-) -> tuple[str, str | None, bool]:
-    """(text, html, still_pending) for one alert. `still_pending` means the
-    email promised a follow-up, so the caller must record one.
-    `small_move` is (ticker, move %) for a move under the story bar, which
-    gets the fixed small-move note instead of a story."""
+) -> tuple[str, str, bool] | None:
+    """The kids' part of an email as (text, html, still_pending): the story
+    in the user's age groups, the fixed small-move note, or a "still
+    looking" note. None if there's nothing to show. `small_move` is
+    (ticker, move %) for a move under the story bar. `still_pending` means
+    the email promised a follow-up, so the caller must record one."""
     if small_move is not None:
         ticker, move_pct = small_move
         m = render.SmallMove(ticker.symbol, move_pct, story_bar_pct(ticker),
                              get_age_groups(db, user.id))
-        text = f"{summary}\n\n{render.small_move_text(m)}\n\n{_footer_text(user)}"
-        return text, _html(summary, render.small_move_html(m), user), False
+        return render.small_move_text(m), render.small_move_html(m), False
     if article is not None:
         view = _view(db, article, get_age_groups(db, user.id))
         if view is not None:
-            text = f"{summary}\n\n{render.story_text(view)}\n\n{_footer_text(user)}"
-            return text, _html(summary, render.story_html(view), user), False
+            return render.story_text(view), render.story_html(view), False
         if article.status == "pending":
             note = render.still_looking_text(_symbol(db, article))
-            text = f"{summary}\n\n{note}\n\n{_footer_text(user)}"
-            return text, _html(summary, f"<p>{note}</p>", user), True
-    return f"{summary}\n\n{_footer_text(user)}", None, False
+            return note, f"<p>{note}</p>", True
+    return None
+
+
+def build_alert_email(
+    db: DBSession, user: User, summary: str, article: StockArticle | None,
+    small_move: tuple[Ticker, float] | None = None,
+) -> tuple[str, str | None, bool]:
+    """(text, html, still_pending) for one alert; see `kid_block`."""
+    block = kid_block(db, user, article, small_move)
+    if block is None:
+        return f"{summary}\n\n{_footer_text(user)}", None, False
+    text, html, pending = block
+    return f"{summary}\n\n{text}\n\n{_footer_text(user)}", _html(summary, html, user), pending
 
 
 # ---------------------------------------------------------------------------

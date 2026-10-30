@@ -76,6 +76,8 @@ export const api = {
   getEmailPreferences: (opts) => request('/auth/email-preferences', { auth: true, ...opts }),
   setAlertsEnabled: (alerts_enabled) =>
     request('/auth/email-preferences', { method: 'PUT', body: { alerts_enabled }, auth: true }),
+  setRecapEnabled: (recap_enabled) =>
+    request('/auth/email-preferences', { method: 'PUT', body: { recap_enabled }, auth: true }),
   unsubscribe: (token) => request('/auth/unsubscribe', { method: 'POST', body: { token } }),
   getStoryPreferences: (opts) => request('/auth/story-preferences', { auth: true, ...opts }),
   setStoryAgeGroups: (age_groups) =>
