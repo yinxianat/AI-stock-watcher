@@ -9,6 +9,7 @@ from .models import (  # noqa: F401
     JobRun,
     LogEntry,
     LoginToken,
+    MoneyIdeaSend,
     NotificationEventType,
     NotificationLog,
     NotificationRule,

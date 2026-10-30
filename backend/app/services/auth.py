@@ -71,15 +71,15 @@ def request_magic_link(
 
     link = f"{settings.frontend_base_url}/auth/callback?token={token}"
     body = (
-        f"Hi,\n\nClick the link below to sign in to AI Stock Watcher. "
+        f"Hi,\n\nClick the link below to sign in to Little Money Monkey 🐵. "
         f"It expires in {ttl_min} minutes.\n\n{link}\n\n"
         "If you didn't request this, you can ignore this email."
     )
     # send_email logs SMTP failures instead of raising; the user can retry.
     if background_tasks is not None:
-        background_tasks.add_task(send_email, email, "Your AI Stock Watcher sign-in link", body)
+        background_tasks.add_task(send_email, email, "Your Little Money Monkey sign-in link 🐵", body)
     else:
-        send_email(email, "Your AI Stock Watcher sign-in link", body)
+        send_email(email, "Your Little Money Monkey sign-in link 🐵", body)
 
     return token
 

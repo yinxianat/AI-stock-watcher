@@ -13,6 +13,9 @@ kids every day.
   Stories are shared with alerts, so one written for an alert today is
   reused. Stories get RECAP_STORY_WAIT_SECONDS; one still being written
   follows as a reply, like alerts.
+- Every recap teaches one Money Idea of the Day (app.services.money_ideas):
+  the user's next idea in a basics-first curriculum, one that fits the day
+  where possible, recorded in `money_idea_sends`.
 - Users whose price-change rules stayed quiet today (the move was inside a
   range wider than DEFAULT_RULE_BAND_PCT) get a short "your alert didn't
   go off" section: their range,
@@ -50,9 +53,10 @@ from app.models import (
     WatchlistItem,
     utcnow,
 )
-from app.services import email_prefs
+from app.services import email_prefs, money_ideas
 from app.services.articles import render
 from app.services.articles import service as articles
+from app.services.articles.preferences import get_age_groups
 from app.services.emailer import send_email
 from app.services.price_history import derive_snapshot_for_ticker
 
@@ -65,6 +69,7 @@ _TREND_DAYS = 30
 _RECORDS = [("year", 365, "52-week"), ("quarter", 91, "3-month"),
             ("month", 30, "1-month"), ("week", 7, "1-week")]
 _UP, _DOWN, _MUTED = "#1a7f37", "#cf222e", "#6e7781"
+_BIG_MOVE_PCT = 3.0  # biggest mover this size or more: a "news moves prices" day
 
 
 @dataclass
@@ -229,7 +234,8 @@ def _text(moves: list[Move], market_pct: float | None, alerted: set[int],
     lines = [f"📊 YOUR WATCHLIST TODAY · {day:%a %b} {day.day}"]
     if market_pct is not None:
         lines.append(_market_line(market_pct))
-    lines += ["", f"Biggest mover: {top.ticker.symbol} {top.pct:+.2f}% (${top.price:,.2f})",
+    arrow = "📈" if top.pct >= 0 else "📉"
+    lines += ["", f"{arrow} Biggest mover: {top.ticker.symbol} {top.pct:+.2f}% (${top.price:,.2f})",
               "", "All your stocks:"]
     for m in moves:
         tags = " · ".join(_tags(m, alerted))
@@ -238,7 +244,7 @@ def _text(moves: list[Move], market_pct: float | None, alerted: set[int],
             f"{render.sparkline(m.closes)}{'  ' + tags if tags else ''}"
         )
     if kids:
-        lines += ["", f"Talk about it together: {top.ticker.symbol} was your biggest mover today.",
+        lines += ["", f"💬 Talk about it together: {top.ticker.symbol} was your biggest mover today.",
                   kids]
     return "\n".join(lines)
 
@@ -265,7 +271,7 @@ def _html(moves: list[Move], market_pct: float | None, alerted: set[int],
               if market_pct is not None else "")
     color = _UP if top.pct >= 0 else _DOWN
     kids_html = (
-        f'<p style="margin:20px 0 0;font-size:15px"><strong>Talk about it together:</strong> '
+        f'<p style="margin:20px 0 0;font-size:15px">💬 <strong>Talk about it together:</strong> '
         f"{escape(top.ticker.symbol)} was your biggest mover today.</p>{kids}"
         if kids else ""
     )
@@ -273,7 +279,7 @@ def _html(moves: list[Move], market_pct: float | None, alerted: set[int],
 <div style="border:1px solid #d0d7de;border-radius:10px;padding:16px;margin:16px 0">
 <p style="margin:0 0 8px;font-size:12px;letter-spacing:.04em;color:{_MUTED}">📊 YOUR WATCHLIST TODAY</p>
 {market}
-<p style="margin:0 0 12px;font-size:17px">Biggest mover: <strong>{escape(top.ticker.symbol)}</strong> <strong style="color:{color}">{top.pct:+.2f}%</strong></p>
+<p style="margin:0 0 12px;font-size:17px">{'📈' if top.pct >= 0 else '📉'} Biggest mover: <strong>{escape(top.ticker.symbol)}</strong> <strong style="color:{color}">{top.pct:+.2f}%</strong></p>
 <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:14px">{''.join(rows)}</table>
 </div>
 {kids_html}"""
@@ -334,6 +340,19 @@ def _quiet_html(quiet: list[QuietRule]) -> str:
 </div>"""
 
 
+def _day_tags(top: Move, market_pct: float | None) -> set[str]:
+    """What kind of day it was for the user's biggest mover, to pick a
+    fitting money idea."""
+    tags = set()
+    if not articles.needs_story(top.ticker, top.pct):
+        tags.add(money_ideas.SMALL_DAY)
+    if articles.moved_with_market(top.pct, market_pct):
+        tags.add(money_ideas.MARKET_DAY)
+    if abs(top.pct) >= _BIG_MOVE_PCT:
+        tags.add(money_ideas.BIG_MOVE)
+    return tags
+
+
 def _footer_text(user: User) -> str:
     base = get_settings().frontend_base_url
     return (
@@ -354,8 +373,11 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
     kids_text, kids_html, pending = block if block else (None, None, False)
     alerted = _alerted_today(db, user.id, day)
     quiet = _quiet_rules(db, user.id, all_moves, alerted)
+    idea = money_ideas.next_idea(db, user.id, _day_tags(top, market_pct))
+    ages = get_age_groups(db, user.id)
+    ideas_url = f"{get_settings().frontend_base_url}/money-ideas"
 
-    subject = f"[AI Stock Watcher] Your watchlist today: {top.ticker.symbol} {top.pct:+.1f}%"
+    subject = f"[🐵 Little Money Monkey] Your watchlist today: {top.ticker.symbol} {top.pct:+.1f}%"
     intro = f"Here's how your {len(moves)} stock{'s' if len(moves) != 1 else ''} did today."
     headers = email_prefs.alert_email_headers(user)
     message_id = None
@@ -364,9 +386,13 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
         headers = {**headers, "Message-ID": message_id}
     quiet_text = f"{_quiet_text(quiet)}\n\n" if quiet else ""
     body = (f"{intro}\n\n{_text(moves, market_pct, alerted, kids_text, day)}\n\n"
+            f"{money_ideas.idea_text(idea, ages, ideas_url)}\n\n"
             f"{quiet_text}{_footer_text(user)}")
     html = render.email_html(
-        intro, _html(moves, market_pct, alerted, kids_html) + (_quiet_html(quiet) if quiet else ""),
+        intro,
+        _html(moves, market_pct, alerted, kids_html)
+        + money_ideas.idea_html(idea, ages, ideas_url)
+        + (_quiet_html(quiet) if quiet else ""),
         f"{get_settings().frontend_base_url}/settings", email_prefs.unsubscribe_url(user),
         reason="You're receiving this daily recap because you have stocks on your watchlist.",
     )
@@ -376,6 +402,7 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
         log.warning("Recap email failed for user=%d: %s", user.id, e)
         return False
     db.add(RecapSend(user_id=user.id, trading_date=day))
+    money_ideas.record(db, user.id, idea, day)
     if pending and story is not None:
         already = db.execute(
             select(ArticleFollowup).where(

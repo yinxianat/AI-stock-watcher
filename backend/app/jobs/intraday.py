@@ -215,7 +215,7 @@ def _send_one_alert(db: DBSession, alert: _Alert, story: StockArticle | None) ->
     """Send the email and write the NotificationLog row. True iff the
     SMTP call didn't raise (so we should record it)."""
     user, ticker = alert.user, alert.ticker
-    subject = f"[AI Stock Watcher] {ticker.symbol}"
+    subject = f"[🐵 Little Money Monkey] {ticker.symbol}"
     small_move = None
     if get_settings().ai_articles_enabled and not articles.needs_story(ticker, alert.pct):
         small_move = (ticker, alert.pct)

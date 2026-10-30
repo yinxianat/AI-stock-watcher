@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     smtp_port: int = 1025
     smtp_username: str = ""
     smtp_password: str = ""
-    smtp_from: str = "AI Stock Watcher <no-reply@example.com>"
+    smtp_from: str = "Little Money Monkey <no-reply@example.com>"
     smtp_use_tls: bool = False
 
     # Batch jobs
