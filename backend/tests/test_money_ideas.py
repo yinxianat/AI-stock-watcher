@@ -237,3 +237,91 @@ class TestMoneyIdeasAPI:
         assert items[0]["position"] == 1
         assert items[0]["total"] == len(money_ideas.CURRICULUM)
         assert len(items[0]["versions"]) >= 1
+
+    def test_requires_auth_without_token(self, client):
+        assert client.get("/money-ideas").status_code == 401
+
+
+class TestMoneyIdeasEmailLink:
+    """Recap emails link here with a signed token, so a parent clicking from
+    their inbox doesn't hit the login page."""
+
+    def test_url_carries_token(self, signed_in):
+        from app.api.money_ideas_routes import money_ideas_url
+
+        url = money_ideas_url(signed_in["user"]["id"])
+        assert "/money-ideas?token=" in url
+
+    def test_token_opens_history_without_login(self, signed_in, db_session):
+        from app.api.money_ideas_routes import money_ideas_url
+
+        user_id = signed_in["user"]["id"]
+        idea = money_ideas.CURRICULUM[0]
+        db_session.add(MoneyIdeaSend(
+            user_id=user_id, idea_key=idea.key, trading_date=date(2026, 10, 28),
+        ))
+        db_session.commit()
+
+        token = money_ideas_url(user_id).split("token=")[1]
+        # No Authorization header at all.
+        r = signed_in["client"].get(f"/money-ideas?token={token}")
+        assert r.status_code == 200
+        items = r.json()["ideas"]
+        assert len(items) == 1
+        assert items[0]["key"] == idea.key
+
+    def test_garbage_token_rejected(self, client):
+        r = client.get("/money-ideas?token=not-a-real-token")
+        assert r.status_code == 400
+
+    def test_token_from_another_purpose_rejected(self, client, signed_in):
+        """A feedback token must not open the history page."""
+        from app.api.feedback_routes import FEEDBACK_PURPOSE
+        from app.core.security import issue_token
+
+        token = issue_token(FEEDBACK_PURPOSE, {"uid": signed_in["user"]["id"]})
+        assert client.get(f"/money-ideas?token={token}").status_code == 400
+
+    def test_recap_email_link_works_without_login(self, client, db_session, monkeypatch):
+        """End-to-end: the history link inside a real recap email opens the
+        page with no session — the bug a parent hit clicking from Gmail."""
+        from app.jobs import recap
+        from app.models import Base, DailyClose, Ticker, WatchlistItem
+
+        Base.metadata.create_all(bind=db_session.get_bind())
+        u = User(email="alice@example.com", notify_email="alice@example.com",
+                 notify_email_confirmed=True)
+        db_session.add(u)
+        db_session.flush()
+        t = Ticker(symbol="TEST", name="Test Corp", type="stock")
+        db_session.add(t)
+        db_session.flush()
+        db_session.add(WatchlistItem(user_id=u.id, ticker_id=t.id))
+        day = date(2026, 10, 28)
+        db_session.add(DailyClose(ticker_id=t.id, date=day, close=100.0))
+        db_session.add(DailyClose(ticker_id=t.id, date=date(2026, 10, 27), close=99.0))
+        db_session.commit()
+
+        monkeypatch.setattr("app.services.articles.service.trading_date", lambda: day)
+        monkeypatch.setattr("app.services.articles.service.market_move_pct", lambda: 0.5)
+        assert recap.run_watchlist_recap(db=db_session) == 1
+
+        body = client.sent_emails[-1]["body_text"]
+        assert "/money-ideas?token=" in body
+        url = next(w for w in body.split() if "/money-ideas?token=" in w)
+        r = client.get(f"/money-ideas?token={url.split('token=')[1]}")
+        assert r.status_code == 200
+        assert len(r.json()["ideas"]) == 1
+
+    def test_feedback_response_includes_history_link(self, client, signed_in):
+        """The thank-you page needs a login-free way onward."""
+        from app.api.feedback_routes import FEEDBACK_PURPOSE
+        from app.core.security import issue_token
+
+        token = issue_token(FEEDBACK_PURPOSE, {
+            "u": signed_in["user"]["id"], "ct": "money_idea",
+            "cid": "company:2026-10-30", "r": "like",
+        })
+        r = client.post("/feedback/rate", json={"token": token})
+        assert r.status_code == 200
+        assert "/money-ideas?token=" in r.json()["money_ideas_url"]

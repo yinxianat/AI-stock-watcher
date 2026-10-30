@@ -102,6 +102,8 @@ export const api = {
 
   // money ideas
   listMoneyIdeas: (opts) => request('/money-ideas', { auth: true, ...opts }),
+  listMoneyIdeasByToken: (token, opts) =>
+    request(`/money-ideas?token=${encodeURIComponent(token)}`, opts),
 
   // feedback
   rateFeedback: (token) => request('/feedback/rate', { method: 'POST', body: { token } }),
