@@ -1,4 +1,4 @@
-"""Coverage for the intraday capture + tick-over-tick notification path."""
+"""Coverage for the intraday capture + day-over-day notification path."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from app.db.seed import seed
 from app.jobs.intraday import (
     DEDUP_WINDOW,
     SIGNAL_DAILY,
-    SIGNAL_TICK,
     is_market_hours_now,
     run_intraday_capture,
 )
@@ -100,12 +99,12 @@ def test_market_hours_filter_after_close(client):
 
 
 # ---------------------------------------------------------------------------
-# Capture + tick-over-tick math
+# Capture + day-over-day math
 # ---------------------------------------------------------------------------
 
 
 def test_first_tick_writes_row_without_firing(client):
-    """A ticker with no prior tick can't have a % change → no alert."""
+    """A ticker with no previous close can't have a % change → no alert."""
     user_id, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
 
     sent = run_intraday_capture(fetcher=_staged_fetcher([100.0]), force=True)
@@ -122,8 +121,9 @@ def test_first_tick_writes_row_without_firing(client):
 
 
 def test_second_tick_outside_band_fires_alert(client):
-    """+5% in 10 minutes vs a ±1% band → fires one email."""
+    """+5% vs the previous close with a ±1% band → fires one email."""
     user_id, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
+    _seed_prior_day_close(ticker_id, close=100.0)
 
     run_intraday_capture(fetcher=_staged_fetcher([100.0]), force=True)
     sent = run_intraday_capture(fetcher=_staged_fetcher([105.0]), force=True)
@@ -143,7 +143,8 @@ def test_second_tick_outside_band_fires_alert(client):
 
 def test_second_tick_inside_band_does_not_fire(client):
     """+0.5% with a ±1% band → silent."""
-    _setup_user_with_range_rule("AAPL", -1.0, 1.0)
+    _, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
+    _seed_prior_day_close(ticker_id, close=100.0)
 
     run_intraday_capture(fetcher=_staged_fetcher([100.0]), force=True)
     sent = run_intraday_capture(fetcher=_staged_fetcher([100.5]), force=True)
@@ -155,6 +156,7 @@ def test_dedup_suppresses_repeat_fires_within_window(client):
     """Once a rule fires, repeated outside-band ticks in the dedup window
     must not re-send. After the window, a new tick can re-fire."""
     user_id, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
+    _seed_prior_day_close(ticker_id, close=100.0)
 
     run_intraday_capture(fetcher=_staged_fetcher([100.0]), force=True)
     assert run_intraday_capture(fetcher=_staged_fetcher([105.0]), force=True) == 1
@@ -190,7 +192,9 @@ def test_unconfirmed_email_blocks_alert(client):
         pct_low=-1.0, pct_high=1.0, enabled=True,
     ))
     db.commit()
+    ticker_id = t.id
     db.close()
+    _seed_prior_day_close(ticker_id, close=100.0)
 
     run_intraday_capture(fetcher=_staged_fetcher([100.0]), force=True)
     assert run_intraday_capture(fetcher=_staged_fetcher([110.0]), force=True) == 0
@@ -199,7 +203,8 @@ def test_unconfirmed_email_blocks_alert(client):
 
 def test_disabled_rule_does_not_fire(client):
     """Rules with enabled=False are skipped, even on a big move."""
-    _setup_user_with_range_rule("AAPL", -1.0, 1.0)
+    _, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
+    _seed_prior_day_close(ticker_id, close=100.0)
     db = get_session_factory()()
     rule = db.execute(select(NotificationRule)).scalar_one()
     rule.enabled = False
@@ -226,7 +231,9 @@ def test_only_price_change_range_rules_fire_intraday(client):
         event_type=NotificationEventType.WEEK_HIGH, enabled=True,
     ))
     db.commit()
+    ticker_id = t.id
     db.close()
+    _seed_prior_day_close(ticker_id, close=100.0)
 
     run_intraday_capture(fetcher=_staged_fetcher([100.0]), force=True)
     assert run_intraday_capture(fetcher=_staged_fetcher([500.0]), force=True) == 0
@@ -247,7 +254,7 @@ def _seed_prior_day_close(ticker_id: int, close: float) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dual baseline — tick AND day-over-day fire independently
+# Day-over-day baseline
 # ---------------------------------------------------------------------------
 
 
@@ -266,54 +273,28 @@ def test_daily_baseline_fires_on_first_tick(client):
     assert "previous trading day" in body
 
 
-def test_both_signals_fire_on_separate_emails(client):
-    """A second tick that's outside the band on BOTH signals produces TWO
-    emails — one tagged [10-min change], one tagged [vs. prior day] — with
-    independent dedup keys."""
-    user_id, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
+def test_big_move_sends_one_email_not_two(client):
+    """Regression: the removed 10-minute signal compared the first tick of
+    the day with yesterday's last one, so a big overnight move sent two
+    emails. Now it's one, tagged [vs. prior day]."""
+    _, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
     _seed_prior_day_close(ticker_id, close=100.0)
 
-    # First tick at $100: matches the prior day close exactly → daily
-    # signal is 0% (silent). No prior tick → tick signal silent. No alerts.
     assert run_intraday_capture(fetcher=_staged_fetcher([100.0]), force=True) == 0
-    assert len(client.sent_emails) == 0
-
-    # Second tick at $110: +10% vs prior tick AND +10% vs prior day close.
-    # Both outside ±1% band → two emails.
-    assert run_intraday_capture(fetcher=_staged_fetcher([110.0]), force=True) == 2
-    assert len(client.sent_emails) == 2
-    bodies = [m["body_text"] for m in client.sent_emails]
-    assert any(SIGNAL_TICK in b for b in bodies)
-    assert any(SIGNAL_DAILY in b for b in bodies)
-
-
-def test_signal_dedup_is_independent(client):
-    """Once the daily signal fires, repeated daily-signal hits in the
-    window are suppressed — but the tick signal can still fire on its own."""
-    user_id, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
-    _seed_prior_day_close(ticker_id, close=100.0)
-
-    # Tick 1: $110 → both fire (tick has no prior so just daily fires; +10%).
     assert run_intraday_capture(fetcher=_staged_fetcher([110.0]), force=True) == 1
     assert len(client.sent_emails) == 1
-    assert SIGNAL_DAILY in client.sent_emails[0]["body_text"]
-
-    # Tick 2: $115 → daily is +15% (dedup), tick is +4.5% (fires).
-    assert run_intraday_capture(fetcher=_staged_fetcher([115.0]), force=True) == 1
-    assert len(client.sent_emails) == 2
-    assert SIGNAL_TICK in client.sent_emails[1]["body_text"]
+    body = client.sent_emails[0]["body_text"]
+    assert SIGNAL_DAILY in body
+    assert "10-min" not in body
 
 
-def test_daily_signal_silent_when_no_prior_day_data(client):
-    """Without a DailyClose (and with upstream suppressed in tests), the
-    daily signal can't fire — only the tick signal can."""
-    user_id, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
-    # No _seed_prior_day_close — daily baseline is None.
+def test_no_alert_without_previous_close(client):
+    """Without a DailyClose (and with upstream suppressed in tests) there's
+    nothing to compare against, so even a big intraday jump is silent."""
+    _setup_user_with_range_rule("AAPL", -1.0, 1.0)
     run_intraday_capture(fetcher=_staged_fetcher([100.0]), force=True)
     run_intraday_capture(fetcher=_staged_fetcher([110.0]), force=True)
-    # Only the tick signal fires — one email, tagged [10-min change].
-    assert len(client.sent_emails) == 1
-    assert SIGNAL_TICK in client.sent_emails[0]["body_text"]
+    assert client.sent_emails == []
 
 
 def test_capture_disabled_by_settings(client, monkeypatch):

@@ -5,24 +5,26 @@ on weekdays. For each watched ticker we:
 
 1. Fetch the current price via the configured stock-data provider.
 2. Insert an `IntradayPrice` row.
-3. Compute TWO independent % signals:
-   * `tick`  — vs. the prior intraday tick for this ticker (~10 min ago).
-   * `daily` — vs. the previous trading day's close (from `daily_closes`,
-               with an upstream fallback if our history is missing).
+3. Compute the % change vs. the previous trading day's close (from
+   `daily_closes`, with an upstream fallback if our history is missing).
 4. For every enabled `PRICE_CHANGE_RANGE` rule on this ticker whose user
-   has confirmed their notify email, fire an alert if EITHER signal is
+   has confirmed their notify email, fire an alert if that change is
    outside the user's [pct_low, pct_high] band.
 
-Stories: when AI_ARTICLES_ENABLED, alerts aren't sent straight away. All
-alerts for the run are collected first; stocks whose day-over-day signal
-fired get an AI "why it moved" story (see app.services.articles), given up
-to AI_ARTICLE_WAIT_SECONDS; then every alert is sent, with its story if
-ready, or a "still looking" note and a threaded follow-up later.
+(There used to be a second, 10-minute tick-over-tick signal. It was
+removed: the first tick after the open compared against yesterday's last
+tick, so it mostly duplicated the day-over-day alert.)
 
-Dedup: each signal has its own 3-hour window — so users get one tick
-alert AND one daily-baseline alert per (user, ticker), not just one or the
-other. Implemented by tagging the NotificationLog summary with a stable
-"[tick]" / "[daily]" prefix and matching the prefix in the dedup query.
+Stories: when AI_ARTICLES_ENABLED, alerts aren't sent straight away. All
+alerts for the run are collected first; stocks that moved at least the
+story bar (AI_ARTICLE_MIN_PCT_STOCK / _FUND) get an AI "why it moved" story
+(see app.services.articles), given up to AI_ARTICLE_WAIT_SECONDS; then
+every alert is sent, with its story if ready, or a "still looking" note
+and a threaded follow-up later. Smaller moves get a fixed "small move"
+note instead.
+
+Dedup: one alert per (user, ticker) per 3-hour window, matched on the
+"[vs. prior day]" prefix of the NotificationLog summary.
 
 Daily high/low rules (WEEK_LOW, YEAR_HIGH, etc.) are NOT handled here —
 they fire from the daily compute/notify path, since they're keyed off
@@ -61,15 +63,10 @@ from app.services.email_prefs import alert_email_headers, opted_out_user_ids
 
 log = logging.getLogger(__name__)
 
-# Per-signal dedup window. Each signal (tick / daily) has its own clock,
-# so the user gets one tick alert AND one daily-baseline alert per window
-# instead of one combined alert.
 DEDUP_WINDOW = timedelta(hours=3)
 
-# Stable, human-readable prefixes embedded at the start of each
-# NotificationLog.summary so we can dedup by signal without a schema change.
-# These show up at the start of every alert email body.
-SIGNAL_TICK = "[10-min change]"
+# Stable prefix at the start of each NotificationLog.summary (and alert
+# email body); the dedup query matches on it.
 SIGNAL_DAILY = "[vs. prior day]"
 
 # Single price-point fetcher: returns the current price for `symbol`, or None.
@@ -123,20 +120,6 @@ def is_market_hours_now(now_utc: datetime | None = None) -> bool:
 # ---------------------------------------------------------------------------
 # Capture + notify
 # ---------------------------------------------------------------------------
-
-
-def _prior_tick_price(db: DBSession, ticker_id: int, before: datetime) -> float | None:
-    """Most recent IntradayPrice strictly before `before` for the ticker."""
-    row = db.execute(
-        select(IntradayPrice)
-        .where(
-            IntradayPrice.ticker_id == ticker_id,
-            IntradayPrice.captured_at < before,
-        )
-        .order_by(IntradayPrice.captured_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    return row.price if row is not None else None
 
 
 def _previous_day_close(db: DBSession, ticker: Ticker) -> float | None:
@@ -199,7 +182,7 @@ def _already_fired_recently(
     db: DBSession, user_id: int, ticker_id: int,
     signal_prefix: str, captured_at: datetime,
 ) -> bool:
-    """Per-signal dedup. Looks for a NotificationLog row for this
+    """Dedup. Looks for a NotificationLog row for this
     (user, ticker, event_type) whose summary STARTS WITH `signal_prefix`
     within the dedup window."""
     row = db.execute(
@@ -222,7 +205,6 @@ class _Alert:
 
     user: User
     ticker: Ticker
-    signal: str
     pct: float
     price: float
     prev_close: float | None
@@ -234,7 +216,12 @@ def _send_one_alert(db: DBSession, alert: _Alert, story: StockArticle | None) ->
     SMTP call didn't raise (so we should record it)."""
     user, ticker = alert.user, alert.ticker
     subject = f"[AI Stock Watcher] {ticker.symbol}"
-    body, body_html, story_pending = articles.build_alert_email(db, user, alert.summary, story)
+    small_move = None
+    if get_settings().ai_articles_enabled and not articles.needs_story(ticker, alert.pct):
+        small_move = (ticker, alert.pct)
+    body, body_html, story_pending = articles.build_alert_email(
+        db, user, alert.summary, story, small_move=small_move,
+    )
     headers = alert_email_headers(user)
     message_id = None
     if story is not None:
@@ -262,13 +249,12 @@ def _detect_range_alerts(
     db: DBSession,
     ticker: Ticker,
     new_price: float,
-    tick_pct: float | None,
-    daily_pct: float | None,
+    daily_pct: float,
     prev_day_close: float | None,
     captured_at: datetime,
 ) -> list[_Alert]:
-    """Evaluate both signals against every PRICE_CHANGE_RANGE rule for
-    `ticker`. Returns the alerts to send; sends nothing.
+    """Evaluate the day-over-day change against every PRICE_CHANGE_RANGE
+    rule for `ticker`. Returns the alerts to send; sends nothing.
     """
     rules = db.execute(
         select(NotificationRule).where(
@@ -286,17 +272,7 @@ def _detect_range_alerts(
     }
     unsubscribed = opted_out_user_ids(db)
 
-    settings = get_settings()
     alerts: list[_Alert] = []
-
-    # Define the two independent signals to check.
-    tick_label = f"over the last {settings.intraday_tick_minutes} minutes"
-    daily_label = "vs. the previous trading day's close"
-    signals: list[tuple[str, str, float | None]] = [
-        (SIGNAL_TICK, tick_label, tick_pct),
-        (SIGNAL_DAILY, daily_label, daily_pct),
-    ]
-
     for rule in rules:
         user = users.get(rule.user_id)
         if user is None or not user.notify_email_confirmed:
@@ -305,24 +281,24 @@ def _detect_range_alerts(
             continue
         if rule.pct_low is None or rule.pct_high is None:
             continue
-        for prefix, baseline, pct in signals:
-            if pct is None:
-                continue
-            if not (pct < rule.pct_low or pct > rule.pct_high):
-                continue
-            if _already_fired_recently(db, user.id, ticker.id, prefix, captured_at):
-                continue
-            alerts.append(_Alert(
-                user=user, ticker=ticker, signal=prefix, pct=pct, price=new_price,
-                prev_close=prev_day_close,
-                summary=_summary_text(ticker, new_price, pct, prefix, baseline),
-            ))
+        if not (daily_pct < rule.pct_low or daily_pct > rule.pct_high):
+            continue
+        if _already_fired_recently(db, user.id, ticker.id, SIGNAL_DAILY, captured_at):
+            continue
+        alerts.append(_Alert(
+            user=user, ticker=ticker, pct=daily_pct, price=new_price,
+            prev_close=prev_day_close,
+            summary=_summary_text(
+                ticker, new_price, daily_pct, SIGNAL_DAILY,
+                "vs. the previous trading day's close",
+            ),
+        ))
 
     return alerts
 
 
 def _stories_for(db: DBSession, alerts: list[_Alert]) -> dict[int, StockArticle]:
-    """Stories (by ticker id) for stocks whose day-over-day signal fired,
+    """Stories (by ticker id) for stocks that moved at least the story bar,
     after waiting up to AI_ARTICLE_WAIT_SECONDS. Empty when stories are off
     or anything goes wrong — alerts then go out without them."""
     settings = get_settings()
@@ -330,7 +306,7 @@ def _stories_for(db: DBSession, alerts: list[_Alert]) -> dict[int, StockArticle]
         return {}
     candidates: dict[int, articles.Candidate] = {}
     for a in alerts:
-        if a.signal == SIGNAL_DAILY and a.prev_close:
+        if a.prev_close and articles.needs_story(a.ticker, a.pct):
             candidates.setdefault(
                 a.ticker.id, articles.Candidate(a.ticker, a.pct, a.price, a.prev_close),
             )
@@ -356,9 +332,7 @@ def _send_alerts(
     sent = 0
     first_events: list[tuple[User, str, str, str]] = []
     for a in alerts:
-        # Stories explain the day's move, so only the daily signal gets one.
-        story = stories.get(a.ticker.id) if a.signal == SIGNAL_DAILY else None
-        if not _send_one_alert(db, a, story):
+        if not _send_one_alert(db, a, stories.get(a.ticker.id)):
             continue
         sent += 1
         if a.user.id not in users_with_history:
@@ -428,30 +402,18 @@ def run_intraday_capture(
                 elif price <= 0:
                     log.warning("Intraday fetch returned invalid price %.4f for %s", price, t.symbol)
                 continue
-            prior_tick = _prior_tick_price(db, t.id, before=now)
             prev_day_close = _previous_day_close(db, t)
             db.add(IntradayPrice(ticker_id=t.id, captured_at=now, price=price))
             db.flush()
             captured += 1
             captured_prices.append(f"{t.symbol}=${price:.2f}")
 
-            tick_pct = (
-                (price - prior_tick) / prior_tick * 100.0
-                if prior_tick is not None and prior_tick > 0
-                else None
-            )
-            daily_pct = (
-                (price - prev_day_close) / prev_day_close * 100.0
-                if prev_day_close is not None and prev_day_close > 0
-                else None
-            )
-            if tick_pct is None and daily_pct is None:
-                # No baseline at all on either signal — first observation,
-                # nothing more to do for this ticker this tick.
+            if prev_day_close is None or prev_day_close <= 0:
+                # No previous close to compare against yet.
                 continue
+            daily_pct = (price - prev_day_close) / prev_day_close * 100.0
             alerts.extend(_detect_range_alerts(
-                db, t, new_price=price,
-                tick_pct=tick_pct, daily_pct=daily_pct,
+                db, t, new_price=price, daily_pct=daily_pct,
                 prev_day_close=prev_day_close, captured_at=now,
             ))
 

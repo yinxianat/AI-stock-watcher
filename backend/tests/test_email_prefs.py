@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from sqlalchemy import select
 
 from app.core.settings import get_settings
@@ -9,6 +11,7 @@ from app.db.database import get_session_factory
 from app.db.seed import seed
 from app.jobs.intraday import run_intraday_capture
 from app.models import (
+    DailyClose,
     EmailOptOut,
     NotificationEventType,
     NotificationRule,
@@ -175,6 +178,7 @@ def _user_with_band_rule() -> int:
         event_type=NotificationEventType.PRICE_CHANGE_RANGE,
         pct_low=-1.0, pct_high=1.0, enabled=True,
     ))
+    db.add(DailyClose(ticker_id=t.id, date=date.today() - timedelta(days=1), close=100.0))
     db.commit()
     uid = user.id
     db.close()

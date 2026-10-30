@@ -109,13 +109,10 @@ export default function Help() {
         <h4>Price change outside a range</h4>
         <p>
           Emails you when the price moves outside the range you set, for example
-          below −5% or above +5%. It's checked <strong>every 10 minutes</strong>{' '}
-          while the market is open, against two things:
+          below −5% or above +5%, compared with the previous trading day's close
+          (the day's overall move). It's checked <strong>every 10 minutes</strong>{' '}
+          while the market is open.
         </p>
-        <ul>
-          <li>the previous trading day's close (the day's overall move), and</li>
-          <li>the price about 10 minutes earlier (a sudden jump or drop).</li>
-        </ul>
 
         <h4>New high or low</h4>
         <p>
@@ -251,7 +248,7 @@ export default function Help() {
           <summary>Why didn't my alert include a Stock Story?</summary>
           <ul>
             <li>We couldn't find a clear reason for the move in trusted news. We'd rather say nothing than guess.</li>
-            <li>The alert was for a quick 10-minute jump. Stories explain the day's move, which usually takes longer to show up in the news.</li>
+            <li>The move was small: under 1% for a stock, or under 0.5% for a fund (ETF or index). Small moves rarely have a news reason, so you get a short "small move" note for your kids instead.</li>
             <li>The story didn't pass our safety checks, so we didn't send it.</li>
             <li>We'd already written a lot of stories that day. The biggest moves get stories first.</li>
           </ul>

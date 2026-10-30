@@ -37,7 +37,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.core.settings import get_settings
 from app.db.database import get_session_factory
-from app.models import ArticleFollowup, DailyClose, StockArticle, Ticker, User, utcnow
+from app.models import ArticleFollowup, DailyClose, StockArticle, Ticker, TickerType, User, utcnow
 from app.services import email_prefs
 from app.services.alerts import AlertChannel, notify_admin
 from app.services.articles import render
@@ -344,6 +344,18 @@ class Candidate:
     prev_close: float
 
 
+def story_bar_pct(ticker: Ticker) -> float:
+    """Smallest day-over-day move (either way) that gets an AI story."""
+    settings = get_settings()
+    if ticker.type == TickerType.STOCK:
+        return settings.ai_article_min_pct_stock
+    return settings.ai_article_min_pct_fund
+
+
+def needs_story(ticker: Ticker, move_pct: float) -> bool:
+    return abs(move_pct) >= story_bar_pct(ticker)
+
+
 def trading_date(now_utc: datetime | None = None) -> date:
     now_utc = now_utc or utcnow()
     return now_utc.replace(tzinfo=timezone.utc).astimezone(_ET).date()
@@ -506,9 +518,18 @@ def _html(intro: str, block: str, user: User) -> str:
 
 def build_alert_email(
     db: DBSession, user: User, summary: str, article: StockArticle | None,
+    small_move: tuple[Ticker, float] | None = None,
 ) -> tuple[str, str | None, bool]:
     """(text, html, still_pending) for one alert. `still_pending` means the
-    email promised a follow-up, so the caller must record one."""
+    email promised a follow-up, so the caller must record one.
+    `small_move` is (ticker, move %) for a move under the story bar, which
+    gets the fixed small-move note instead of a story."""
+    if small_move is not None:
+        ticker, move_pct = small_move
+        m = render.SmallMove(ticker.symbol, move_pct, story_bar_pct(ticker),
+                             get_age_groups(db, user.id))
+        text = f"{summary}\n\n{render.small_move_text(m)}\n\n{_footer_text(user)}"
+        return text, _html(summary, render.small_move_html(m), user), False
     if article is not None:
         view = _view(db, article, get_age_groups(db, user.id))
         if view is not None:

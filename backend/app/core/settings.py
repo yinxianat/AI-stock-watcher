@@ -143,6 +143,11 @@ class Settings(BaseSettings):
     # After the API rejects the key (or the account is out of credit), stop
     # calling it for this long; alerts keep going out without stories.
     ai_key_problem_pause_minutes: int = 30
+    # Smallest day-over-day move (either way, in %) that gets an AI story;
+    # smaller moves get a fixed "small move" note instead (no AI, no cost).
+    # Funds (ETFs and indexes) usually move less than single stocks.
+    ai_article_min_pct_stock: float = 1.0
+    ai_article_min_pct_fund: float = 0.5
     # Cap on new stories per trading day; the biggest moves are done first.
     ai_article_max_per_day: int = 30
     # Big moves (at least this % either way) still get a story after the

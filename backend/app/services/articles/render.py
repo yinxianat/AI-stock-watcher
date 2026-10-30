@@ -208,6 +208,108 @@ def story_html(v: StoryView) -> str:
 </div>"""
 
 
+@dataclass
+class SmallMove:
+    """A move too small for an AI story: gets a fixed note instead."""
+
+    symbol: str
+    move_pct: float
+    bar_pct: float  # moves this big or bigger get an AI story
+    age_groups: list[str]  # the parent's choice
+
+
+# Fixed text, not AI-written: (headline, story, question) per age group.
+# Placeholders: {symbol}, {way} (up/down), {pct} (size of the move), {bar}.
+_SMALL_MOVE_TEXT = {
+    "3-5": (
+        "{symbol} wiggled just a little",
+        "Today {symbol}'s price went {way} a tiny bit, less than {bar}. Prices "
+        "wiggle up and down a little every day, like small waves at the beach. "
+        "No big change today!",
+        "Can you wiggle your finger just a little bit? Now a lot?",
+    ),
+    "6-9": (
+        "A small, everyday move for {symbol}",
+        "{symbol}'s price went {way} {pct} today. Anything less than {bar} up or "
+        "down is a small move, the kind that happens almost every day as people "
+        "buy and sell. Small moves like this usually don't need a big news story.",
+        "Why do you think prices change a little bit every day?",
+    ),
+    "10-12": (
+        "{symbol} stayed inside the small range",
+        "{symbol} moved {way} {pct} today, inside the small range of less than "
+        "{bar} either way. Prices shift a bit every day as buyers and sellers "
+        "trade, even when nothing special happens. We only look for a news story "
+        "when a move is bigger than that.",
+        "If something changes a little every day, how could you tell when a change is a big deal?",
+    ),
+    "13-17": (
+        "{symbol}: just everyday noise",
+        "{symbol} moved {way} {pct} today, within ±{bar}. Moves this size are "
+        "usually normal day-to-day noise from lots of small trades rather than a "
+        "reaction to big news. One quiet day says little; the longer trend tells "
+        "you more.",
+        "Which tells you more: one day's small move, or how the price has done over a year?",
+    ),
+}
+
+
+def _pct(value: float) -> str:
+    return f"{value:.2f}".rstrip("0").rstrip(".") + "%"
+
+
+def _small_move_versions(m: SmallMove) -> list[tuple[str, str, str, str]]:
+    """(age label, headline, story, question) per chosen age group."""
+    fill = dict(symbol=m.symbol, way="up" if m.move_pct >= 0 else "down",
+                pct=_pct(abs(m.move_pct)), bar=_pct(m.bar_pct))
+    groups = [g for g in m.age_groups if g in _SMALL_MOVE_TEXT] or ["6-9"]
+    return [
+        (AGE_LABELS[g], *(part.format(**fill) for part in _SMALL_MOVE_TEXT[g]))
+        for g in groups
+    ]
+
+
+def _small_move_note(m: SmallMove) -> str:
+    return (
+        f"We write a \"why it moved\" story when {m.symbol} moves {_pct(m.bar_pct)} "
+        "or more in a day. This was a smaller move, so we didn't look for news "
+        "about it. This note is the same for every small move: it isn't written by "
+        "AI, and it isn't financial advice."
+    )
+
+
+def small_move_text(m: SmallMove) -> str:
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━",
+        "📏 SMALL MOVE: read it together with your kids",
+        f"{m.symbol} {m.move_pct:+.2f}% today, inside the small range of ±{_pct(m.bar_pct)}",
+    ]
+    for label, headline, story, question in _small_move_versions(m):
+        lines += ["", label, f"😐 {headline}", story, f"🗣️ Ask your kid: {question}"]
+    lines += ["", f"🧐 For grown-ups: {_small_move_note(m)}", "━━━━━━━━━━━━━━━━━━━━"]
+    return "\n".join(lines)
+
+
+def small_move_html(m: SmallMove) -> str:
+    kids = "".join(
+        f"""\
+<div style="border-top:1px solid #eaeef2;margin-top:14px;padding-top:10px">
+<p style="margin:0;font-size:13px;color:{_MUTED}">{escape(label)}</p>
+<h2 style="margin:4px 0 8px;font-size:19px">😐 {escape(headline)}</h2>
+<p style="font-size:16px;line-height:1.5;margin:0 0 8px">{escape(story)}</p>
+<p style="background:#fff8c5;border-radius:8px;padding:10px;margin:0">🗣️ <strong>Ask your kid:</strong> {escape(question)}</p>
+</div>"""
+        for label, headline, story, question in _small_move_versions(m)
+    )
+    return f"""\
+<div style="border:1px solid #d0d7de;border-radius:10px;padding:16px;margin:16px 0">
+<p style="margin:0 0 8px;font-size:12px;letter-spacing:.04em;color:{_MUTED}">📏 SMALL MOVE · READ IT TOGETHER WITH YOUR KIDS</p>
+<p style="margin:0;font-size:15px"><strong>{escape(m.symbol)} {m.move_pct:+.2f}% today</strong>, inside the small range of ±{_pct(m.bar_pct)}</p>
+{kids}
+<p style="font-size:12px;line-height:1.45;color:#57606a;background:#f6f8fa;border-radius:8px;padding:10px;margin:14px 0 0">🧐 {escape(_small_move_note(m))}</p>
+</div>"""
+
+
 def still_looking_text(symbol: str) -> str:
     return (
         f"🔎 We're still looking into why {symbol} moved. If we find the story, "
