@@ -1,6 +1,6 @@
 """Intraday price capture + PRICE_CHANGE_RANGE notification dispatch.
 
-Scheduled every `INTRADAY_TICK_MINUTES` (default 10) during US market hours
+Scheduled every `INTRADAY_TICK_MINUTES` (default 30) during US market hours
 on weekdays. For each watched ticker we:
 
 1. Fetch the current price via the configured stock-data provider.

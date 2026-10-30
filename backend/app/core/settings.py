@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     # PRICE_CHANGE_RANGE notification rule fires on BOTH the tick-over-tick
     # % AND the % vs. previous trading day's close.
     intraday_ingest_enabled: bool = True
-    intraday_tick_minutes: int = 10
+    intraday_tick_minutes: int = 30
     intraday_retention: str = "7d"
     job_runs_retention: str = "30d"
     info_log_lifetime: str = "7d"
