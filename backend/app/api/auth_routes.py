@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session as DBSession
 
-from app.api.deps import current_user
+from app.api.deps import current_user, current_user_or_settings_token
 from app.db.database import get_db
 from app.models import User
 from app.schemas.schemas import (
@@ -159,7 +159,7 @@ def _email_preferences(db: DBSession, user: User) -> EmailPreferences:
 
 @router.get("/email-preferences", response_model=EmailPreferences)
 def get_email_preferences(
-    user: User = Depends(current_user), db: DBSession = Depends(get_db)
+    user: User = Depends(current_user_or_settings_token), db: DBSession = Depends(get_db)
 ) -> EmailPreferences:
     return _email_preferences(db, user)
 
@@ -167,7 +167,7 @@ def get_email_preferences(
 @router.put("/email-preferences", response_model=EmailPreferences)
 def update_email_preferences(
     payload: EmailPreferencesUpdate,
-    user: User = Depends(current_user),
+    user: User = Depends(current_user_or_settings_token),
     db: DBSession = Depends(get_db),
 ) -> EmailPreferences:
     if payload.alerts_enabled is not None:
@@ -179,7 +179,7 @@ def update_email_preferences(
 
 @router.get("/story-preferences", response_model=StoryPreferencesOut)
 def get_story_preferences(
-    user: User = Depends(current_user), db: DBSession = Depends(get_db)
+    user: User = Depends(current_user_or_settings_token), db: DBSession = Depends(get_db)
 ) -> StoryPreferencesOut:
     return StoryPreferencesOut(
         age_groups=get_age_groups(db, user.id),
@@ -190,7 +190,7 @@ def get_story_preferences(
 @router.put("/story-preferences", response_model=StoryPreferencesOut)
 def update_story_preferences(
     payload: StoryPreferences,
-    user: User = Depends(current_user),
+    user: User = Depends(current_user_or_settings_token),
     db: DBSession = Depends(get_db),
 ) -> StoryPreferencesOut:
     return StoryPreferencesOut(

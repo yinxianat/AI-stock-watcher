@@ -75,9 +75,10 @@ def user_id_from_unsubscribe_token(token: str) -> int | None:
 
 def alert_email_footer(user: User) -> str:
     """Footer appended to every stock-alert email."""
-    settings = get_settings()
+    from app.services.email_links import settings_url
+
     return (
-        f"Manage your watchlist and rules: {settings.frontend_base_url}\n"
+        f"Manage your watchlist and rules: {settings_url(user.id)}\n"
         f"Stop all alert emails: {unsubscribe_url(user)}"
     )
 
