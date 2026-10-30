@@ -8,7 +8,9 @@ AI_NEWS_DOMAINS, then the findings come back through a strict
 `report_findings` tool. (Structured output can't be used here: it's
 incompatible with the citations web search always returns.) Every URL the
 search returned is collected, so the validate stage can drop facts citing
-anything else.
+anything else. A site that blocks Anthropic's crawler makes the API reject
+the whole request; that site is dropped for the rest of the process (the
+admin is told once to fix AI_NEWS_DOMAINS) and the search is retried.
 
 On models that support it, requests use the server-side refusal fallback
 ("default"): if the model declines on safety grounds, the API retries on a
@@ -18,6 +20,7 @@ suitable model in the same call (Claude Haiku 5.5 has no fallback).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import anthropic
@@ -38,6 +41,9 @@ _TIMEOUT_S = 120.0
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # Models that accept `fallbacks: "default"`; others reject the parameter.
 _FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
+_BLOCKED_RE = re.compile(r"domains are not accessible to our user agent: \[([^\]]*)\]")
+# Sites web search refused this process; skipped until restart.
+_blocked_domains: set[str] = set()
 
 REPORT_TOOL: dict[str, Any] = {
     "name": _REPORT_TOOL,
@@ -137,6 +143,26 @@ def _research_from(report: dict[str, Any]) -> Research:
     )
 
 
+def _search_domains() -> list[str]:
+    return [d for d in get_settings().ai_news_domain_list if d not in _blocked_domains]
+
+
+def _drop_blocked_domains(e: anthropic.BadRequestError) -> bool:
+    """True if the API refused some of our news sites (and they're now
+    skipped), so the search is worth retrying without them."""
+    match = _BLOCKED_RE.search(str(e))
+    new = set(re.findall(r"'([^']+)'", match.group(1))) - _blocked_domains if match else set()
+    if not new:
+        return False
+    _blocked_domains.update(new)
+    log.error(
+        "Web search can't use %s (the site blocks Anthropic's crawler); "
+        "searching %s instead. Remove it from AI_NEWS_DOMAINS.",
+        ", ".join(sorted(new)), ", ".join(_search_domains()) or "nothing",
+    )
+    return True
+
+
 def research(req: ArticleRequest) -> ResearchResult:
     settings = get_settings()
     tools = [
@@ -144,7 +170,7 @@ def research(req: ArticleRequest) -> ResearchResult:
             "type": "web_search_20260318",
             "name": "web_search",
             "max_uses": settings.ai_article_max_searches,
-            "allowed_domains": settings.ai_news_domain_list,
+            "allowed_domains": _search_domains(),
             # Plain search, no code-execution filtering: works on every model
             # (including Haiku) and keeps every result URL in the response.
             "allowed_callers": ["direct"],
@@ -156,13 +182,21 @@ def research(req: ArticleRequest) -> ResearchResult:
     ]
     usage, seen = Usage(), []
     for _ in range(_MAX_CONTINUATIONS + 1):
-        response = create(
-            system=prompts.RESEARCH_SYSTEM,
-            messages=messages,
-            tools=tools,
-            tool_choice={"type": "auto"},
-            output_config={"effort": "medium"},
-        )
+        if not tools[0]["allowed_domains"]:
+            raise StoryAIError("research: every site in AI_NEWS_DOMAINS blocks web search")
+        try:
+            response = create(
+                system=prompts.RESEARCH_SYSTEM,
+                messages=messages,
+                tools=tools,
+                tool_choice={"type": "auto"},
+                output_config={"effort": "medium"},
+            )
+        except anthropic.BadRequestError as e:
+            if not _drop_blocked_domains(e):
+                raise
+            tools = [{**tools[0], "allowed_domains": _search_domains()}, *tools[1:]]
+            continue
         usage += usage_of(response)
         seen += _search_urls(response)
         check_stop(response, "research")
