@@ -76,7 +76,7 @@ export default function App() {
         <Route path="/help" element={<Help />} />
         <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />
         <Route path="/rules/:tickerId" element={<RequireAuth><Rules /></RequireAuth>} />
-        <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
+        <Route path="/settings" element={<Settings />} />
         <Route path="/money-ideas" element={<MoneyIdeas />} />
         <Route path="/feedback" element={<Feedback />} />
         <Route path="*" element={<Navigate to="/" replace />} />

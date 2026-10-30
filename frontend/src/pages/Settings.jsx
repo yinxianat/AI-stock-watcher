@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { api } from '../lib/api.js';
+import { Navigate, useSearchParams } from 'react-router-dom';
+import { api, getToken } from '../lib/api.js';
 import { formatCountdown } from '../api/errors.js';
 import { sendEmailRequest, useCooldown } from '../lib/emailSend.js';
 import { suggestEmail } from '../lib/emailTypos.js';
@@ -16,6 +17,11 @@ const AGE_OPTIONS = [
 ];
 
 export default function Settings() {
+  const [params] = useSearchParams();
+  // Signed token from an email footer link. It authorises the preference
+  // endpoints only, so the change-email section stays hidden in this mode.
+  const linkToken = params.get('token');
+  const signedIn = !!getToken();
   const [me, setMe] = useState(null);
   const [newEmail, setNewEmail] = useState('');
   const [flash, setFlash] = useState(null);
@@ -37,19 +43,20 @@ export default function Settings() {
   const [storiesFlash, setStoriesFlash] = useState(null);
 
   useEffect(() => {
-    api.me().then(setMe).catch(() => setMe(null));
+    if (!linkToken && !signedIn) return;
+    if (signedIn) api.me().then(setMe).catch(() => setMe(null));
     api
-      .getEmailPreferences()
+      .getEmailPreferences(undefined, linkToken)
       .then((p) => {
         setAlertsEnabled(p.alerts_enabled);
         setRecapEnabled(p.recap_enabled);
       })
       .catch(() => setAlertsEnabled(null));
     api
-      .getStoryPreferences()
+      .getStoryPreferences(undefined, linkToken)
       .then(setStoryPrefs)
       .catch(() => setStoryPrefs(null));
-  }, []);
+  }, [linkToken, signedIn]);
 
   async function savePrefs(save) {
     setSavingAlerts(true);
@@ -65,8 +72,10 @@ export default function Settings() {
     }
   }
 
-  const toggleAlerts = (e) => savePrefs(() => api.setAlertsEnabled(e.target.checked));
-  const toggleRecap = (e) => savePrefs(() => api.setRecapEnabled(e.target.checked));
+  const toggleAlerts = (e) =>
+    savePrefs(() => api.setAlertsEnabled(e.target.checked, linkToken));
+  const toggleRecap = (e) =>
+    savePrefs(() => api.setRecapEnabled(e.target.checked, linkToken));
 
   async function toggleAgeGroup(value, checked) {
     const current = storyPrefs.age_groups;
@@ -77,7 +86,7 @@ export default function Settings() {
     setSavingStories(true);
     setStoriesFlash(null);
     try {
-      const saved = await api.setStoryAgeGroups(next);
+      const saved = await api.setStoryAgeGroups(next, linkToken);
       setStoryPrefs(saved);
       // Confirm from what the server saved, not from what was ticked.
       const labels = AGE_OPTIONS.filter((o) => saved.age_groups.includes(o.value)).map((o) => o.label);
@@ -133,10 +142,25 @@ export default function Settings() {
 
   const suggestion = suggestEmail(newEmail);
 
-  if (!me) return <div className="container"><p>Loading…</p></div>;
+  if (!linkToken && !signedIn) return <Navigate to="/" replace />;
+  if (signedIn && !me) return <div className="container"><p>Loading…</p></div>;
 
   return (
     <div className="container">
+      {/* Opened from an email link: no session, so only the preferences
+          below are available. Changing the notification email needs a
+          real sign-in. */}
+      {!signedIn && (
+        <div className="card">
+          <h2>Email settings</h2>
+          <p className="muted">
+            You opened this from one of our emails, so you can change what we
+            send you right here. To edit your watchlist or your notification
+            email, <a href="/">sign in</a>.
+          </p>
+        </div>
+      )}
+      {signedIn && (
       <div className="card">
         <h2>Settings</h2>
         <p>
@@ -185,6 +209,7 @@ export default function Settings() {
           </div>
         </form>
       </div>
+      )}
 
       {alertsEnabled !== null && (
         <div className="card">

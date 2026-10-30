@@ -93,13 +93,121 @@ def test_recap_only_goes_to_users_who_want_it(client):
     recap_off = _user("recap-off@example.com", ["AAPL"])
     alerts_off = _user("alerts-off@example.com", ["AAPL"])
     _user("unconfirmed@example.com", ["AAPL"], confirmed=False)
-    _user("no-stocks@example.com", [])
     _add(RecapOptOut(user_id=recap_off))
     _add(EmailOptOut(user_id=alerts_off))
     _closes("AAPL", 102.0)
 
     assert run_watchlist_recap() == 1
     assert [e["to"] for e in client.sent_emails] == ["on@example.com"]
+
+
+def test_recap_footer_links_are_tokenised(client):
+    """Footer links must open without a login — a parent clicks from Gmail."""
+    _user("on@example.com", ["AAPL"])
+    _closes("AAPL", 102.0)
+
+    assert run_watchlist_recap() == 1
+    body = client.sent_emails[-1]["body_text"]
+    assert "/settings?token=" in body
+    token = body.split("/settings?token=")[1].split()[0]
+    assert client.get(f"/auth/email-preferences?token={token}").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Starter recap: users with an empty watchlist
+# ---------------------------------------------------------------------------
+
+
+class TestStarterRecap:
+    """A user with no stocks still gets the market plus a money idea, and an
+    invitation to pick their own."""
+
+    def test_empty_watchlist_user_gets_market_recap(self, client):
+        _user("watcher@example.com", ["AAPL"])
+        _user("empty@example.com", [])
+        _closes("AAPL", 102.0)
+
+        assert run_watchlist_recap() == 2
+        to = {e["to"] for e in client.sent_emails}
+        assert to == {"watcher@example.com", "empty@example.com"}
+
+    def test_starter_recap_contains_market_idea_and_cta(self, client):
+        _user("watcher@example.com", ["AAPL"])
+        _user("empty@example.com", [])
+        _closes("AAPL", 102.0)
+        run_watchlist_recap()
+
+        body = next(e["body_text"] for e in client.sent_emails
+                    if e["to"] == "empty@example.com")
+        assert "THE MARKET TODAY" in body
+        assert "MONEY IDEA" in body
+        assert "Want to follow your own stocks?" in body
+        # No per-stock table, because they have no stocks.
+        assert "All your stocks:" not in body
+
+    def test_starter_recap_respects_opt_outs(self, client):
+        _user("watcher@example.com", ["AAPL"])
+        recap_off = _user("empty-recap-off@example.com", [])
+        alerts_off = _user("empty-alerts-off@example.com", [])
+        _user("empty-unconfirmed@example.com", [], confirmed=False)
+        _add(RecapOptOut(user_id=recap_off))
+        _add(EmailOptOut(user_id=alerts_off))
+        _closes("AAPL", 102.0)
+
+        assert run_watchlist_recap() == 1
+        assert [e["to"] for e in client.sent_emails] == ["watcher@example.com"]
+
+    def test_starter_recap_sent_once_per_day(self, client):
+        _user("watcher@example.com", ["AAPL"])
+        _user("empty@example.com", [])
+        _closes("AAPL", 102.0)
+
+        assert run_watchlist_recap() == 2
+        assert run_watchlist_recap() == 0
+
+    def test_starter_recap_records_money_idea(self, client):
+        from app.models import MoneyIdeaSend
+
+        uid = _user("empty@example.com", [])
+        _user("watcher@example.com", ["AAPL"])
+        _closes("AAPL", 102.0)
+        run_watchlist_recap()
+
+        db = get_session_factory()()
+        try:
+            sends = db.execute(
+                select(MoneyIdeaSend).where(MoneyIdeaSend.user_id == uid)
+            ).scalars().all()
+            assert len(sends) == 1
+        finally:
+            db.close()
+
+    def test_starter_recap_footer_links_are_tokenised(self, client):
+        _user("empty@example.com", [])
+        _user("watcher@example.com", ["AAPL"])
+        _closes("AAPL", 102.0)
+        run_watchlist_recap()
+
+        body = next(e["body_text"] for e in client.sent_emails
+                    if e["to"] == "empty@example.com")
+        assert "/settings?token=" in body
+        assert "/money-ideas?token=" in body
+
+    def test_no_starter_recap_on_a_market_holiday(self, client):
+        """No closes today means we can't say how the market did."""
+        _user("empty@example.com", [])
+        _user("watcher@example.com", ["AAPL"])
+        seed()
+        db = get_session_factory()()
+        t = db.execute(select(Ticker).where(Ticker.symbol == "AAPL")).scalar_one()
+        db.add(DailyClose(
+            ticker_id=t.id, date=service.trading_date() - timedelta(days=1), close=100,
+        ))
+        db.commit()
+        db.close()
+
+        assert run_watchlist_recap() == 0
+        assert client.sent_emails == []
 
 
 def test_no_recap_on_a_market_holiday(client):

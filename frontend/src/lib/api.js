@@ -64,6 +64,8 @@ async function request(path, { method = 'GET', body, auth = false, signal, timeo
   return data;
 }
 
+const qs = (token) => (token ? `?token=${encodeURIComponent(token)}` : '');
+
 export const api = {
   // auth
   requestLink: (email) => request('/auth/request-link', { method: 'POST', body: { email } }),
@@ -73,15 +75,22 @@ export const api = {
     request('/auth/notify-email', { method: 'POST', body: { new_email }, auth: true }),
   confirmNotifyEmail: (token) =>
     request('/auth/notify-email/confirm', { method: 'POST', body: { token } }),
-  getEmailPreferences: (opts) => request('/auth/email-preferences', { auth: true, ...opts }),
-  setAlertsEnabled: (alerts_enabled) =>
-    request('/auth/email-preferences', { method: 'PUT', body: { alerts_enabled }, auth: true }),
-  setRecapEnabled: (recap_enabled) =>
-    request('/auth/email-preferences', { method: 'PUT', body: { recap_enabled }, auth: true }),
+  // Preferences accept either a session or a signed `token` from an email
+  // footer link, so a parent clicking from their inbox isn't sent to login.
+  getEmailPreferences: (opts, token) =>
+    request(`/auth/email-preferences${qs(token)}`, { auth: !token, ...opts }),
+  setAlertsEnabled: (alerts_enabled, token) =>
+    request(`/auth/email-preferences${qs(token)}`,
+      { method: 'PUT', body: { alerts_enabled }, auth: !token }),
+  setRecapEnabled: (recap_enabled, token) =>
+    request(`/auth/email-preferences${qs(token)}`,
+      { method: 'PUT', body: { recap_enabled }, auth: !token }),
   unsubscribe: (token) => request('/auth/unsubscribe', { method: 'POST', body: { token } }),
-  getStoryPreferences: (opts) => request('/auth/story-preferences', { auth: true, ...opts }),
-  setStoryAgeGroups: (age_groups) =>
-    request('/auth/story-preferences', { method: 'PUT', body: { age_groups }, auth: true }),
+  getStoryPreferences: (opts, token) =>
+    request(`/auth/story-preferences${qs(token)}`, { auth: !token, ...opts }),
+  setStoryAgeGroups: (age_groups, token) =>
+    request(`/auth/story-preferences${qs(token)}`,
+      { method: 'PUT', body: { age_groups }, auth: !token }),
 
   // tickers
   listTickers: () => request('/tickers'),
