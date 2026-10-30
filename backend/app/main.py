@@ -21,6 +21,7 @@ from slowapi.util import get_remote_address
 
 from app.api import (
     auth_routes,
+    feedback_routes,
     money_ideas_routes,
     rules_routes,
     tickers_routes,
@@ -199,6 +200,7 @@ def create_app() -> FastAPI:
     app.include_router(rules_routes.router)
     app.include_router(trends_routes.router)
     app.include_router(money_ideas_routes.router)
+    app.include_router(feedback_routes.router)
     return app
 
 

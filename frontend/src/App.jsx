@@ -11,6 +11,7 @@ import Settings from './pages/Settings.jsx';
 import ConfirmEmail from './pages/ConfirmEmail.jsx';
 import Unsubscribe from './pages/Unsubscribe.jsx';
 import Help from './pages/Help.jsx';
+import Feedback from './pages/Feedback.jsx';
 import MoneyIdeas from './pages/MoneyIdeas.jsx';
 
 function RequireAuth({ children }) {
@@ -77,6 +78,7 @@ export default function App() {
         <Route path="/rules/:tickerId" element={<RequireAuth><Rules /></RequireAuth>} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/money-ideas" element={<RequireAuth><MoneyIdeas /></RequireAuth>} />
+        <Route path="/feedback" element={<Feedback />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       </ErrorBoundary>
