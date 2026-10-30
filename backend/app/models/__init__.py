@@ -13,6 +13,8 @@ from .models import (  # noqa: F401
     NotificationLog,
     NotificationRule,
     PriceSnapshot,
+    RecapOptOut,
+    RecapSend,
     Session,
     StockArticle,
     StoryPreference,
