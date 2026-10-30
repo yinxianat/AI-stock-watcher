@@ -952,3 +952,19 @@ def test_alert_email_uses_the_parents_age_groups(client, stories_on):
     body = client.sent_emails[0]["body_text"]
     assert "For your little one" in body and "For your teen" in body
     assert "For your kid (ages 6–9)" not in body
+
+
+def test_writer_sentence_limits_stay_under_the_code_check():
+    """The writer is told stricter sentence limits than language.py enforces,
+    so honest stories aren't thrown away for one long sentence."""
+    import re
+
+    from app.services.articles.language import AGE_LIMITS
+    from app.services.articles.prompts import WRITER_SYSTEM
+
+    text = " ".join(WRITER_SYSTEM.split())
+    for group, (max_words, max_sentence) in AGE_LIMITS.items():
+        m = re.search(rf'"{group}" \([^)]*\): .*?at most (\d+) words, at most (\d+) '
+                      r"words in any sentence", text)
+        assert m, group
+        assert int(m.group(1)) < max_words and int(m.group(2)) < max_sentence, group
