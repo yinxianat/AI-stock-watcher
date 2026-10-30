@@ -103,7 +103,7 @@ def request_notify_email_change(
 
     link = f"{settings.frontend_base_url}/auth/confirm-email?token={token}"
     body = (
-        "Please confirm this is the address where you'd like AI Stock Watcher "
+        "Please confirm this is the address where you'd like Little Money Monkey 🐵 "
         f"to send your notifications. The link expires in "
         f"{settings.email_confirm_ttl_minutes} minutes.\n\n{link}"
     )
@@ -147,7 +147,7 @@ def confirm_notify_email(db: DBSession, token: str) -> User | None:
             user.notify_email,
             "Notifications activated",
             (
-                "Your notification address is confirmed. AI Stock Watcher checks "
+                "Your notification address is confirmed. Little Money Monkey checks "
                 "the market three times each US trading day "
                 f"({settings.batch_job_times_et} ET) and will email you whenever "
                 "any of your rules trigger. You can edit your watchlist or rules "

@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     smtp_port: int = 1025
     smtp_username: str = ""
     smtp_password: str = ""
-    smtp_from: str = "AI Stock Watcher <no-reply@example.com>"
+    smtp_from: str = "Little Money Monkey <no-reply@example.com>"
     smtp_use_tls: bool = False
 
     # Batch jobs
@@ -163,8 +163,12 @@ class Settings(BaseSettings):
     # daily cap is reached, up to twice the cap.
     ai_article_always_pct: float = 5.0
     # Comma-separated. With web_search, news is searched only on these sites,
-    # and only their links appear in emails.
-    ai_news_domains: str = "finance.yahoo.com"
+    # and only their links appear in emails. All free to read and reachable
+    # by Claude's web search (checked 2026-10-30; AP, Reuters, MarketWatch,
+    # WSJ, NYT, BBC, Barron's and Investopedia block it). Stock-picking sites
+    # are left out on purpose: their "buy/sell" advice doesn't belong in
+    # kids' stories.
+    ai_news_domains: str = "finance.yahoo.com,cnbc.com,cnn.com,axios.com,npr.org,techcrunch.com"
     # News older than this many days doesn't count as today's reason.
     ai_news_max_age_days: int = 2
     # Whole-market benchmark, so a story can say "most stocks fell today".

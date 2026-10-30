@@ -259,7 +259,7 @@ def _format_text(s: dict) -> str:
     last_complete = p["last_complete_at"].isoformat() + "Z" if p["last_complete_at"] else "(none in window)"
 
     lines = [
-        f"AI Stock Watcher — daily summary  ({s['generated_at'].isoformat()}Z, last {int(s['window_hours'])}h)",
+        f"🐵 Little Money Monkey — daily summary  ({s['generated_at'].isoformat()}Z, last {int(s['window_hours'])}h)",
         f"Overall health: {health(s)}",
         "",
         "PIPELINE",

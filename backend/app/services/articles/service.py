@@ -356,6 +356,14 @@ def needs_story(ticker: Ticker, move_pct: float) -> bool:
     return abs(move_pct) >= story_bar_pct(ticker)
 
 
+def moved_with_market(move_pct: float, market_pct: float | None) -> bool:
+    """Same direction as the S&P 500 and about the same size (within half
+    the market's move, or 0.5 points for small market moves)."""
+    if market_pct is None or move_pct * market_pct <= 0:
+        return False
+    return abs(move_pct - market_pct) <= max(0.5, abs(market_pct) * 0.5)
+
+
 def trading_date(now_utc: datetime | None = None) -> date:
     now_utc = now_utc or utcnow()
     return now_utc.replace(tzinfo=timezone.utc).astimezone(_ET).date()
@@ -521,8 +529,9 @@ def kid_block(
     small_move: tuple[Ticker, float] | None = None,
 ) -> tuple[str, str, bool] | None:
     """The kids' part of an email as (text, html, still_pending): the story
-    in the user's age groups, the fixed small-move note, or a "still
-    looking" note. None if there's nothing to show. `small_move` is
+    in the user's age groups, the fixed small-move note, the fixed
+    "whole-market day" note (no story, but the stock moved with the S&P
+    500), or a "still looking" note. None if there's nothing to show. `small_move` is
     (ticker, move %) for a move under the story bar. `still_pending` means
     the email promised a follow-up, so the caller must record one."""
     if small_move is not None:
@@ -534,6 +543,11 @@ def kid_block(
         view = _view(db, article, get_age_groups(db, user.id))
         if view is not None:
             return render.story_text(view), render.story_html(view), False
+        if (article.status in ("no_clear_cause", "failed")
+                and moved_with_market(article.move_pct, article.market_pct)):
+            m = render.MarketMove(_symbol(db, article), article.move_pct,
+                                  article.market_pct, get_age_groups(db, user.id))
+            return render.market_move_text(m), render.market_move_html(m), False
         if article.status == "pending":
             note = render.still_looking_text(_symbol(db, article))
             return note, f"<p>{note}</p>", True

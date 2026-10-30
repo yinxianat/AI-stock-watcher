@@ -99,4 +99,7 @@ export const api = {
 
   // trends
   myTrends: (opts) => request('/trends', { auth: true, ...opts }),
+
+  // money ideas
+  listMoneyIdeas: (opts) => request('/money-ideas', { auth: true, ...opts }),
 };
