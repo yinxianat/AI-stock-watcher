@@ -1,16 +1,23 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { api } from '../lib/api.js';
+import { Link, Navigate, useSearchParams } from 'react-router-dom';
+import { api, getToken } from '../lib/api.js';
 
 export default function MoneyIdeas() {
+  const [params] = useSearchParams();
+  const token = params.get('token');
+  const signedIn = !!getToken();
   const [ideas, setIdeas] = useState(null);
   const [feedback, setFeedback] = useState({});
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    api.listMoneyIdeas()
+    if (!token && !signedIn) return;
+    const load = token ? api.listMoneyIdeasByToken(token) : api.listMoneyIdeas();
+    load
       .then((d) => setIdeas(d.ideas))
       .catch((e) => setError(e.message || 'Failed to load'));
+    // Ratings need a session; arriving from an email link we skip them.
+    if (!signedIn) return;
     api.listFeedback('money_idea')
       .then((d) => {
         const map = {};
@@ -18,7 +25,9 @@ export default function MoneyIdeas() {
         setFeedback(map);
       })
       .catch(() => {});
-  }, []);
+  }, [token, signedIn]);
+
+  if (!token && !signedIn) return <Navigate to="/" replace />;
 
   const handleRate = (contentId, rating) => {
     setFeedback((prev) => ({ ...prev, [contentId]: rating }));
@@ -63,6 +72,7 @@ export default function MoneyIdeas() {
                 <p><strong>🗣️ Ask your kid:</strong> {v.question}</p>
               </details>
             ))}
+            {signedIn && (
             <div style={{ display: 'flex', gap: '8px', marginTop: '10px', alignItems: 'center' }}>
               <span style={{ fontSize: '13px', color: '#6e7781' }}>Was this helpful?</span>
               {[
@@ -85,6 +95,7 @@ export default function MoneyIdeas() {
                 </button>
               ))}
             </div>
+            )}
           </div>
         );
       })}
