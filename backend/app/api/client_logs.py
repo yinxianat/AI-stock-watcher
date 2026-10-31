@@ -46,7 +46,7 @@ class ClientLogEntry(BaseModel):
     source: str | None = Field(default=None, max_length=60)  # "feedback", "money-ideas", ...
 
 
-@router.post("", status_code=204)
+@router.post("", status_code=204, response_model=None)
 def ingest_client_log(entry: ClientLogEntry, request: Request) -> None:
     """Record a client-side error against the server log pipeline.
 
