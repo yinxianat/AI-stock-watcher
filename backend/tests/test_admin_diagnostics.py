@@ -781,3 +781,96 @@ def test_stock_articles_are_fully_visible_to_the_agent(db_session):
     assert item["input_tokens"] == 30000
     assert item["est_cost_usd"] is not None
     assert not EMAIL_RE.search(json.dumps(rep))
+
+
+# ---------------------------------------------------------------------------
+# /auth/me reports admin status, so the SPA can show or hide the link
+# ---------------------------------------------------------------------------
+
+
+def test_me_reports_admin_false_for_an_ordinary_user(client, signed_in, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    get_settings.cache_clear()
+    body = client.get("/auth/me", headers=signed_in["auth"]).json()
+    assert body["is_admin"] is False
+
+
+def test_me_reports_admin_true_via_admin_emails(client, admin_session):
+    body = client.get("/auth/me", headers=admin_session).json()
+    assert body["is_admin"] is True
+
+
+def test_me_reports_admin_true_via_a_role_row(client, signed_in, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    get_settings.cache_clear()
+    from app.db.database import get_session_factory
+    from app.models import AdminRole
+
+    db = get_session_factory()()
+    db.add(AdminRole(user_id=signed_in["user"]["id"], role="admin"))
+    db.commit()
+    db.close()
+    body = client.get("/auth/me", headers=signed_in["auth"]).json()
+    assert body["is_admin"] is True
+
+
+def test_me_never_leaks_admin_status_without_a_session(client):
+    assert client.get("/auth/me").status_code == 401
+
+
+def test_hiding_the_link_is_not_the_security_boundary(client, signed_in, monkeypatch):
+    """is_admin only drives the nav. A client that lies to itself about it
+    must still be refused by the endpoints."""
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    get_settings.cache_clear()
+    assert client.get("/auth/me", headers=signed_in["auth"]).json()["is_admin"] is False
+    assert client.get("/admin/watch", headers=signed_in["auth"]).status_code == 403
+
+
+def test_watch_payload_matches_what_the_admin_page_reads(client, admin_session):
+    """Contract test for src/pages/Admin.jsx.
+
+    The page destructures these paths directly. A rename on the backend
+    would render blank cards rather than raising, so it is pinned here.
+    """
+    b = client.get("/admin/watch", headers=admin_session).json()
+    assert isinstance(b["checked_at_et"], str)
+    for side in ("today", "yesterday"):
+        assert isinstance(b[side]["date"], str)
+        assert isinstance(b[side]["findings"], list)
+    assert isinstance(b["today"]["act_now"], list)
+    assert isinstance(b["today"]["not_due_yet"], list)
+    assert isinstance(b["today"]["jobs"], list)
+    assert isinstance(b["yesterday"]["delivery"]["recap_missed"], list)
+    assert "recap_unexplained" in b["yesterday"]["delivery"]
+    assert isinstance(b["yesterday"]["stories"]["by_status"], dict)
+    for k in ("input_tokens", "output_tokens", "est_cost_usd"):
+        assert k in b["yesterday"]["stories"], k
+    assert isinstance(b["storage"]["tables"], list)
+    assert "total_mb" in b["storage"] and "total_bytes_measured" in b["storage"]
+    assert "story_model" in b["config"]
+
+
+def test_job_slot_fields_the_page_renders_are_present(client, admin_session, db_session):
+    _job(db_session, "pipeline_0935", datetime(2026, 11, 2, 14, 35))
+    b = client.get("/admin/watch", headers=admin_session).json()
+    for slot in b["today"]["jobs"]:
+        for k in ("job_id", "expected_et", "status", "drift_minutes"):
+            assert k in slot, k
+
+
+def test_storage_row_fields_the_page_renders_are_present(client, admin_session):
+    b = client.get("/admin/watch", headers=admin_session).json()
+    for t in b["storage"]["tables"]:
+        for k in ("table", "rows", "rows_added_24h", "mb",
+                  "retention_days", "retention_enforced", "unbounded"):
+            assert k in t, k
+
+
+def test_missed_recap_row_fields_the_page_renders_are_present(client, admin_session, db_session):
+    _user(db_session, "nothing@example.com")
+    b = client.get("/admin/watch", headers=admin_session).json()
+    rows = b["yesterday"]["delivery"]["recap_missed"]
+    assert rows, "expected at least one missed row"
+    for k in ("user", "reason", "watch_count", "missed_days_running"):
+        assert k in rows[0], k
