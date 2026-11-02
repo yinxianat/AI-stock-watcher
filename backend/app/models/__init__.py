@@ -1,4 +1,5 @@
 from .models import (  # noqa: F401
+    AdminRole,
     ArticleFollowup,
     Base,
     ConfirmationToken,

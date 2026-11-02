@@ -44,44 +44,135 @@ def admin_on(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # Auth boundary
+#
+# Two kinds of caller, deliberately kept apart:
+#   * a human admin — session token + ADMIN_EMAILS or an admin_roles row;
+#     reaches everything, sees real addresses.
+#   * the monitoring agent — ADMIN_API_TOKEN; reaches only the paths in
+#     SERVICE_SAFE_PATHS, and sees pseudonyms.
 # ---------------------------------------------------------------------------
 
+HUMAN_ONLY_PATHS = ("/admin/diagnostics", "/admin/health-summary")
 
-def test_disabled_when_token_unset(client, monkeypatch):
-    """No token configured must mean "off", never "open"."""
+
+@pytest.fixture
+def admin_session(client, monkeypatch):
+    """A signed-in user who is an admin via ADMIN_EMAILS."""
+    client.post("/auth/request-link", json={"email": "owner@example.com"})
+    token = client.sent_emails[-1]["body_text"].split("token=")[1].split("\n")[0].strip()
+    data = client.post("/auth/verify", json={"token": token}).json()
+    monkeypatch.setenv("ADMIN_EMAILS", "owner@example.com")
+    get_settings.cache_clear()
+    return {"Authorization": f"Bearer {data['session_token']}"}
+
+
+def test_service_access_disabled_when_token_unset(client, monkeypatch):
+    """No service credential configured must mean "off", never "open"."""
     monkeypatch.setenv("ADMIN_API_TOKEN", "")
     get_settings.cache_clear()
-    for path in ("/admin/diagnostics", "/admin/findings", "/admin/health-summary"):
-        assert client.get(path).status_code == 503, path
+    r = client.get("/admin/watch", headers={"Authorization": "Bearer anything"})
+    assert r.status_code == 503
 
 
-def test_no_token_rejected(client, admin_on):
-    assert client.get("/admin/diagnostics").status_code == 401
+def test_no_auth_rejected(client, admin_on):
+    for path in ("/admin/watch", "/admin/diagnostics"):
+        assert client.get(path).status_code == 401, path
 
 
 def test_wrong_token_rejected(client, admin_on):
-    r = client.get("/admin/diagnostics", headers={"Authorization": "Bearer nope"})
+    r = client.get("/admin/watch", headers={"Authorization": "Bearer nope"})
     assert r.status_code == 403
 
 
 def test_non_bearer_scheme_rejected(client, admin_on):
-    r = client.get("/admin/diagnostics", headers={"Authorization": f"Basic {TOKEN}"})
+    r = client.get("/admin/watch", headers={"Authorization": f"Basic {TOKEN}"})
     assert r.status_code == 401
 
 
-def test_bare_token_without_scheme_rejected(client, admin_on):
-    r = client.get("/admin/diagnostics", headers={"Authorization": TOKEN})
-    assert r.status_code == 401
+def test_service_token_reaches_every_allow_listed_path(client, admin_on):
+    from app.api.admin_routes import SERVICE_SAFE_PATHS
+
+    for path in sorted(SERVICE_SAFE_PATHS):
+        assert client.get(path, headers=admin_on).status_code == 200, path
 
 
-def test_valid_token_accepted(client, admin_on):
-    assert client.get("/admin/diagnostics", headers=admin_on).status_code == 200
+def test_service_token_cannot_reach_human_only_paths(client, admin_on):
+    """The firehose endpoints carry unfiltered per-user data, so the agent's
+    credential must not open them even though it is a valid credential."""
+    for path in HUMAN_ONLY_PATHS:
+        r = client.get(path, headers=admin_on)
+        assert r.status_code in (401, 403), f"{path} → {r.status_code}"
 
 
-def test_user_session_does_not_grant_admin(client, signed_in, admin_on):
-    """A normal logged-in user must not reach cross-user diagnostics."""
-    r = client.get("/admin/diagnostics", headers=signed_in["auth"])
-    assert r.status_code in (401, 403)
+def test_admin_session_reaches_everything(client, admin_session):
+    from app.api.admin_routes import SERVICE_SAFE_PATHS
+
+    for path in sorted(set(SERVICE_SAFE_PATHS) | set(HUMAN_ONLY_PATHS)):
+        assert client.get(path, headers=admin_session).status_code == 200, path
+
+
+def test_signed_in_non_admin_is_refused(client, signed_in, admin_on, monkeypatch):
+    """An ordinary user with a valid session must not reach diagnostics."""
+    monkeypatch.setenv("ADMIN_EMAILS", "someone-else@example.com")
+    get_settings.cache_clear()
+    for path in ("/admin/watch", "/admin/diagnostics"):
+        assert client.get(path, headers=signed_in["auth"]).status_code == 403, path
+
+
+def test_admin_role_row_grants_access_without_a_deploy(client, signed_in, monkeypatch):
+    """The point of the table: granting a second operator is one INSERT."""
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    get_settings.cache_clear()
+    auth = signed_in["auth"]
+    assert client.get("/admin/watch", headers=auth).status_code == 403
+
+    from app.db.database import get_session_factory
+    from app.models import AdminRole
+    db = get_session_factory()()
+    db.add(AdminRole(user_id=signed_in["user"]["id"], role="admin"))
+    db.commit()
+    db.close()
+
+    assert client.get("/admin/watch", headers=auth).status_code == 200
+
+
+def test_admin_emails_works_without_any_db_row(client, admin_session):
+    """The bootstrap: losing DB access can't lock the owner out."""
+    from app.db.database import get_session_factory
+    from app.models import AdminRole
+    db = get_session_factory()()
+    assert db.query(AdminRole).count() == 0
+    db.close()
+    assert client.get("/admin/diagnostics", headers=admin_session).status_code == 200
+
+
+def test_admin_emails_matching_is_case_insensitive(client, monkeypatch):
+    client.post("/auth/request-link", json={"email": "mixed@example.com"})
+    token = client.sent_emails[-1]["body_text"].split("token=")[1].split("\n")[0].strip()
+    data = client.post("/auth/verify", json={"token": token}).json()
+    monkeypatch.setenv("ADMIN_EMAILS", "MIXED@Example.COM")
+    get_settings.cache_clear()
+    auth = {"Authorization": f"Bearer {data['session_token']}"}
+    assert client.get("/admin/watch", headers=auth).status_code == 200
+
+
+# --- the capability Caller buys: one endpoint, two views -------------------
+
+
+def test_same_endpoint_shows_emails_to_a_human_and_pseudonyms_to_the_agent(
+    client, admin_session, admin_on, db_session,
+):
+    """Scope follows identity rather than being hardcoded per route, so the
+    dashboard stays useful without the agent ever seeing an address."""
+    _seed_identifiable(db_session)
+
+    human = client.get("/admin/watch", headers=admin_session)
+    agent = client.get("/admin/watch", headers=admin_on)
+    assert human.status_code == 200 and agent.status_code == 200
+    assert not EMAIL_RE.search(agent.text), "agent saw an address"
+    # The human view is allowed to contain addresses; what matters is that
+    # the two differ, i.e. the scope really did follow the caller.
+    assert human.text != agent.text
 
 
 # ---------------------------------------------------------------------------
@@ -316,20 +407,21 @@ def test_clean_day_produces_no_findings():
 # ---------------------------------------------------------------------------
 
 
-def test_diagnostics_has_every_section(client, admin_on):
-    body = client.get("/admin/diagnostics", headers=admin_on).json()
+def test_diagnostics_has_every_section(client, admin_session):
+    body = client.get("/admin/diagnostics", headers=admin_session).json()
     for key in ("date", "config", "jobs", "prices", "stories", "delivery",
                 "followups", "errors", "findings"):
         assert key in body, key
 
 
-def test_diagnostics_accepts_a_date(client, admin_on):
-    body = client.get("/admin/diagnostics?date=2026-11-02", headers=admin_on).json()
+def test_diagnostics_accepts_a_date(client, admin_session):
+    body = client.get("/admin/diagnostics?date=2026-11-02", headers=admin_session).json()
     assert body["date"] == "2026-11-02"
 
 
-def test_diagnostics_rejects_a_bad_date(client, admin_on):
-    assert client.get("/admin/diagnostics?date=nope", headers=admin_on).status_code == 422
+def test_diagnostics_rejects_a_bad_date(client, admin_session):
+    assert client.get(
+        "/admin/diagnostics?date=nope", headers=admin_session).status_code == 422
 
 
 def test_findings_endpoint_is_ranked_and_counted(client, admin_on):

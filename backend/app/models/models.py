@@ -648,3 +648,24 @@ class LogEntry(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     exc_info: Mapped[str | None] = mapped_column(Text, nullable=True)
     context: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+
+
+class AdminRole(Base):
+    """Grants one user access to the /admin diagnostics and dashboard.
+
+    A row here is additive to `ADMIN_EMAILS`: the env var is the bootstrap
+    (it works even before that person has ever signed in, and means losing
+    DB access can't lock everyone out), while this table lets a second
+    operator be granted access with one INSERT and no deploy.
+
+    `user_id` is the primary key, so one role per user. The `role` column
+    exists so a read-only "viewer" can be added later without a migration.
+    """
+
+    __tablename__ = "admin_roles"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="admin")
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
