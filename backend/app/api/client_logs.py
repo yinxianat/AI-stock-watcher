@@ -17,6 +17,8 @@ from typing import Literal
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
+from app.core.security import redact_emails
+
 router = APIRouter(prefix="/client-logs", tags=["client-logs"])
 
 # Dedicated logger so a reader can tell these apart from server-side errors
@@ -29,6 +31,21 @@ log = logging.getLogger("app.client")
 _MAX_MSG = 500
 _MAX_STACK = 4000
 _MAX_URL = 500
+
+
+def _client_net(request: Request) -> str:
+    """The caller's /24 (or /48 for IPv6), never the full address.
+
+    A full IP is personal data and we only ever need it to tell "one broken
+    browser" from "everyone", which a network prefix answers just as well.
+    """
+    host = request.client.host if request.client else ""
+    if not host:
+        return "unknown"
+    if ":" in host:  # IPv6
+        return ":".join(host.split(":")[:3]) + "::/48"
+    parts = host.split(".")
+    return ".".join(parts[:3]) + ".0/24" if len(parts) == 4 else "unknown"
 
 
 class ClientLogEntry(BaseModel):
@@ -54,16 +71,23 @@ def ingest_client_log(entry: ClientLogEntry, request: Request) -> None:
     The default 60/min per-IP limit from `app.main.limiter` applies.
     """
     source = entry.source or "unknown"
-    ip = request.client.host if request.client else "unknown"
 
     # %s placeholders (not f-strings) so EmailAlertHandler's dedup groups
     # repeat occurrences by shape — same bug, one alert per 15 minutes.
     # Must be nested under "context": DBLogHandler reads `record.context`
     # and ignores any other attribute, so flat keys here are discarded.
-    extra = {"context": {"client_url": entry.url or "", "client_ip": ip, "source": source}}
-    message = f"[client:{source}] {entry.message}"
+    extra = {
+        "context": {
+            # Query string stripped: our own email links carry signed tokens
+            # in `?token=`, and this URL is persisted to log_entries.
+            "client_url": (entry.url or "").split("?")[0],
+            "client_net": _client_net(request),
+            "source": source,
+        }
+    }
+    message = f"[client:{source}] {redact_emails(entry.message)}"
     if entry.stack:
-        message = f"{message} | stack: {entry.stack[:_MAX_STACK]}"
+        message = f"{message} | stack: {redact_emails(entry.stack)[:_MAX_STACK]}"
 
     if entry.level == "warning":
         log.warning("%s", message, extra=extra)

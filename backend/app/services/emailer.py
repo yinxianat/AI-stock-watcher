@@ -11,6 +11,7 @@ import smtplib
 import socket
 from email.message import EmailMessage
 
+from app.core.security import mask_email, redact_emails
 from app.core.settings import get_settings
 
 log = logging.getLogger(__name__)
@@ -40,11 +41,20 @@ def send_email(
     if body_html:
         msg.add_alternative(body_html, subtype="html")
 
-    log.info("Sending email to=%s subject=%r via %s:%s", to, subject, settings.smtp_host, settings.smtp_port)
+    # Masked: this line runs on every send, so the raw address would make
+    # info_logs the largest store of user emails in the system.
+    log.info("Sending email to=%s subject=%r via %s:%s",
+             mask_email(to), redact_emails(subject), settings.smtp_host,
+             settings.smtp_port)
 
     if not settings.smtp_host or settings.smtp_host == "localhost" and not settings.smtp_username:
         # Dev fallback: no real server configured — just log and return.
-        log.warning("SMTP not configured; email NOT actually sent. Body:\n%s", body_text)
+        # The body carries signed magic-link / settings tokens, so it is
+        # only ever written out in development.
+        if settings.app_env == "development":
+            log.warning("SMTP not configured; email NOT sent. Body:\n%s", body_text)
+        else:
+            log.warning("SMTP not configured; email to %s NOT sent", mask_email(to))
         return
 
     try:
@@ -57,8 +67,8 @@ def send_email(
     except (smtplib.SMTPException, socket.error, OSError):
         log.exception(
             "Failed to send email to=%s subject=%r via %s:%s",
-            to,
-            subject,
+            mask_email(to),
+            redact_emails(subject),
             settings.smtp_host,
             settings.smtp_port,
         )

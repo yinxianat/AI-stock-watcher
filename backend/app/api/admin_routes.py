@@ -33,6 +33,24 @@ _ET = ZoneInfo("America/New_York")
 # for one request and keeps an agent from accidentally asking for a year.
 _MAX_DAYS = 31
 
+# Paths the monitoring agent may reach. An ALLOW-list, not a deny-list: a
+# new endpoint added later is invisible to the agent until it is named
+# here, so forgetting to exclude something can't leak it. Every path on
+# this list must be free of personal data at SCOPE_SERVICE — enforced by
+# test_no_service_path_leaks_personal_data.
+SERVICE_SAFE_PATHS: frozenset[str] = frozenset({
+    "/admin/watch",            # pseudonymised per-user delivery
+    "/admin/findings",         # ranked problems, no user rows
+    "/admin/storage",          # table growth, retention, log-noise ratio
+    "/admin/ml-corpus",        # training-data health, counts only
+    "/admin/reason-catalogue",  # static help text
+})
+
+# Deliberately NOT service-safe:
+#   /admin/diagnostics   — the unfiltered firehose; a new PII field would
+#                          surface here first.
+#   /admin/health-summary — carries the admin's own alert address.
+
 
 def require_admin(authorization: str | None = Header(default=None)) -> None:
     """Constant-time bearer check against ADMIN_API_TOKEN."""
@@ -118,8 +136,11 @@ def get_watch() -> dict:
     yesterday = today - timedelta(days=1)
     now_et = datetime.now(tz=_ET)
 
-    live = diagnostics.day_report(today)
-    prior = diagnostics.day_report(yesterday)
+    # Built at SCOPE_SERVICE: this endpoint is on SERVICE_SAFE_PATHS, so
+    # users appear as pseudonyms ("u7") rather than addresses. The dashboard
+    # uses /admin/diagnostics when it needs real identities.
+    live = diagnostics.day_report(today, scope=diagnostics.SCOPE_SERVICE)
+    prior = diagnostics.day_report(yesterday, scope=diagnostics.SCOPE_SERVICE)
 
     # A job that hasn't reached its slot yet isn't missing — it's pending.
     # Without this every morning check would scream about the 16:05 batch.
