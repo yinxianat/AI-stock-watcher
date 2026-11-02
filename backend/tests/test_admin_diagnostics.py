@@ -7,6 +7,8 @@ open them, and a wrong token must never get through.
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -14,6 +16,7 @@ from sqlalchemy import select
 
 from app.core.settings import get_settings
 from app.models import (
+    ArticleFollowup,
     DailyClose,
     JobRun,
     NotificationEventType,
@@ -547,3 +550,135 @@ def test_aligned_history_reports_no_loss(db_session):
 def test_ml_corpus_endpoint(client, admin_on):
     body = client.get("/admin/ml-corpus", headers=admin_on).json()
     assert {"labelled_stories", "feedback_total", "price_retention"} <= set(body)
+
+
+# ---------------------------------------------------------------------------
+# Agent data access: pseudonyms, and the PII regression guard
+# ---------------------------------------------------------------------------
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _seed_identifiable(db):
+    """A user with an email, a watchlist, an alert and a missed recap."""
+    u = _user(db, "identifiable@example.com")
+    t = _ticker(db)
+    db.add(WatchlistItem(user_id=u.id, ticker_id=t.id))
+    db.add(StockArticle(
+        ticker_id=t.id, trading_date=DAY, direction="down", status="ready",
+        move_pct=-2.0, price=100.0, prev_close=102.0, content='{"facts":[{}]}',
+    ))
+    db.add(NotificationLog(
+        user_id=u.id, ticker_id=t.id,
+        event_type=NotificationEventType.PRICE_CHANGE_RANGE,
+        sent_to=u.notify_email, summary="down 2%",
+        sent_at=datetime(2026, 11, 2, 18, 0),
+    ))
+    db.commit()
+    return u
+
+
+def test_admin_scope_shows_real_emails(db_session):
+    u = _seed_identifiable(db_session)
+    rep = diagnostics.delivery_report(DAY, db_session, scope=diagnostics.SCOPE_ADMIN)
+    assert any(r["user"] == u.email for r in rep["alerts"])
+
+
+def test_service_scope_replaces_emails_with_a_pseudonym(db_session):
+    u = _seed_identifiable(db_session)
+    rep = diagnostics.delivery_report(DAY, db_session, scope=diagnostics.SCOPE_SERVICE)
+    assert any(r["user"] == f"u{u.id}" for r in rep["alerts"])
+    assert not EMAIL_RE.search(json.dumps(rep)), "an address survived service scope"
+
+
+def test_pseudonym_is_stable_across_days(db_session):
+    """Stability is the point — it lets the agent correlate the same user
+    over time without ever knowing who they are."""
+    u = _seed_identifiable(db_session)
+    a = diagnostics.delivery_report(DAY, db_session, scope=diagnostics.SCOPE_SERVICE)
+    b = diagnostics.delivery_report(
+        DAY - timedelta(days=1), db_session, scope=diagnostics.SCOPE_SERVICE)
+    assert diagnostics.user_ref(u, diagnostics.SCOPE_SERVICE) == f"u{u.id}"
+    refs = {r["user"] for r in a["alerts"]} | {m["user"] for m in b["recap_missed"]}
+    assert f"u{u.id}" in refs
+
+
+def test_missed_recap_rows_carry_streak_and_watch_count(db_session):
+    u = _user(db_session, "quiet@example.com")
+    t = _ticker(db_session)
+    db_session.add(WatchlistItem(user_id=u.id, ticker_id=t.id))
+    db_session.add(RecapSend(user_id=u.id, trading_date=DAY - timedelta(days=3)))
+    db_session.commit()
+    rep = diagnostics.delivery_report(DAY, db_session, scope=diagnostics.SCOPE_SERVICE)
+    row = next(m for m in rep["recap_missed"] if m["user"] == f"u{u.id}")
+    assert row["watch_count"] == 1
+    assert row["missed_days_running"] == 3  # day, -1, -2 all empty
+
+
+def test_followups_honour_service_scope(db_session):
+    u = _user(db_session, "waiting@example.com")
+    t = _ticker(db_session)
+    a = StockArticle(
+        ticker_id=t.id, trading_date=DAY, direction="up", status="failed",
+        move_pct=2.0, price=100.0, prev_close=98.0,
+    )
+    db_session.add(a)
+    db_session.commit()
+    db_session.add(ArticleFollowup(
+        article_id=a.id, user_id=u.id, in_reply_to="<x@y>", subject="s",
+        status="abandoned",
+    ))
+    db_session.commit()
+    rep = diagnostics.followups_report(DAY, db_session, scope=diagnostics.SCOPE_SERVICE)
+    assert rep["items"][0]["user"] == f"u{u.id}"
+    assert not EMAIL_RE.search(json.dumps(rep))
+
+
+def test_no_service_path_leaks_personal_data(client, admin_on, db_session):
+    """The guard that has to survive future changes: every allow-listed path
+    is scanned for anything email-shaped. Adding a PII field to a response
+    turns this red rather than quietly shipping."""
+    from app.api.admin_routes import SERVICE_SAFE_PATHS
+
+    _seed_identifiable(db_session)
+    for path in sorted(SERVICE_SAFE_PATHS):
+        r = client.get(path, headers=admin_on)
+        assert r.status_code == 200, f"{path} → {r.status_code}"
+        found = EMAIL_RE.findall(r.text)
+        assert not found, f"{path} leaked {found[:3]}"
+
+
+def test_allow_list_excludes_the_unfiltered_endpoints():
+    """/admin/diagnostics and /admin/health-summary must stay human-only."""
+    from app.api.admin_routes import SERVICE_SAFE_PATHS
+
+    assert "/admin/diagnostics" not in SERVICE_SAFE_PATHS
+    assert "/admin/health-summary" not in SERVICE_SAFE_PATHS
+
+
+def test_every_allow_listed_path_is_a_real_route(client, admin_on):
+    """A typo in the allow-list would silently grant nothing (or worse,
+    be assumed to cover an endpoint it doesn't name)."""
+    from app.api.admin_routes import SERVICE_SAFE_PATHS
+    from app.main import create_app
+
+    routes = {getattr(r, "path", "") for r in create_app().routes}
+    assert SERVICE_SAFE_PATHS <= routes, SERVICE_SAFE_PATHS - routes
+
+
+def test_stock_articles_are_fully_visible_to_the_agent(db_session):
+    """Stories are the highest-value, lowest-risk table — the agent needs
+    content, status, error and token counts, and none of it is personal."""
+    t = _ticker(db_session)
+    db_session.add(StockArticle(
+        ticker_id=t.id, trading_date=DAY, direction="up", status="failed",
+        move_pct=4.0, price=100.0, prev_close=96.0, model="claude-haiku-5-5",
+        input_tokens=30000, output_tokens=6000, error="reviewer rejected",
+    ))
+    db_session.commit()
+    rep = diagnostics.stories_report(DAY, db_session)
+    item = rep["items"][0]
+    assert item["error"] == "reviewer rejected"
+    assert item["input_tokens"] == 30000
+    assert item["est_cost_usd"] is not None
+    assert not EMAIL_RE.search(json.dumps(rep))
