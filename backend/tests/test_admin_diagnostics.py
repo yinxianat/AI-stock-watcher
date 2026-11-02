@@ -30,15 +30,22 @@ from app.models import (
 )
 from app.services import diagnostics
 
-TOKEN = "test-admin-token-long-enough"
+SECRET = "test-admin-service-secret-long-enough-value"
 DAY = date(2026, 11, 2)  # a Monday
 
 
 @pytest.fixture
-def admin_on(monkeypatch):
-    monkeypatch.setenv("ADMIN_API_TOKEN", TOKEN)
+def admin_on(client, monkeypatch):
+    """Headers for the monitoring agent.
+
+    Goes through the real exchange: the secret is only good for
+    /admin/service-login, so what the agent actually carries is the
+    short-lived token it gets back.
+    """
+    monkeypatch.setenv("ADMIN_API_TOKEN", SECRET)
     get_settings.cache_clear()
-    yield {"Authorization": f"Bearer {TOKEN}"}
+    token = client.post("/admin/service-login", json={"secret": SECRET}).json()["token"]
+    yield {"Authorization": f"Bearer {token}"}
     get_settings.cache_clear()
 
 
@@ -85,7 +92,7 @@ def test_wrong_token_rejected(client, admin_on):
 
 
 def test_non_bearer_scheme_rejected(client, admin_on):
-    r = client.get("/admin/watch", headers={"Authorization": f"Basic {TOKEN}"})
+    r = client.get("/admin/watch", headers={"Authorization": f"Basic {SECRET}"})
     assert r.status_code == 401
 
 

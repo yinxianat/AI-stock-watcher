@@ -19,12 +19,17 @@ from datetime import date as date_
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
 
+from app.api.client_logs import _client_net
 from app.api.deps import Caller, admin_or_service, current_admin
+from app.core.ratelimit import RateLimit
 from app.core.settings import get_settings
 from app.models import User
-from app.services import diagnostics
+from app.db.database import get_session_factory
+from app.services import diagnostics, service_auth
+from app.services.alerts import AlertChannel, notify_admin
 
 log = logging.getLogger(__name__)
 
@@ -54,23 +59,54 @@ SERVICE_SAFE_PATHS: frozenset[str] = frozenset({
 #   /admin/health-summary — carries the admin's own alert address.
 
 
-def verify_service_token(token: str) -> None:
-    """Constant-time check of the agent's credential against ADMIN_API_TOKEN.
+class ServiceLoginRequest(BaseModel):
+    """The secret arrives in the BODY, never a query string.
 
-    Raises rather than returning a bool so a caller can't accidentally
-    ignore the result. An unset token disables service access entirely
-    (503) — a missing credential must never mean "open to everyone".
+    Query strings are written to proxy and access logs; bodies are not.
+    That is the most common way a service credential leaks.
     """
-    configured = get_settings().admin_api_token.strip()
-    if not configured:
+
+    secret: str = Field(min_length=1, max_length=512)
+
+
+def _require_https(request: Request) -> None:
+    """Refuse to accept the secret over cleartext.
+
+    Railway terminates TLS, so the scheme we see is http and the real one
+    is in X-Forwarded-Proto. Only enforced in production, so local dev and
+    tests work over plain http.
+    """
+    if get_settings().app_env != "production":
+        return
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    if proto.split(",")[0].strip().lower() != "https":
+        log.error("Service login attempted over %s, refused", proto)
         raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "Service access is disabled (ADMIN_API_TOKEN is not set)",
+            status.HTTP_400_BAD_REQUEST, "Service login requires HTTPS",
         )
-    if not secrets.compare_digest(token, configured):
+
+
+def verify_service_token(token: str) -> None:
+    """Validate a short-lived service token issued by /admin/service-login.
+
+    Note this no longer accepts ADMIN_API_TOKEN itself — that secret is only
+    good for the login exchange. Keeping the static path working would have
+    defeated the point, since anything holding the secret could just use it
+    directly and never get the short expiry.
+    """
+    from app.db.database import get_session_factory
+
+    db = get_session_factory()()
+    try:
+        service_auth.resolve(db, token)
+    except service_auth.ServiceAuthUnavailable as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e)) from None
+    except service_auth.ServiceAuthRejected:
         # Logged so repeated probing is visible in log_entries.
-        log.warning("Admin endpoint rejected a bad service token")
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid credentials")
+        log.warning("Admin endpoint rejected an invalid service token")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid credentials") from None
+    finally:
+        db.close()
 
 
 def _eastern_today() -> date_:
@@ -86,6 +122,47 @@ def _parse_day(value: str | None) -> date_:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "date must be YYYY-MM-DD"
         ) from None
+
+
+@router.post(
+    "/service-login",
+    dependencies=[Depends(RateLimit("10/hour", "service_login"))],
+)
+def service_login(payload: ServiceLoginRequest, request: Request) -> dict:
+    """Exchange the agent's secret for a short-lived token.
+
+    Rate limited hard: this is the only brute-forcible surface the service
+    credential has. Failures log at WARNING, so repeated attempts reach the
+    admin's alert email through the normal pipeline.
+    """
+    _require_https(request)
+    client_net = _client_net(request)
+    db = get_session_factory()()
+    try:
+        token, ttl, net_is_new = service_auth.login(db, payload.secret, client_net)
+    except service_auth.ServiceAuthUnavailable as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e)) from None
+    except service_auth.ServiceAuthRejected:
+        log.warning("Service login failed from %s", client_net)
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid credentials") from None
+    finally:
+        db.close()
+
+    if net_is_new:
+        # Only a network we have never seen is worth an email. Telling the
+        # admin about every routine run would be ~90 messages a month, which
+        # gets filtered and then the signal is gone. This is the thing that
+        # actually indicates a stolen secret being used somewhere else.
+        notify_admin(
+            "service_login_new_network",
+            "Monitoring agent signed in from a new network",
+            f"A service token was issued to {client_net}, which has not been "
+            f"seen before.\n\nIf that wasn't your agent, rotate "
+            f"ADMIN_API_TOKEN now; existing tokens can be invalidated with "
+            f"service_auth.revoke_all().\n",
+            channel=AlertChannel.ERROR,
+        )
+    return {"token": token, "token_type": "bearer", "expires_in": ttl}
 
 
 @router.get("/diagnostics")

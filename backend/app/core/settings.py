@@ -88,11 +88,16 @@ class Settings(BaseSettings):
     # are granted a row in `admin_roles` instead, which needs no deploy.
     admin_emails: str = ""
 
-    # Bearer token for the /admin/* diagnostics endpoints, used by the
-    # monitoring dashboard and the scheduled review agent. Blank disables
-    # those endpoints entirely (they 503), so a missing token can never
-    # mean "open to everyone".
+    # The monitoring agent's secret. It is NOT sent on every request: the
+    # agent POSTs it once per run to /admin/service-login and gets a
+    # short-lived token back, so a captured header expires in minutes
+    # instead of being valid until someone rotates this. Blank disables
+    # service access entirely (503), so a missing secret can never mean
+    # "open to everyone". Must be at least 32 characters.
     admin_api_token: str = ""
+    # How long an issued service token lasts. Short on purpose — the agent
+    # only needs it for the length of one run.
+    service_token_ttl_minutes: int = 15
 
     # Logging & alerting
     alert_receiver: str = ""  # blank → falls back to smtp_username

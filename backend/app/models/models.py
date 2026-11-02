@@ -669,3 +669,28 @@ class AdminRole(Base):
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="admin")
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+
+
+class ServiceSession(Base):
+    """A short-lived token issued to the monitoring agent.
+
+    The agent exchanges `ADMIN_API_TOKEN` for one of these once per run, so
+    the long-lived secret crosses the wire rarely instead of on every
+    request — anything that captures a header (a proxy log, an error
+    tracker) then holds a credential that dies in minutes rather than one
+    valid until rotated.
+
+    Only the SHA-256 digest is stored, matching `sessions` and
+    `login_tokens`: a DB dump can't be replayed. `client_net` keeps a /24
+    rather than a full IP, which is enough to notice a login from somewhere
+    new without storing personal data.
+    """
+
+    __tablename__ = "service_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    client_net: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
