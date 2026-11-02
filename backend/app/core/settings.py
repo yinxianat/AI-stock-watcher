@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     # users get blocked — a household behind one NAT shares this budget.
     rate_limit_signin: str = "5/hour"
 
+    # Comma-separated emails that always have admin access. This is the
+    # bootstrap: it works before that person has ever signed in, and it means
+    # losing DB access can't lock everyone out of /admin. Additional admins
+    # are granted a row in `admin_roles` instead, which needs no deploy.
+    admin_emails: str = ""
+
     # Bearer token for the /admin/* diagnostics endpoints, used by the
     # monitoring dashboard and the scheduled review agent. Blank disables
     # those endpoints entirely (they 503), so a missing token can never
@@ -208,6 +214,11 @@ class Settings(BaseSettings):
     def recap_time(self) -> tuple[int, int]:
         h, m = self.recap_time_et.split(":")
         return int(h), int(m)
+
+    @property
+    def admin_email_list(self) -> list[str]:
+        """Lower-cased, so matching a login email is case-insensitive."""
+        return [e.strip().lower() for e in self.admin_emails.split(",") if e.strip()]
 
     @property
     def cors_origin_list(self) -> list[str]:

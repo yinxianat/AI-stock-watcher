@@ -19,9 +19,11 @@ from datetime import date as date_
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.api.deps import Caller, admin_or_service, current_admin
 from app.core.settings import get_settings
+from app.models import User
 from app.services import diagnostics
 
 log = logging.getLogger(__name__)
@@ -52,21 +54,23 @@ SERVICE_SAFE_PATHS: frozenset[str] = frozenset({
 #   /admin/health-summary — carries the admin's own alert address.
 
 
-def require_admin(authorization: str | None = Header(default=None)) -> None:
-    """Constant-time bearer check against ADMIN_API_TOKEN."""
+def verify_service_token(token: str) -> None:
+    """Constant-time check of the agent's credential against ADMIN_API_TOKEN.
+
+    Raises rather than returning a bool so a caller can't accidentally
+    ignore the result. An unset token disables service access entirely
+    (503) — a missing credential must never mean "open to everyone".
+    """
     configured = get_settings().admin_api_token.strip()
     if not configured:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            "Admin endpoints are disabled (ADMIN_API_TOKEN is not set)",
+            "Service access is disabled (ADMIN_API_TOKEN is not set)",
         )
-    scheme, _, token = (authorization or "").partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Bearer token required")
-    if not secrets.compare_digest(token.strip(), configured):
+    if not secrets.compare_digest(token, configured):
         # Logged so repeated probing is visible in log_entries.
-        log.warning("Admin endpoint rejected a bad token")
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid admin token")
+        log.warning("Admin endpoint rejected a bad service token")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid credentials")
 
 
 def _eastern_today() -> date_:
@@ -84,8 +88,11 @@ def _parse_day(value: str | None) -> date_:
         ) from None
 
 
-@router.get("/diagnostics", dependencies=[Depends(require_admin)])
-def get_diagnostics(date: str | None = Query(default=None)) -> dict:
+@router.get("/diagnostics")
+def get_diagnostics(
+    date: str | None = Query(default=None),
+    admin: User = Depends(current_admin),
+) -> dict:
     """Full report for one Eastern trading day (default: today).
 
     `findings` holds the deterministic problems found, worst first — the
@@ -94,8 +101,11 @@ def get_diagnostics(date: str | None = Query(default=None)) -> dict:
     return diagnostics.day_report(_parse_day(date))
 
 
-@router.get("/findings", dependencies=[Depends(require_admin)])
-def get_findings(days: int = Query(default=1, ge=1, le=_MAX_DAYS)) -> dict:
+@router.get("/findings")
+def get_findings(
+    days: int = Query(default=1, ge=1, le=_MAX_DAYS),
+    caller: Caller = Depends(admin_or_service),
+) -> dict:
     """Just the problems, across the last `days` Eastern days.
 
     This is what the scheduled agent polls: small payload, already ranked,
@@ -106,7 +116,9 @@ def get_findings(days: int = Query(default=1, ge=1, le=_MAX_DAYS)) -> dict:
     out = []
     for i in range(days):
         day = today - timedelta(days=i)
-        report = diagnostics.day_report(day)
+        # Scope matters here too: some findings name a user (an unconfirmed
+        # notification email, say), so at service scope they must read "u7".
+        report = diagnostics.day_report(day, scope=caller.scope)
         for f in report["findings"]:
             out.append({"date": day.isoformat(), **f})
     order = {"high": 0, "medium": 1, "low": 2}
@@ -120,8 +132,8 @@ def get_findings(days: int = Query(default=1, ge=1, le=_MAX_DAYS)) -> dict:
     }
 
 
-@router.get("/watch", dependencies=[Depends(require_admin)])
-def get_watch() -> dict:
+@router.get("/watch")
+def get_watch(caller: Caller = Depends(admin_or_service)) -> dict:
     """Today and yesterday in one call, split by urgency.
 
     This is the agent's main entry point. The split matters: a `high`
@@ -136,11 +148,10 @@ def get_watch() -> dict:
     yesterday = today - timedelta(days=1)
     now_et = datetime.now(tz=_ET)
 
-    # Built at SCOPE_SERVICE: this endpoint is on SERVICE_SAFE_PATHS, so
-    # users appear as pseudonyms ("u7") rather than addresses. The dashboard
-    # uses /admin/diagnostics when it needs real identities.
-    live = diagnostics.day_report(today, scope=diagnostics.SCOPE_SERVICE)
-    prior = diagnostics.day_report(yesterday, scope=diagnostics.SCOPE_SERVICE)
+    # Scope follows the caller: the dashboard (a human admin) gets real
+    # addresses, the agent gets pseudonyms. Same endpoint, same code path.
+    live = diagnostics.day_report(today, scope=caller.scope)
+    prior = diagnostics.day_report(yesterday, scope=caller.scope)
 
     # A job that hasn't reached its slot yet isn't missing — it's pending.
     # Without this every morning check would scream about the 16:05 batch.
@@ -182,8 +193,8 @@ def get_watch() -> dict:
     }
 
 
-@router.get("/storage", dependencies=[Depends(require_admin)])
-def get_storage() -> dict:
+@router.get("/storage")
+def get_storage(caller: Caller = Depends(admin_or_service)) -> dict:
     """Table growth, retention enforcement and log-noise ratio.
 
     Separate from the day report because it's about trend and cost rather
@@ -192,16 +203,16 @@ def get_storage() -> dict:
     return diagnostics.storage_report()
 
 
-@router.get("/ml-corpus", dependencies=[Depends(require_admin)])
-def get_ml_corpus() -> dict:
+@router.get("/ml-corpus")
+def get_ml_corpus(caller: Caller = Depends(admin_or_service)) -> dict:
     """Training-data health for the planned story model: how many labelled
     stories exist, how far back they stay usable, and how much human
     feedback has accumulated."""
     return diagnostics.ml_corpus_report()
 
 
-@router.get("/health-summary", dependencies=[Depends(require_admin)])
-def get_health_summary() -> dict:
+@router.get("/health-summary")
+def get_health_summary(admin: User = Depends(current_admin)) -> dict:
     """The same rolling-24h digest the nightly email sends, as JSON."""
     from app.jobs.daily_summary import collect_summary, health
 
@@ -209,8 +220,8 @@ def get_health_summary() -> dict:
     return {"health": health(data), "summary": data}
 
 
-@router.get("/reason-catalogue", dependencies=[Depends(require_admin)])
-def get_reason_catalogue() -> dict:
+@router.get("/reason-catalogue")
+def get_reason_catalogue(caller: Caller = Depends(admin_or_service)) -> dict:
     """What each delivery reason means and what to do about it.
 
     Served rather than duplicated in the frontend and the agent prompt, so
