@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     # CORS — comma-separated list of origins
     cors_origins: str = "http://localhost:5173"
 
+    # Per-IP rate limiting. Off in tests, which fire far more than the
+    # default ceiling from a single address. Also an off switch for
+    # production that needs no deploy.
+    rate_limit_enabled: bool = True
+    # Sign-in links: the per-address throttle in `send_limits` is bypassed by
+    # rotating target addresses, so this per-IP cap is what actually protects
+    # the SMTP quota and stops the app mailing strangers. Loosen only if real
+    # users get blocked — a household behind one NAT shares this budget.
+    rate_limit_signin: str = "5/hour"
+
     # Bearer token for the /admin/* diagnostics endpoints, used by the
     # monitoring dashboard and the scheduled review agent. Blank disables
     # those endpoints entirely (they 503), so a missing token can never
