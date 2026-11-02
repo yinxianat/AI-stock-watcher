@@ -20,6 +20,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.api import (
+    admin_routes,
     auth_routes,
     client_logs,
     feedback_routes,
@@ -203,6 +204,7 @@ def create_app() -> FastAPI:
     app.include_router(money_ideas_routes.router)
     app.include_router(feedback_routes.router)
     app.include_router(client_logs.router)
+    app.include_router(admin_routes.router)
     return app
 
 
