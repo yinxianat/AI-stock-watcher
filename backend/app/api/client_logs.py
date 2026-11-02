@@ -58,7 +58,9 @@ def ingest_client_log(entry: ClientLogEntry, request: Request) -> None:
 
     # %s placeholders (not f-strings) so EmailAlertHandler's dedup groups
     # repeat occurrences by shape — same bug, one alert per 15 minutes.
-    extra = {"client_url": entry.url or "", "client_ip": ip}
+    # Must be nested under "context": DBLogHandler reads `record.context`
+    # and ignores any other attribute, so flat keys here are discarded.
+    extra = {"context": {"client_url": entry.url or "", "client_ip": ip, "source": source}}
     message = f"[client:{source}] {entry.message}"
     if entry.stack:
         message = f"{message} | stack: {entry.stack[:_MAX_STACK]}"

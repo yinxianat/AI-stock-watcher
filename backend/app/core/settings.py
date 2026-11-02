@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     # CORS — comma-separated list of origins
     cors_origins: str = "http://localhost:5173"
 
+    # Bearer token for the /admin/* diagnostics endpoints, used by the
+    # monitoring dashboard and the scheduled review agent. Blank disables
+    # those endpoints entirely (they 503), so a missing token can never
+    # mean "open to everyone".
+    admin_api_token: str = ""
+
     # Logging & alerting
     alert_receiver: str = ""  # blank → falls back to smtp_username
     alerts_enabled: bool = True
@@ -82,7 +88,14 @@ class Settings(BaseSettings):
 
     # Price-history retention — how long to keep DailyClose rows. Pruned daily
     # by `app.jobs.cleanup`. Same units as LOG_LIFETIME (see parse_lifetime).
-    price_history_lifetime: str = "365d"
+    #
+    # Deliberately long: these rows are the FEATURES for the planned
+    # story-generation model, and `stock_articles` (the labels) is never
+    # pruned. Shortening this below the age of the oldest story silently
+    # destroys training examples — you keep the story but lose what the
+    # price actually did. `diagnostics` flags that case as ml_data_loss.
+    # Rows are ~90 bytes, so a decade of 50 tickers is a few MB.
+    price_history_lifetime: str = "3650d"
 
     # ---- Intraday capture ----------------------------------------------------
     # Every INTRADAY_TICK_MINUTES, during US-market hours, we capture the
