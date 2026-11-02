@@ -114,6 +114,15 @@ export const api = {
   listMoneyIdeasByToken: (token, opts) =>
     request(`/money-ideas?token=${encodeURIComponent(token)}`, opts),
 
+  // admin monitoring (session auth; every endpoint re-checks the role
+  // server-side, so these 403 for a non-admin)
+  adminWatch: (opts) => request('/admin/watch', { auth: true, ...opts }),
+  adminDiagnostics: (date, opts) =>
+    request(`/admin/diagnostics${date ? `?date=${encodeURIComponent(date)}` : ''}`,
+            { auth: true, ...opts }),
+  adminStorage: (opts) => request('/admin/storage', { auth: true, ...opts }),
+  adminMlCorpus: (opts) => request('/admin/ml-corpus', { auth: true, ...opts }),
+
   // feedback
   rateFeedback: (token) => request('/feedback/rate', { method: 'POST', body: { token } }),
   updateFeedback: (content_type, content_id, rating) =>

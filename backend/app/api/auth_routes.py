@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session as DBSession
 
-from app.api.deps import current_user, current_user_or_settings_token
+from app.api.deps import current_user, current_user_or_settings_token, is_admin
 from app.db.database import get_db
 from app.models import User
 from app.schemas.schemas import (
@@ -114,8 +114,12 @@ def logout(
 
 
 @router.get("/me", response_model=UserOut)
-def me(user: User = Depends(current_user)) -> UserOut:
-    return UserOut.model_validate(user)
+def me(
+    user: User = Depends(current_user),
+    db: DBSession = Depends(get_db),
+) -> UserOut:
+    out = UserOut.model_validate(user)
+    return out.model_copy(update={"is_admin": is_admin(db, user)})
 
 
 @router.post("/notify-email", status_code=204, response_class=Response)
