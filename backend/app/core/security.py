@@ -8,6 +8,7 @@ as an email-confirmation token (and vice-versa).
 from __future__ import annotations
 
 import hmac
+import re
 from hashlib import sha256
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
@@ -54,3 +55,37 @@ def hash_session_token(token: str) -> str:
 def constant_time_eq(a: str, b: str) -> bool:
     """Timing-safe string comparison."""
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+def mask_email(address: str | None) -> str:
+    """An address safe to write to a log: `alice@gmail.com` → `a***@gmail.com`.
+
+    Logs are read by the admin, stored in `info_logs` / `log_entries`, mailed
+    out in alerts and (for a few endpoints) served to the monitoring agent.
+    None of those need the real address, so it never goes in. Enough of the
+    address survives to tell two users apart while debugging.
+    """
+    if not address:
+        return "(none)"
+    address = address.strip()
+    local, sep, domain = address.partition("@")
+    if not sep or not local:
+        return "***"  # not an address shape; reveal nothing
+    return f"{local[0]}***@{domain}" if domain else "***"
+
+
+_EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def redact_emails(text: str | None) -> str:
+    """Mask every address inside free text before it is logged.
+
+    Masking only the recipient isn't enough: an alert subject like
+    "New user signed up: alice@gmail.com" would still write the address to
+    `info_logs`. Admin *emails* keep the real address — the admin needs it —
+    but the log copy never does. Pattern-based, so a subject added later is
+    covered without anyone remembering to mask it.
+    """
+    if not text:
+        return ""
+    return _EMAIL_IN_TEXT.sub(lambda m: mask_email(m.group(0)), text)

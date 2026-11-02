@@ -7,6 +7,8 @@ open them, and a wrong token must never get through.
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -14,6 +16,7 @@ from sqlalchemy import select
 
 from app.core.settings import get_settings
 from app.models import (
+    ArticleFollowup,
     DailyClose,
     JobRun,
     NotificationEventType,
@@ -27,58 +30,156 @@ from app.models import (
 )
 from app.services import diagnostics
 
-TOKEN = "test-admin-token-long-enough"
+SECRET = "test-admin-service-secret-long-enough-value"
 DAY = date(2026, 11, 2)  # a Monday
 
 
 @pytest.fixture
-def admin_on(monkeypatch):
-    monkeypatch.setenv("ADMIN_API_TOKEN", TOKEN)
+def admin_on(client, monkeypatch):
+    """Headers for the monitoring agent.
+
+    Goes through the real exchange: the secret is only good for
+    /admin/service-login, so what the agent actually carries is the
+    short-lived token it gets back.
+    """
+    monkeypatch.setenv("ADMIN_API_TOKEN", SECRET)
     get_settings.cache_clear()
-    yield {"Authorization": f"Bearer {TOKEN}"}
+    token = client.post("/admin/service-login", json={"secret": SECRET}).json()["token"]
+    yield {"Authorization": f"Bearer {token}"}
     get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
 # Auth boundary
+#
+# Two kinds of caller, deliberately kept apart:
+#   * a human admin — session token + ADMIN_EMAILS or an admin_roles row;
+#     reaches everything, sees real addresses.
+#   * the monitoring agent — ADMIN_API_TOKEN; reaches only the paths in
+#     SERVICE_SAFE_PATHS, and sees pseudonyms.
 # ---------------------------------------------------------------------------
 
+HUMAN_ONLY_PATHS = ("/admin/diagnostics", "/admin/health-summary")
 
-def test_disabled_when_token_unset(client, monkeypatch):
-    """No token configured must mean "off", never "open"."""
+
+@pytest.fixture
+def admin_session(client, monkeypatch):
+    """A signed-in user who is an admin via ADMIN_EMAILS."""
+    client.post("/auth/request-link", json={"email": "owner@example.com"})
+    token = client.sent_emails[-1]["body_text"].split("token=")[1].split("\n")[0].strip()
+    data = client.post("/auth/verify", json={"token": token}).json()
+    monkeypatch.setenv("ADMIN_EMAILS", "owner@example.com")
+    get_settings.cache_clear()
+    return {"Authorization": f"Bearer {data['session_token']}"}
+
+
+def test_service_access_disabled_when_token_unset(client, monkeypatch):
+    """No service credential configured must mean "off", never "open"."""
     monkeypatch.setenv("ADMIN_API_TOKEN", "")
     get_settings.cache_clear()
-    for path in ("/admin/diagnostics", "/admin/findings", "/admin/health-summary"):
-        assert client.get(path).status_code == 503, path
+    r = client.get("/admin/watch", headers={"Authorization": "Bearer anything"})
+    assert r.status_code == 503
 
 
-def test_no_token_rejected(client, admin_on):
-    assert client.get("/admin/diagnostics").status_code == 401
+def test_no_auth_rejected(client, admin_on):
+    for path in ("/admin/watch", "/admin/diagnostics"):
+        assert client.get(path).status_code == 401, path
 
 
 def test_wrong_token_rejected(client, admin_on):
-    r = client.get("/admin/diagnostics", headers={"Authorization": "Bearer nope"})
+    r = client.get("/admin/watch", headers={"Authorization": "Bearer nope"})
     assert r.status_code == 403
 
 
 def test_non_bearer_scheme_rejected(client, admin_on):
-    r = client.get("/admin/diagnostics", headers={"Authorization": f"Basic {TOKEN}"})
+    r = client.get("/admin/watch", headers={"Authorization": f"Basic {SECRET}"})
     assert r.status_code == 401
 
 
-def test_bare_token_without_scheme_rejected(client, admin_on):
-    r = client.get("/admin/diagnostics", headers={"Authorization": TOKEN})
-    assert r.status_code == 401
+def test_service_token_reaches_every_allow_listed_path(client, admin_on):
+    from app.api.admin_routes import SERVICE_SAFE_PATHS
+
+    for path in sorted(SERVICE_SAFE_PATHS):
+        assert client.get(path, headers=admin_on).status_code == 200, path
 
 
-def test_valid_token_accepted(client, admin_on):
-    assert client.get("/admin/diagnostics", headers=admin_on).status_code == 200
+def test_service_token_cannot_reach_human_only_paths(client, admin_on):
+    """The firehose endpoints carry unfiltered per-user data, so the agent's
+    credential must not open them even though it is a valid credential."""
+    for path in HUMAN_ONLY_PATHS:
+        r = client.get(path, headers=admin_on)
+        assert r.status_code in (401, 403), f"{path} → {r.status_code}"
 
 
-def test_user_session_does_not_grant_admin(client, signed_in, admin_on):
-    """A normal logged-in user must not reach cross-user diagnostics."""
-    r = client.get("/admin/diagnostics", headers=signed_in["auth"])
-    assert r.status_code in (401, 403)
+def test_admin_session_reaches_everything(client, admin_session):
+    from app.api.admin_routes import SERVICE_SAFE_PATHS
+
+    for path in sorted(set(SERVICE_SAFE_PATHS) | set(HUMAN_ONLY_PATHS)):
+        assert client.get(path, headers=admin_session).status_code == 200, path
+
+
+def test_signed_in_non_admin_is_refused(client, signed_in, admin_on, monkeypatch):
+    """An ordinary user with a valid session must not reach diagnostics."""
+    monkeypatch.setenv("ADMIN_EMAILS", "someone-else@example.com")
+    get_settings.cache_clear()
+    for path in ("/admin/watch", "/admin/diagnostics"):
+        assert client.get(path, headers=signed_in["auth"]).status_code == 403, path
+
+
+def test_admin_role_row_grants_access_without_a_deploy(client, signed_in, monkeypatch):
+    """The point of the table: granting a second operator is one INSERT."""
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    get_settings.cache_clear()
+    auth = signed_in["auth"]
+    assert client.get("/admin/watch", headers=auth).status_code == 403
+
+    from app.db.database import get_session_factory
+    from app.models import AdminRole
+    db = get_session_factory()()
+    db.add(AdminRole(user_id=signed_in["user"]["id"], role="admin"))
+    db.commit()
+    db.close()
+
+    assert client.get("/admin/watch", headers=auth).status_code == 200
+
+
+def test_admin_emails_works_without_any_db_row(client, admin_session):
+    """The bootstrap: losing DB access can't lock the owner out."""
+    from app.db.database import get_session_factory
+    from app.models import AdminRole
+    db = get_session_factory()()
+    assert db.query(AdminRole).count() == 0
+    db.close()
+    assert client.get("/admin/diagnostics", headers=admin_session).status_code == 200
+
+
+def test_admin_emails_matching_is_case_insensitive(client, monkeypatch):
+    client.post("/auth/request-link", json={"email": "mixed@example.com"})
+    token = client.sent_emails[-1]["body_text"].split("token=")[1].split("\n")[0].strip()
+    data = client.post("/auth/verify", json={"token": token}).json()
+    monkeypatch.setenv("ADMIN_EMAILS", "MIXED@Example.COM")
+    get_settings.cache_clear()
+    auth = {"Authorization": f"Bearer {data['session_token']}"}
+    assert client.get("/admin/watch", headers=auth).status_code == 200
+
+
+# --- the capability Caller buys: one endpoint, two views -------------------
+
+
+def test_same_endpoint_shows_emails_to_a_human_and_pseudonyms_to_the_agent(
+    client, admin_session, admin_on, db_session,
+):
+    """Scope follows identity rather than being hardcoded per route, so the
+    dashboard stays useful without the agent ever seeing an address."""
+    _seed_identifiable(db_session)
+
+    human = client.get("/admin/watch", headers=admin_session)
+    agent = client.get("/admin/watch", headers=admin_on)
+    assert human.status_code == 200 and agent.status_code == 200
+    assert not EMAIL_RE.search(agent.text), "agent saw an address"
+    # The human view is allowed to contain addresses; what matters is that
+    # the two differ, i.e. the scope really did follow the caller.
+    assert human.text != agent.text
 
 
 # ---------------------------------------------------------------------------
@@ -313,20 +414,21 @@ def test_clean_day_produces_no_findings():
 # ---------------------------------------------------------------------------
 
 
-def test_diagnostics_has_every_section(client, admin_on):
-    body = client.get("/admin/diagnostics", headers=admin_on).json()
+def test_diagnostics_has_every_section(client, admin_session):
+    body = client.get("/admin/diagnostics", headers=admin_session).json()
     for key in ("date", "config", "jobs", "prices", "stories", "delivery",
                 "followups", "errors", "findings"):
         assert key in body, key
 
 
-def test_diagnostics_accepts_a_date(client, admin_on):
-    body = client.get("/admin/diagnostics?date=2026-11-02", headers=admin_on).json()
+def test_diagnostics_accepts_a_date(client, admin_session):
+    body = client.get("/admin/diagnostics?date=2026-11-02", headers=admin_session).json()
     assert body["date"] == "2026-11-02"
 
 
-def test_diagnostics_rejects_a_bad_date(client, admin_on):
-    assert client.get("/admin/diagnostics?date=nope", headers=admin_on).status_code == 422
+def test_diagnostics_rejects_a_bad_date(client, admin_session):
+    assert client.get(
+        "/admin/diagnostics?date=nope", headers=admin_session).status_code == 422
 
 
 def test_findings_endpoint_is_ranked_and_counted(client, admin_on):
@@ -547,3 +649,228 @@ def test_aligned_history_reports_no_loss(db_session):
 def test_ml_corpus_endpoint(client, admin_on):
     body = client.get("/admin/ml-corpus", headers=admin_on).json()
     assert {"labelled_stories", "feedback_total", "price_retention"} <= set(body)
+
+
+# ---------------------------------------------------------------------------
+# Agent data access: pseudonyms, and the PII regression guard
+# ---------------------------------------------------------------------------
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _seed_identifiable(db):
+    """A user with an email, a watchlist, an alert and a missed recap."""
+    u = _user(db, "identifiable@example.com")
+    t = _ticker(db)
+    db.add(WatchlistItem(user_id=u.id, ticker_id=t.id))
+    db.add(StockArticle(
+        ticker_id=t.id, trading_date=DAY, direction="down", status="ready",
+        move_pct=-2.0, price=100.0, prev_close=102.0, content='{"facts":[{}]}',
+    ))
+    db.add(NotificationLog(
+        user_id=u.id, ticker_id=t.id,
+        event_type=NotificationEventType.PRICE_CHANGE_RANGE,
+        sent_to=u.notify_email, summary="down 2%",
+        sent_at=datetime(2026, 11, 2, 18, 0),
+    ))
+    db.commit()
+    return u
+
+
+def test_admin_scope_shows_real_emails(db_session):
+    u = _seed_identifiable(db_session)
+    rep = diagnostics.delivery_report(DAY, db_session, scope=diagnostics.SCOPE_ADMIN)
+    assert any(r["user"] == u.email for r in rep["alerts"])
+
+
+def test_service_scope_replaces_emails_with_a_pseudonym(db_session):
+    u = _seed_identifiable(db_session)
+    rep = diagnostics.delivery_report(DAY, db_session, scope=diagnostics.SCOPE_SERVICE)
+    assert any(r["user"] == f"u{u.id}" for r in rep["alerts"])
+    assert not EMAIL_RE.search(json.dumps(rep)), "an address survived service scope"
+
+
+def test_pseudonym_is_stable_across_days(db_session):
+    """Stability is the point — it lets the agent correlate the same user
+    over time without ever knowing who they are."""
+    u = _seed_identifiable(db_session)
+    a = diagnostics.delivery_report(DAY, db_session, scope=diagnostics.SCOPE_SERVICE)
+    b = diagnostics.delivery_report(
+        DAY - timedelta(days=1), db_session, scope=diagnostics.SCOPE_SERVICE)
+    assert diagnostics.user_ref(u, diagnostics.SCOPE_SERVICE) == f"u{u.id}"
+    refs = {r["user"] for r in a["alerts"]} | {m["user"] for m in b["recap_missed"]}
+    assert f"u{u.id}" in refs
+
+
+def test_missed_recap_rows_carry_streak_and_watch_count(db_session):
+    u = _user(db_session, "quiet@example.com")
+    t = _ticker(db_session)
+    db_session.add(WatchlistItem(user_id=u.id, ticker_id=t.id))
+    db_session.add(RecapSend(user_id=u.id, trading_date=DAY - timedelta(days=3)))
+    db_session.commit()
+    rep = diagnostics.delivery_report(DAY, db_session, scope=diagnostics.SCOPE_SERVICE)
+    row = next(m for m in rep["recap_missed"] if m["user"] == f"u{u.id}")
+    assert row["watch_count"] == 1
+    assert row["missed_days_running"] == 3  # day, -1, -2 all empty
+
+
+def test_followups_honour_service_scope(db_session):
+    u = _user(db_session, "waiting@example.com")
+    t = _ticker(db_session)
+    a = StockArticle(
+        ticker_id=t.id, trading_date=DAY, direction="up", status="failed",
+        move_pct=2.0, price=100.0, prev_close=98.0,
+    )
+    db_session.add(a)
+    db_session.commit()
+    db_session.add(ArticleFollowup(
+        article_id=a.id, user_id=u.id, in_reply_to="<x@y>", subject="s",
+        status="abandoned",
+    ))
+    db_session.commit()
+    rep = diagnostics.followups_report(DAY, db_session, scope=diagnostics.SCOPE_SERVICE)
+    assert rep["items"][0]["user"] == f"u{u.id}"
+    assert not EMAIL_RE.search(json.dumps(rep))
+
+
+def test_no_service_path_leaks_personal_data(client, admin_on, db_session):
+    """The guard that has to survive future changes: every allow-listed path
+    is scanned for anything email-shaped. Adding a PII field to a response
+    turns this red rather than quietly shipping."""
+    from app.api.admin_routes import SERVICE_SAFE_PATHS
+
+    _seed_identifiable(db_session)
+    for path in sorted(SERVICE_SAFE_PATHS):
+        r = client.get(path, headers=admin_on)
+        assert r.status_code == 200, f"{path} → {r.status_code}"
+        found = EMAIL_RE.findall(r.text)
+        assert not found, f"{path} leaked {found[:3]}"
+
+
+def test_allow_list_excludes_the_unfiltered_endpoints():
+    """/admin/diagnostics and /admin/health-summary must stay human-only."""
+    from app.api.admin_routes import SERVICE_SAFE_PATHS
+
+    assert "/admin/diagnostics" not in SERVICE_SAFE_PATHS
+    assert "/admin/health-summary" not in SERVICE_SAFE_PATHS
+
+
+def test_every_allow_listed_path_is_a_real_route(client, admin_on):
+    """A typo in the allow-list would silently grant nothing (or worse,
+    be assumed to cover an endpoint it doesn't name)."""
+    from app.api.admin_routes import SERVICE_SAFE_PATHS
+    from app.main import create_app
+
+    routes = {getattr(r, "path", "") for r in create_app().routes}
+    assert SERVICE_SAFE_PATHS <= routes, SERVICE_SAFE_PATHS - routes
+
+
+def test_stock_articles_are_fully_visible_to_the_agent(db_session):
+    """Stories are the highest-value, lowest-risk table — the agent needs
+    content, status, error and token counts, and none of it is personal."""
+    t = _ticker(db_session)
+    db_session.add(StockArticle(
+        ticker_id=t.id, trading_date=DAY, direction="up", status="failed",
+        move_pct=4.0, price=100.0, prev_close=96.0, model="claude-haiku-5-5",
+        input_tokens=30000, output_tokens=6000, error="reviewer rejected",
+    ))
+    db_session.commit()
+    rep = diagnostics.stories_report(DAY, db_session)
+    item = rep["items"][0]
+    assert item["error"] == "reviewer rejected"
+    assert item["input_tokens"] == 30000
+    assert item["est_cost_usd"] is not None
+    assert not EMAIL_RE.search(json.dumps(rep))
+
+
+# ---------------------------------------------------------------------------
+# /auth/me reports admin status, so the SPA can show or hide the link
+# ---------------------------------------------------------------------------
+
+
+def test_me_reports_admin_false_for_an_ordinary_user(client, signed_in, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    get_settings.cache_clear()
+    body = client.get("/auth/me", headers=signed_in["auth"]).json()
+    assert body["is_admin"] is False
+
+
+def test_me_reports_admin_true_via_admin_emails(client, admin_session):
+    body = client.get("/auth/me", headers=admin_session).json()
+    assert body["is_admin"] is True
+
+
+def test_me_reports_admin_true_via_a_role_row(client, signed_in, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    get_settings.cache_clear()
+    from app.db.database import get_session_factory
+    from app.models import AdminRole
+
+    db = get_session_factory()()
+    db.add(AdminRole(user_id=signed_in["user"]["id"], role="admin"))
+    db.commit()
+    db.close()
+    body = client.get("/auth/me", headers=signed_in["auth"]).json()
+    assert body["is_admin"] is True
+
+
+def test_me_never_leaks_admin_status_without_a_session(client):
+    assert client.get("/auth/me").status_code == 401
+
+
+def test_hiding_the_link_is_not_the_security_boundary(client, signed_in, monkeypatch):
+    """is_admin only drives the nav. A client that lies to itself about it
+    must still be refused by the endpoints."""
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    get_settings.cache_clear()
+    assert client.get("/auth/me", headers=signed_in["auth"]).json()["is_admin"] is False
+    assert client.get("/admin/watch", headers=signed_in["auth"]).status_code == 403
+
+
+def test_watch_payload_matches_what_the_admin_page_reads(client, admin_session):
+    """Contract test for src/pages/Admin.jsx.
+
+    The page destructures these paths directly. A rename on the backend
+    would render blank cards rather than raising, so it is pinned here.
+    """
+    b = client.get("/admin/watch", headers=admin_session).json()
+    assert isinstance(b["checked_at_et"], str)
+    for side in ("today", "yesterday"):
+        assert isinstance(b[side]["date"], str)
+        assert isinstance(b[side]["findings"], list)
+    assert isinstance(b["today"]["act_now"], list)
+    assert isinstance(b["today"]["not_due_yet"], list)
+    assert isinstance(b["today"]["jobs"], list)
+    assert isinstance(b["yesterday"]["delivery"]["recap_missed"], list)
+    assert "recap_unexplained" in b["yesterday"]["delivery"]
+    assert isinstance(b["yesterday"]["stories"]["by_status"], dict)
+    for k in ("input_tokens", "output_tokens", "est_cost_usd"):
+        assert k in b["yesterday"]["stories"], k
+    assert isinstance(b["storage"]["tables"], list)
+    assert "total_mb" in b["storage"] and "total_bytes_measured" in b["storage"]
+    assert "story_model" in b["config"]
+
+
+def test_job_slot_fields_the_page_renders_are_present(client, admin_session, db_session):
+    _job(db_session, "pipeline_0935", datetime(2026, 11, 2, 14, 35))
+    b = client.get("/admin/watch", headers=admin_session).json()
+    for slot in b["today"]["jobs"]:
+        for k in ("job_id", "expected_et", "status", "drift_minutes"):
+            assert k in slot, k
+
+
+def test_storage_row_fields_the_page_renders_are_present(client, admin_session):
+    b = client.get("/admin/watch", headers=admin_session).json()
+    for t in b["storage"]["tables"]:
+        for k in ("table", "rows", "rows_added_24h", "mb",
+                  "retention_days", "retention_enforced", "unbounded"):
+            assert k in t, k
+
+
+def test_missed_recap_row_fields_the_page_renders_are_present(client, admin_session, db_session):
+    _user(db_session, "nothing@example.com")
+    b = client.get("/admin/watch", headers=admin_session).json()
+    rows = b["yesterday"]["delivery"]["recap_missed"]
+    assert rows, "expected at least one missed row"
+    for k in ("user", "reason", "watch_count", "missed_days_running"):
+        assert k in rows[0], k

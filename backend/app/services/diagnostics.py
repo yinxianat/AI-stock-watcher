@@ -60,6 +60,28 @@ _UTC = ZoneInfo("UTC")
 # `app.services.articles.service.kid_block` plus the gates in
 # `ensure_articles`. Kept here as the human-readable catalogue so the
 # dashboard and the agent explain outcomes the same way.
+# Who is asking, which decides whether users are named.
+#   SCOPE_ADMIN   — a signed-in admin; real email addresses.
+#   SCOPE_SERVICE — the monitoring agent; stable pseudonyms only, so no
+#                   address reaches an agent transcript stored outside our
+#                   infrastructure. See `user_ref`.
+SCOPE_ADMIN = "admin"
+SCOPE_SERVICE = "service"
+
+# How far back to look when counting a run of missed recaps.
+_MISS_STREAK_DAYS = 14
+
+
+def user_ref(user: User, scope: str) -> str:
+    """How to refer to a user in output at this scope.
+
+    The pseudonym is the internal row id, which means nothing outside our
+    own database but is stable across days — so the agent can say "u7 has
+    missed four days running" and you can look u7 up in the dashboard.
+    """
+    return user.email if scope == SCOPE_ADMIN else f"u{user.id}"
+
+
 REASON_HELP: dict[str, str] = {
     "ready": "Story was generated and sent.",
     "below_bar": "Move was smaller than the story threshold; sent the fixed small-move note.",
@@ -277,21 +299,29 @@ def stories_report(day: date_, db: DBSession | None = None) -> dict:
             session.close()
 
 
-def delivery_report(day: date_, db: DBSession | None = None) -> dict:
+def delivery_report(
+    day: date_, db: DBSession | None = None, scope: str = SCOPE_ADMIN,
+) -> dict:
     """Per-user delivery for the day: who got an alert, who got a recap, and
     who was eligible for one but received nothing.
 
-    Until `delivery_outcomes` exists (Phase 2) the "why" for a miss is
-    inferred from the surrounding tables rather than recorded at the moment
-    of the decision, so `reason` here is best-effort. `inferred` says which
-    it is, so the dashboard never presents a guess as a fact.
+    `scope` decides whether users are named. SCOPE_ADMIN returns real email
+    addresses for the dashboard; SCOPE_SERVICE returns a stable pseudonym
+    (`u7`) instead, so the monitoring agent keeps full per-user granularity
+    — including the ability to correlate the same user across days — without
+    any address leaving the app. Look the ref up in the dashboard to act on it.
+
+    Until `delivery_outcomes` exists the "why" for a miss is inferred from
+    the surrounding tables rather than recorded at the moment of the
+    decision, so `reason` here is best-effort. `inferred` says which it is,
+    so neither the dashboard nor the agent presents a guess as a fact.
     """
     session, own = _own_session(db)
     try:
         start, end = day_bounds(day)
 
         alerts = session.execute(
-            select(NotificationLog, User.email, Ticker.symbol)
+            select(NotificationLog, User, Ticker.symbol)
             .join(User, User.id == NotificationLog.user_id)
             .join(Ticker, Ticker.id == NotificationLog.ticker_id)
             .where(NotificationLog.sent_at >= start, NotificationLog.sent_at < end)
@@ -305,12 +335,12 @@ def delivery_report(day: date_, db: DBSession | None = None) -> dict:
             ).all()
         }
         alert_rows = []
-        for n, email, symbol in alerts:
+        for n, user, symbol in alerts:
             up = story_status.get((n.ticker_id, "up"))
             down = story_status.get((n.ticker_id, "down"))
             st = up or down
             alert_rows.append({
-                "user": email,
+                "user": user_ref(user, scope),
                 "symbol": symbol,
                 "event_type": n.event_type.value if hasattr(n.event_type, "value") else str(n.event_type),
                 "sent_at": n.sent_at.isoformat(),
@@ -320,7 +350,7 @@ def delivery_report(day: date_, db: DBSession | None = None) -> dict:
             })
 
         recaps = session.execute(
-            select(RecapSend, User.email, MoneyIdeaSend.idea_key)
+            select(RecapSend, User, MoneyIdeaSend.idea_key)
             .join(User, User.id == RecapSend.user_id)
             .outerjoin(
                 MoneyIdeaSend,
@@ -332,14 +362,15 @@ def delivery_report(day: date_, db: DBSession | None = None) -> dict:
         ).all()
         recap_rows = [
             {
-                "user": email,
+                "user": user_ref(u, scope),
                 "sent_at": r.sent_at.isoformat(),
                 "money_idea": idea_key,
             }
-            for r, email, idea_key in recaps
+            for r, u, idea_key in recaps
         ]
 
         got_recap = {r.user_id for r, _, _ in recaps}
+        streaks = _miss_streaks(session, day)
         opted_out = set(session.execute(select(EmailOptOut.user_id)).scalars().all())
         recap_off = set(session.execute(select(RecapOptOut.user_id)).scalars().all())
         watch_counts = dict(session.execute(
@@ -360,8 +391,10 @@ def delivery_report(day: date_, db: DBSession | None = None) -> dict:
             else:
                 reason = "unexplained"
             missed.append({
-                "user": u.email,
+                "user": user_ref(u, scope),
                 "reason": reason,
+                "watch_count": watch_counts.get(u.id, 0),
+                "missed_days_running": streaks.get(u.id, 0),
                 "help": REASON_HELP.get(reason, "No recap row and no gate explains it — investigate."),
                 "remediation": REMEDIATION.get(reason),
             })
@@ -374,6 +407,32 @@ def delivery_report(day: date_, db: DBSession | None = None) -> dict:
     finally:
         if own:
             session.close()
+
+
+def _miss_streaks(session, day: date_) -> dict[int, int]:
+    """Consecutive trading-ish days up to `day` with no recap, per user.
+
+    One query for the whole window rather than one per user: the point is a
+    cheap signal the agent can act on ("u7 has had nothing for four days"),
+    not a precise trading-calendar count.
+    """
+    since = day - timedelta(days=_MISS_STREAK_DAYS)
+    rows = session.execute(
+        select(RecapSend.user_id, RecapSend.trading_date)
+        .where(RecapSend.trading_date >= since, RecapSend.trading_date <= day)
+    ).all()
+    sent: dict[int, set] = {}
+    for uid, d in rows:
+        sent.setdefault(uid, set()).add(d)
+    out: dict[int, int] = {}
+    for uid, days in sent.items():
+        streak = 0
+        probe = day
+        while probe >= since and probe not in days:
+            streak += 1
+            probe -= timedelta(days=1)
+        out[uid] = streak
+    return out
 
 
 def _infer_reason(story_status: str | None) -> str:
@@ -422,13 +481,15 @@ def errors_report(day: date_, db: DBSession | None = None, limit: int = 100) -> 
             session.close()
 
 
-def followups_report(day: date_, db: DBSession | None = None) -> dict:
+def followups_report(
+    day: date_, db: DBSession | None = None, scope: str = SCOPE_ADMIN,
+) -> dict:
     """Users promised "we're still looking". `abandoned` means they were
     promised a story and never received one — a silent user-visible miss."""
     session, own = _own_session(db)
     try:
         rows = session.execute(
-            select(ArticleFollowup, User.email, Ticker.symbol, StockArticle.status)
+            select(ArticleFollowup, User, Ticker.symbol, StockArticle.status)
             .join(StockArticle, StockArticle.id == ArticleFollowup.article_id)
             .join(User, User.id == ArticleFollowup.user_id)
             .join(Ticker, Ticker.id == StockArticle.ticker_id)
@@ -437,13 +498,13 @@ def followups_report(day: date_, db: DBSession | None = None) -> dict:
         ).all()
         items = [
             {
-                "user": email,
+                "user": user_ref(u, scope),
                 "symbol": symbol,
                 "story_status": st,
                 "followup_status": f.status,
                 "sent_at": f.sent_at.isoformat() if f.sent_at else None,
             }
-            for f, email, symbol, st in rows
+            for f, u, symbol, st in rows
         ]
         return {
             "count": len(items),
@@ -676,7 +737,9 @@ def ml_corpus_report(db: DBSession | None = None) -> dict:
             session.close()
 
 
-def day_report(day: date_, db: DBSession | None = None) -> dict:
+def day_report(
+    day: date_, db: DBSession | None = None, scope: str = SCOPE_ADMIN,
+) -> dict:
     """Everything about one Eastern trading day, in one object.
 
     This is what the dashboard renders and what the review agent reads.
@@ -703,8 +766,8 @@ def day_report(day: date_, db: DBSession | None = None) -> dict:
             "jobs": jobs_report(day, session),
             "prices": prices_report(day, session),
             "stories": stories_report(day, session),
-            "delivery": delivery_report(day, session),
-            "followups": followups_report(day, session),
+            "delivery": delivery_report(day, session, scope),
+            "followups": followups_report(day, session, scope),
             "errors": errors_report(day, session),
             "storage": storage_report(session),
             "ml_corpus": ml_corpus_report(session),

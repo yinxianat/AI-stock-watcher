@@ -648,3 +648,49 @@ class LogEntry(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     exc_info: Mapped[str | None] = mapped_column(Text, nullable=True)
     context: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+
+
+class AdminRole(Base):
+    """Grants one user access to the /admin diagnostics and dashboard.
+
+    A row here is additive to `ADMIN_EMAILS`: the env var is the bootstrap
+    (it works even before that person has ever signed in, and means losing
+    DB access can't lock everyone out), while this table lets a second
+    operator be granted access with one INSERT and no deploy.
+
+    `user_id` is the primary key, so one role per user. The `role` column
+    exists so a read-only "viewer" can be added later without a migration.
+    """
+
+    __tablename__ = "admin_roles"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="admin")
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+
+
+class ServiceSession(Base):
+    """A short-lived token issued to the monitoring agent.
+
+    The agent exchanges `ADMIN_API_TOKEN` for one of these once per run, so
+    the long-lived secret crosses the wire rarely instead of on every
+    request — anything that captures a header (a proxy log, an error
+    tracker) then holds a credential that dies in minutes rather than one
+    valid until rotated.
+
+    Only the SHA-256 digest is stored, matching `sessions` and
+    `login_tokens`: a DB dump can't be replayed. `client_net` keeps a /24
+    rather than a full IP, which is enough to notice a login from somewhere
+    new without storing personal data.
+    """
+
+    __tablename__ = "service_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    client_net: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)

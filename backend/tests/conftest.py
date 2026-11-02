@@ -19,6 +19,9 @@ os.environ.setdefault("BATCH_JOBS_ENABLED", "false")
 os.environ.setdefault("ALERTS_ENABLED", "false")
 os.environ.setdefault("LOG_DB_PERSISTENCE", "false")
 os.environ.setdefault("DAILY_SUMMARY_ENABLED", "false")
+# Tests fire far more than the per-IP ceiling from one address; a test that
+# needs the limiter re-enables it explicitly.
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402

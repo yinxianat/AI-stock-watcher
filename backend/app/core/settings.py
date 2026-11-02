@@ -72,11 +72,32 @@ class Settings(BaseSettings):
     # CORS — comma-separated list of origins
     cors_origins: str = "http://localhost:5173"
 
-    # Bearer token for the /admin/* diagnostics endpoints, used by the
-    # monitoring dashboard and the scheduled review agent. Blank disables
-    # those endpoints entirely (they 503), so a missing token can never
-    # mean "open to everyone".
+    # Per-IP rate limiting. Off in tests, which fire far more than the
+    # default ceiling from a single address. Also an off switch for
+    # production that needs no deploy.
+    rate_limit_enabled: bool = True
+    # Sign-in links: the per-address throttle in `send_limits` is bypassed by
+    # rotating target addresses, so this per-IP cap is what actually protects
+    # the SMTP quota and stops the app mailing strangers. Loosen only if real
+    # users get blocked — a household behind one NAT shares this budget.
+    rate_limit_signin: str = "5/hour"
+
+    # Comma-separated emails that always have admin access. This is the
+    # bootstrap: it works before that person has ever signed in, and it means
+    # losing DB access can't lock everyone out of /admin. Additional admins
+    # are granted a row in `admin_roles` instead, which needs no deploy.
+    admin_emails: str = ""
+
+    # The monitoring agent's secret. It is NOT sent on every request: the
+    # agent POSTs it once per run to /admin/service-login and gets a
+    # short-lived token back, so a captured header expires in minutes
+    # instead of being valid until someone rotates this. Blank disables
+    # service access entirely (503), so a missing secret can never mean
+    # "open to everyone". Must be at least 32 characters.
     admin_api_token: str = ""
+    # How long an issued service token lasts. Short on purpose — the agent
+    # only needs it for the length of one run.
+    service_token_ttl_minutes: int = 15
 
     # Logging & alerting
     alert_receiver: str = ""  # blank → falls back to smtp_username
@@ -198,6 +219,11 @@ class Settings(BaseSettings):
     def recap_time(self) -> tuple[int, int]:
         h, m = self.recap_time_et.split(":")
         return int(h), int(m)
+
+    @property
+    def admin_email_list(self) -> list[str]:
+        """Lower-cased, so matching a login email is case-insensitive."""
+        return [e.strip().lower() for e in self.admin_emails.split(",") if e.strip()]
 
     @property
     def cors_origin_list(self) -> list[str]:
