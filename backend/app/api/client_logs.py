@@ -14,9 +14,10 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from app.core.ratelimit import RateLimit
 from app.core.security import redact_emails
 
 router = APIRouter(prefix="/client-logs", tags=["client-logs"])
@@ -63,7 +64,13 @@ class ClientLogEntry(BaseModel):
     source: str | None = Field(default=None, max_length=60)  # "feedback", "money-ideas", ...
 
 
-@router.post("", status_code=204, response_model=None)
+# Unauthenticated by necessity (errors happen on signed-out pages), so a
+# cap is the only thing stopping a loop from growing log_entries and — by
+# varying the message to defeat dedup — flooding the admin's inbox.
+@router.post(
+    "", status_code=204, response_model=None,
+    dependencies=[Depends(RateLimit("10/minute", "client_logs"))],
+)
 def ingest_client_log(entry: ClientLogEntry, request: Request) -> None:
     """Record a client-side error against the server log pipeline.
 
