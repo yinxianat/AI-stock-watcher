@@ -18,6 +18,7 @@ from .models import (  # noqa: F401
     PriceSnapshot,
     RecapOptOut,
     RecapSend,
+    ServiceSession,
     Session,
     StockArticle,
     StoryPreference,
