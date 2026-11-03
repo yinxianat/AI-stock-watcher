@@ -205,6 +205,25 @@ class Settings(BaseSettings):
     ai_news_domains: str = "finance.yahoo.com,cnbc.com,cnn.com,axios.com,npr.org,techcrunch.com"
     # News older than this many days doesn't count as today's reason.
     ai_news_max_age_days: int = 2
+
+    # ---- RAG over the FDIC Money Smart curriculum -------------------------
+    # Embeddings for `app/services/rag`. Blank falls back to the offline
+    # fake embedder, so the pipeline runs and tests pass without a key —
+    # but retrieval quality is only meaningful with a real model.
+    # "local" uses model2vec on this machine: free, offline, no quota, and
+    # it installs on Python 3.14 where torch does not reliably. "voyage" is
+    # the hosted option. Embeddings are a build-time step either way, so a
+    # local model costs production nothing.
+    rag_embedding_provider: Literal["local", "voyage"] = "local"
+    rag_local_model: str = "minishlab/potion-base-8M"
+    voyage_api_key: str = ""
+    # voyage-3-lite is 512-dimensional and the cheapest; the others are
+    # 1024. Changing this needs the pgvector column re-created, since
+    # `vector(N)` is fixed-width.
+    rag_embedding_model: str = "voyage-3-lite"
+    # Chunks fed to the generator per query. Each is ~300 tokens, so 5 is
+    # ~1.5K of context — enough grounding without crowding the prompt.
+    rag_top_k: int = 5
     # Whole-market benchmark, so a story can say "most stocks fell today".
     ai_market_symbol: str = "SPY"
 
