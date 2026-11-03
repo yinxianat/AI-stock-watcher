@@ -35,7 +35,7 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.settings import get_settings
@@ -102,7 +102,7 @@ def _fingerprint(logger_name: str, message: str) -> str:
 
 
 def _recently_alerted(fp: str, window: timedelta = _DEDUP_WINDOW) -> bool:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     with _dedup_lock:
         last = _dedup_state.get(fp)
         if last is not None and now - last < window:

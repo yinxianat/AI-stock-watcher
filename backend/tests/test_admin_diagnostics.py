@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -190,15 +190,19 @@ def test_same_endpoint_shows_emails_to_a_human_and_pseudonyms_to_the_agent(
 def test_day_bounds_covers_eastern_day_in_utc():
     start, end = diagnostics.day_bounds(DAY)
     # 2026-11-02 is EST (UTC-5): midnight ET == 05:00 UTC same day.
-    assert start == datetime(2026, 11, 2, 5, 0)
-    assert end == datetime(2026, 11, 3, 5, 0)
-    assert start.tzinfo is None and end.tzinfo is None  # naive, like the DB
+    assert start == datetime(2026, 11, 2, 5, 0, tzinfo=timezone.utc)
+    assert end == datetime(2026, 11, 3, 5, 0, tzinfo=timezone.utc)
+    # Aware, and in UTC: a window that has to be *documented* as UTC is the
+    # thing that gets misread. SQLAlchemy converts it back to naive UTC on
+    # the way into the query.
+    assert start.utcoffset() == timedelta(0)
+    assert end.utcoffset() == timedelta(0)
 
 
 def test_day_bounds_handles_dst_offset():
     """A July day is EDT (UTC-4), so the window shifts by an hour."""
     start, _ = diagnostics.day_bounds(date(2026, 7, 1))
-    assert start == datetime(2026, 7, 1, 4, 0)
+    assert start == datetime(2026, 7, 1, 4, 0, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------

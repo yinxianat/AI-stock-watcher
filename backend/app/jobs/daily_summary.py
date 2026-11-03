@@ -30,6 +30,7 @@ from app.models import (
     TrendAnalysis,
     User,
     WatchlistItem,
+    utcnow,
 )
 from app.models import (
     Session as DBSessionModel,
@@ -42,11 +43,11 @@ WINDOW = timedelta(hours=24)
 
 # Track process start so the summary can report uptime even without an
 # external supervisor. Set on module import.
-_PROCESS_STARTED_AT = datetime.utcnow()
+_PROCESS_STARTED_AT = utcnow()
 
 
 def _last24h(session) -> datetime:
-    return datetime.utcnow() - WINDOW
+    return utcnow() - WINDOW
 
 
 def collect_summary() -> dict:
@@ -63,7 +64,7 @@ def collect_summary() -> dict:
             .where(JobRun.started_at >= since)
             .order_by(JobRun.started_at)
         ).scalars().all()
-        pipeline_expected = len(scheduled_slots(since, datetime.utcnow()))
+        pipeline_expected = len(scheduled_slots(since, utcnow()))
         pipeline_starts = len(runs)
         pipeline_complete = sum(1 for r in runs if r.status == "SUCCESS")
         pipeline_aborted = sum(1 for r in runs if r.status == "FAILED")
@@ -115,7 +116,7 @@ def collect_summary() -> dict:
         active_sessions = session.execute(
             select(func.count(DBSessionModel.id))
             .where(DBSessionModel.revoked_at.is_(None))
-            .where(DBSessionModel.expires_at >= datetime.utcnow())
+            .where(DBSessionModel.expires_at >= utcnow())
         ).scalar_one()
 
         # ---- Error rollup ----
@@ -151,7 +152,7 @@ def collect_summary() -> dict:
         }
 
         # ---- System / process ----
-        uptime = datetime.utcnow() - _PROCESS_STARTED_AT
+        uptime = utcnow() - _PROCESS_STARTED_AT
 
         # ---- Next scheduled jobs (computed from settings; APScheduler also
         # has a runtime view but we want this to work even when called from
@@ -160,7 +161,7 @@ def collect_summary() -> dict:
         next_summary = settings.daily_summary_time
 
         return {
-            "generated_at": datetime.utcnow(),
+            "generated_at": utcnow(),
             "window_hours": WINDOW.total_seconds() / 3600,
             "pipeline": {
                 "expected": pipeline_expected,

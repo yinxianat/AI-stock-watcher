@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -268,8 +268,10 @@ def test_notify_admin_subject_prefixes(monkeypatch, channel, prefix):
 def test_dedup_gc_trims_stale_entries(monkeypatch):
     """After many fingerprints + time, the dedup dict shouldn't grow forever."""
     reset_for_tests()
-    # Force the GC threshold by manually inserting old entries.
-    far_past = datetime.utcnow() - timedelta(days=1)
+    # Force the GC threshold by manually inserting old entries. Aware UTC,
+    # matching what the handler's own clock produces — a naive value here
+    # would only prove that mixing the two raises.
+    far_past = datetime.now(timezone.utc) - timedelta(days=1)
     for i in range(100):
         _dedup_state[f"old_{i}"] = far_past
     pre = len(_dedup_state)
