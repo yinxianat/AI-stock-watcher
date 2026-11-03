@@ -40,7 +40,11 @@ _reported: set[datetime] = set()
 
 
 def scheduled_slots(start_utc: datetime, end_utc: datetime) -> list[datetime]:
-    """Scheduled pipeline times (naive UTC) in (start_utc, end_utc], oldest first."""
+    """Scheduled pipeline times (aware UTC) in (start_utc, end_utc], oldest first.
+
+    Accepts naive bounds and treats them as UTC, so existing callers and
+    tests that pass a bare datetime keep working.
+    """
     times = get_settings().batch_times
     start_et = start_utc.replace(tzinfo=timezone.utc).astimezone(_ET)
     end_et = end_utc.replace(tzinfo=timezone.utc).astimezone(_ET)
@@ -51,7 +55,7 @@ def scheduled_slots(start_utc: datetime, end_utc: datetime) -> list[datetime]:
             for h, m in times:
                 slot = datetime(day.year, day.month, day.day, h, m, tzinfo=_ET)
                 if start_et < slot <= end_et:
-                    slots.append(slot.astimezone(timezone.utc).replace(tzinfo=None))
+                    slots.append(slot.astimezone(timezone.utc))
         day += timedelta(days=1)
     return sorted(slots)
 

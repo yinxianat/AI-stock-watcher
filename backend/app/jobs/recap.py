@@ -55,7 +55,7 @@ from app.models import (
 )
 from app.api.feedback_routes import feedback_links_html, feedback_links_text
 from app.services.email_links import money_ideas_url, settings_url
-from app.services import email_prefs, money_ideas
+from app.services import delivery, email_prefs, money_ideas
 from app.services.articles import render
 from app.services.articles import service as articles
 from app.services.articles.preferences import get_age_groups
@@ -134,9 +134,9 @@ def _market_pct(db: DBSession, day: date) -> float | None:
 
 
 def _day_start_utc(day: date) -> datetime:
-    """Midnight ET of `day`, as naive UTC (how we store datetimes)."""
+    """Midnight ET of `day`, as aware UTC."""
     start = datetime(day.year, day.month, day.day, tzinfo=_ET)
-    return start.astimezone(timezone.utc).replace(tzinfo=None)
+    return start.astimezone(timezone.utc)
 
 
 def _alerted_today(db: DBSession, user_id: int, day: date) -> set[int]:
@@ -209,25 +209,44 @@ def _recipients(db: DBSession, day: date) -> list[User]:
     return [u for u in users if u.id not in off and u.id not in done]
 
 
-def _stories(db: DBSession, movers: list[Move]) -> dict[int, StockArticle]:
+def _stories(
+    db: DBSession, movers: list[Move],
+) -> tuple[dict[int, StockArticle], dict[int, delivery.StoryOutcome]]:
     """Stories (by ticker id) for the biggest movers past the story bar,
-    after waiting up to RECAP_STORY_WAIT_SECONDS. Empty when stories are
-    off or anything goes wrong; the recap then has the stock list only."""
+    after waiting up to RECAP_STORY_WAIT_SECONDS, plus the reason each
+    mover that got none got none. Empty when stories are off or anything
+    goes wrong; the recap then has the stock list only."""
     settings = get_settings()
     candidates = {
         m.ticker.id: articles.Candidate(m.ticker, m.pct, m.price, m.prev_close)
         for m in movers if articles.needs_story(m.ticker, m.pct)
     }
-    if not settings.ai_articles_enabled or not candidates:
-        return {}
+    if not settings.ai_articles_enabled:
+        return {}, {
+            m.ticker.id: delivery.StoryOutcome(
+                state=delivery.STATE_NONE, reason="ai_disabled",
+                detail=f"AI_ARTICLES_ENABLED is false, so the recap naming "
+                       f"{m.ticker.symbol} ({m.pct:+.2f}%) carried no story.",
+            )
+            for m in movers
+        }
+    if not candidates:
+        return {}, {}
     try:
-        stories = articles.ensure_articles(db, list(candidates.values()))
-        articles.wait_for(db, list(stories.values()), settings.recap_story_wait_seconds)
-        return stories
+        plan = articles.ensure_articles(db, list(candidates.values()))
+        articles.wait_for(db, list(plan.stories.values()), settings.recap_story_wait_seconds)
+        return plan.stories, plan.skipped
     except Exception as e:  # noqa: BLE001
         log.warning("Recap: stories unavailable: %s", e)
         db.rollback()
-        return {}
+        return {}, {
+            tid: delivery.StoryOutcome(
+                state=delivery.STATE_NONE, reason="generation_error",
+                detail=f"The recap's story step raised before any story could be "
+                       f"attached: {e}",
+            )
+            for tid in candidates
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -382,14 +401,20 @@ def _footer_text(user: User) -> str:
 
 
 def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float | None,
-                stories: dict[int, StockArticle], day: date, all_moves: dict[int, Move]) -> bool:
+                stories: dict[int, StockArticle], day: date, all_moves: dict[int, Move],
+                story_skips: dict[int, delivery.StoryOutcome] | None = None) -> bool:
     top = moves[0]
     small = None if articles.needs_story(top.ticker, top.pct) else (top.ticker, top.pct)
     story = stories.get(top.ticker.id)
-    block = None
+    skipped = (story_skips or {}).get(top.ticker.id)
     if get_settings().ai_articles_enabled:
-        block = articles.kid_block(db, user, story, small)
-    kids_text, kids_html, pending = block if block else (None, None, False)
+        block = articles.kid_block(db, user, story, small, skipped)
+    else:
+        block = articles.KidBlock(None, None, False, skipped or delivery.StoryOutcome(
+            state=delivery.STATE_NONE, reason="ai_disabled",
+            detail="AI_ARTICLES_ENABLED is false, so the recap carried no story.",
+        ))
+    kids_text, kids_html, pending = block.text, block.html, block.pending
     alerted = _alerted_today(db, user.id, day)
     quiet = _quiet_rules(db, user.id, all_moves, alerted)
     idea = money_ideas.next_idea(db, user.id, _day_tags(top, market_pct))
@@ -459,6 +484,10 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
         ).scalar_one_or_none()
         if already is None:  # an alert today may already be waiting for it
             articles.add_followup(db, story, user, message_id, subject)
+    delivery.record(
+        db, user=user, ticker=top.ticker, channel=delivery.CHANNEL_RECAP,
+        trading_date=day, outcome=block.outcome,
+    )
     try:
         db.commit()
     except IntegrityError:  # another run sent it first
@@ -602,12 +631,13 @@ def run_watchlist_recap(db: DBSession | None = None) -> int:
 
         users = [u for u in users if watch.get(u.id)]
         tops = {watch[u.id][0].ticker.id: watch[u.id][0] for u in users}
-        stories = _stories(db, list(tops.values()))
+        stories, story_skips = _stories(db, list(tops.values()))
         market_pct = _market_pct(db, day)
 
         sent = 0
         for user in users:
-            if _send_recap(db, user, watch[user.id], market_pct, stories, day, moves):
+            if _send_recap(db, user, watch[user.id], market_pct, stories, day, moves,
+                           story_skips):
                 sent += 1
 
         # Users with an empty watchlist get the market-only version, so they

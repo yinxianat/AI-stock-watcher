@@ -120,6 +120,9 @@ export const api = {
   adminDiagnostics: (date, opts) =>
     request(`/admin/diagnostics${date ? `?date=${encodeURIComponent(date)}` : ''}`,
             { auth: true, ...opts }),
+  adminDelivery: (day, opts) =>
+    request(`/admin/delivery${day ? `?day=${encodeURIComponent(day)}` : ''}`,
+      { auth: true, ...opts }),
   adminStorage: (opts) => request('/admin/storage', { auth: true, ...opts }),
   adminMlCorpus: (opts) => request('/admin/ml-corpus', { auth: true, ...opts }),
 

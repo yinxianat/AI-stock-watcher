@@ -17,7 +17,7 @@ from sqlalchemy import select
 from app.core.settings import get_settings
 from app.db.database import get_session_factory
 from app.jobs.ingest import ingest_one_ticker
-from app.models import DailyClose, NotificationRule, Ticker
+from app.models import DailyClose, NotificationRule, Ticker, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ _FRESHNESS = timedelta(days=3)
 def tickers_needing_backfill(db, user_id: int) -> list[int]:
     """Return ticker IDs the user has enabled rules on that don't have a
     recent DailyClose row."""
-    cutoff_date = (datetime.utcnow() - _FRESHNESS).date()
+    cutoff_date = (utcnow() - _FRESHNESS).date()
 
     rule_ticker_ids = {
         tid for (tid,) in db.execute(

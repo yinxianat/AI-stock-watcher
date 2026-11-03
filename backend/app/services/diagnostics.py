@@ -11,11 +11,17 @@ Keeping every query here is the point: a metric added once shows up in the
 dashboard, the email and the agent together, and they can never disagree
 about what a number means.
 
-Timezone note, because it bites every query in here: all stored datetimes
-are naive UTC (`app.models.utcnow`), while `trading_date` / `date` columns
-hold the US/Eastern calendar date the market ran on. `day_bounds()` turns an
-Eastern date into the UTC window to filter timestamps by; never compare a
-timestamp column against a trading date directly.
+Timezone note, because it bites every query in here: datetimes are UTC and
+come back timezone-aware (`app.models.UTCDateTime`), while `trading_date` /
+`date` columns hold the US/Eastern calendar date the market ran on — a day,
+not an instant. `day_bounds()` turns an Eastern date into the UTC window to
+filter timestamps by; never compare a timestamp column against a trading
+date directly.
+
+Every timestamp this module emits goes out twice: the ISO value, which
+carries an explicit `+00:00`, and an `et()` sibling for a human comparing
+against a schedule written in Eastern. `TIMEZONE_NOTE` ships the convention
+in the payload so neither the dashboard nor the agent has to assume it.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from app.db.database import get_session_factory
 from app.models import (
     ArticleFollowup,
     DailyClose,
+    DeliveryOutcome,
     EmailOptOut,
     InfoLog,
     IntradayPrice,
@@ -49,7 +56,10 @@ from app.models import (
     Ticker,
     User,
     WatchlistItem,
+    utcnow,
 )
+
+from app.services import delivery
 
 log = logging.getLogger(__name__)
 
@@ -82,40 +92,98 @@ def user_ref(user: User, scope: str) -> str:
     return user.email if scope == SCOPE_ADMIN else f"u{user.id}"
 
 
+# One sentence per reason, and what to do about it. Both are derived from
+# `app.services.delivery.REASONS` rather than written again here: the
+# sending jobs record those codes, so a second copy of the wording would
+# drift and the dashboard would explain an outcome differently from the
+# agent. Kept under these names because the API and the agent prompt use
+# them.
 REASON_HELP: dict[str, str] = {
-    "ready": "Story was generated and sent.",
-    "below_bar": "Move was smaller than the story threshold; sent the fixed small-move note.",
-    "cap_reached": "Daily story cap was already used up when this move fired.",
-    "no_clear_cause": "Research found no cause it could verify; sent a market-move note or a plain alert.",
-    "failed": "Generation errored. See stock_articles.error.",
-    "ai_disabled": "AI_ARTICLES_ENABLED is false.",
-    "provider_paused": "AI provider key problem; generation paused.",
-    "opted_out": "User turned alert emails off.",
-    "email_unconfirmed": "User's notification email is not confirmed, so nothing is sent to it.",
-    "no_watchlist": "User watches no tickers.",
+    code: r.what for code, r in delivery.REASONS.items()
+}
+REMEDIATION: dict[str, str] = {
+    code: r.fix for code, r in delivery.REASONS.items() if r.fix
 }
 
-# What to do about each reason. The agent quotes these so its weekly
-# write-up suggests a fix instead of only naming a symptom.
-REMEDIATION: dict[str, str] = {
-    "cap_reached": "Raise AI_ARTICLE_MAX_PER_DAY, or AI_ARTICLE_ALWAYS_PCT so big moves bypass the cap.",
-    "no_clear_cause": "Check AI_NEWS_DOMAINS coverage and AI_ARTICLE_MAX_SEARCHES; recurring on a liquid "
-                      "large-cap usually means the research prompt or the search budget is too tight.",
-    "failed": "Read stock_articles.error. Key/billing problems also email the admin via report_key_problem.",
-    "provider_paused": "Check the provider key and billing; stories resume after AI_KEY_PROBLEM_PAUSE_MINUTES.",
-    "email_unconfirmed": "Ask the user to confirm their notification email; nothing reaches them until they do.",
-    "no_watchlist": "Starter recap covers these users; confirm it is enabled and the default ticker is seeded.",
+# Pre-`delivery_outcomes` story statuses, mapped onto catalogue codes so a
+# day from before this feature still reads the same way in the dashboard.
+_LEGACY_STATUS_REASON = {
+    "ready": "ready",
+    "pending": "still_generating",
+    "no_clear_cause": "no_clear_cause",
+    "failed": "generation_failed",
+}
+
+
+def explain(reason: str) -> dict:
+    """The catalogue entry for one reason, as JSON for a dashboard row.
+
+    This is what a row expands into: what happened, whether it is a problem
+    at all, the ranked possible causes with how to tell them apart, and the
+    fix. Unknown codes get a usable shape rather than a KeyError, because a
+    stored row can outlive the code that wrote it.
+    """
+    r = delivery.REASONS.get(reason)
+    if r is None:
+        return {
+            "label": reason, "ok": False, "causes": [], "fix": None,
+            "what": f"Unrecognised reason {reason!r} — recorded by a version of the "
+                    "code that is no longer deployed.",
+        }
+    return {
+        "label": r.label,
+        "what": r.what,
+        "ok": r.ok,
+        "fix": r.fix,
+        "causes": [{"cause": c.cause, "check": c.check} for c in r.causes],
+    }
+
+
+def et(dt: datetime | None) -> str | None:
+    """A timestamp as Eastern wall-clock, labelled.
+
+    Every monitoring timestamp is emitted twice: the ISO value, which now
+    carries `+00:00` because `UTCDateTime` hands back aware datetimes, and
+    this. Both, because they answer different questions — the ISO form is
+    what a machine should parse and sort on, and this is what a human
+    comparing against a 09:35 ET schedule can read without doing the
+    arithmetic in their head. Getting that arithmetic wrong by an hour
+    twice a year is exactly the class of bug the jobs card exists to catch.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_UTC)  # legacy rows, by the storage convention
+    return dt.astimezone(_ET).strftime("%a %H:%M:%S ET")
+
+
+# What every timestamp in a report means, stated in the payload rather than
+# only in a docstring, so the dashboard and the monitoring agent can show
+# it and neither has to assume.
+TIMEZONE_NOTE = {
+    "stored": "UTC",
+    "iso_fields_carry_offset": True,
+    "display": "America/New_York",
+    "note": (
+        "Timestamps are stored as UTC and returned as ISO-8601 with an explicit "
+        "+00:00 offset. Fields ending in _et are the same instant as Eastern "
+        "wall-clock, which is the timezone every job schedule is written in. "
+        "Date-only fields (trading_date) are Eastern calendar days."
+    ),
 }
 
 
 def day_bounds(day: date_) -> tuple[datetime, datetime]:
-    """Naive-UTC [start, end) covering one Eastern calendar day."""
+    """Aware-UTC [start, end) covering one Eastern calendar day.
+
+    Eastern, not UTC, because "what happened on the 3rd" means the trading
+    day a reader in New York means — which is 05:00 to 05:00 UTC in winter
+    and 04:00 to 04:00 in summer, and this is the one place that difference
+    is resolved.
+    """
     start_et = datetime.combine(day, time.min, tzinfo=_ET)
     end_et = start_et + timedelta(days=1)
-    return (
-        start_et.astimezone(_UTC).replace(tzinfo=None),
-        end_et.astimezone(_UTC).replace(tzinfo=None),
-    )
+    return (start_et.astimezone(_UTC), end_et.astimezone(_UTC))
 
 
 def _own_session(db: DBSession | None):
@@ -176,7 +244,7 @@ def jobs_report(day: date_, db: DBSession | None = None) -> dict:
                 continue
             want_utc = datetime.combine(
                 day, time(exp.hour, exp.minute), tzinfo=_ET
-            ).astimezone(_UTC).replace(tzinfo=None)
+            ).astimezone(_UTC)
             got = by_id.get(exp.job_id) or []
             first = got[0] if got else None
             drift = (
@@ -188,6 +256,7 @@ def jobs_report(day: date_, db: DBSession | None = None) -> dict:
                 "expected_et": f"{exp.hour:02d}:{exp.minute:02d}",
                 "expected_utc": want_utc.isoformat(),
                 "actual_utc": first.started_at.isoformat() if first else None,
+                "actual_et": et(first.started_at) if first else None,
                 "drift_minutes": drift,
                 "status": first.status if first else "MISSING",
                 "error": first.error if first else None,
@@ -299,6 +368,108 @@ def stories_report(day: date_, db: DBSession | None = None) -> dict:
             session.close()
 
 
+def _story_delivery(
+    alert_rows: list[dict], recap_rows: list[dict],
+    outcomes: list[DeliveryOutcome], scope: str, session,
+) -> dict:
+    """Who got an AI story, who did not, and why — for one day.
+
+    The counts answer "is this working at all". `missed` answers "what do I
+    do about it": one row per family who got an email with nothing for kids
+    in it, each carrying the ranked causes from the catalogue so the
+    dashboard can expand a row without another request.
+
+    `summary` is the same thing as a sentence, because the first question is
+    always "is today normal?" and a reader should not have to add up columns
+    to find out.
+    """
+    rows: list[dict] = []
+    for r in alert_rows:
+        rows.append({**r, "channel": "alert"})
+    for r in recap_rows:
+        if r.get("reason"):
+            rows.append({**r, "channel": "recap", "symbol": r.get("symbol", "—")})
+    # Follow-ups are a second email about a story already counted above, so
+    # they are listed for completeness but never counted as a separate miss.
+    followups = []
+    for o in outcomes:
+        if o.channel != "followup":
+            continue
+        user = session.get(User, o.user_id)
+        ticker = session.get(Ticker, o.ticker_id) if o.ticker_id else None
+        followups.append({
+            "user": user_ref(user, scope) if user else f"u{o.user_id}",
+            "symbol": ticker.symbol if ticker else "—",
+            "channel": "followup",
+            "reason": o.reason,
+            "detail": o.detail,
+            "story_state": o.story_state,
+            "sent_at": o.sent_at.isoformat(),
+            "sent_et": et(o.sent_at),
+            "explain": explain(o.reason),
+        })
+
+    by_reason: dict[str, int] = {}
+    for r in rows:
+        by_reason[r["reason"]] = by_reason.get(r["reason"], 0) + 1
+
+    with_story = [r for r in rows if r["reason"] in delivery.STORY_REASONS]
+    notes = [r for r in rows if r.get("story_state") in
+             (delivery.STATE_SMALL_MOVE, delivery.STATE_MARKET_DAY)]
+    promised = [r for r in rows if r.get("story_state") == delivery.STATE_PENDING]
+    missed = [r for r in rows if not explain(r["reason"])["ok"]]
+    inferred = [r for r in rows if r.get("inferred")]
+
+    return {
+        "emails": len(rows),
+        "with_story": len(with_story),
+        "with_fixed_note": len(notes),
+        "promised_followup": len(promised),
+        "nothing_for_kids": len(missed),
+        "by_reason": by_reason,
+        "inferred_rows": len(inferred),
+        "summary": _story_summary(len(rows), len(with_story), len(notes),
+                                  len(promised), missed),
+        "received": sorted({r["user"] for r in with_story}),
+        "missed": [
+            {
+                "user": r["user"],
+                "symbol": r.get("symbol", "—"),
+                "channel": r["channel"],
+                "reason": r["reason"],
+                "detail": r.get("detail"),
+                "inferred": bool(r.get("inferred")),
+                "explain": r.get("explain") or explain(r["reason"]),
+            }
+            for r in missed
+        ],
+        "followups": followups,
+    }
+
+
+def _story_summary(
+    total: int, with_story: int, notes: int, promised: int, missed: list[dict],
+) -> str:
+    """One sentence a human can read without adding up columns."""
+    if not total:
+        return "No alert or recap emails went out on this day."
+    parts = [f"{with_story} of {total} email(s) carried an AI story"]
+    if notes:
+        parts.append(f"{notes} carried the fixed note instead (no AI cost)")
+    if promised:
+        parts.append(f"{promised} promised a follow-up")
+    if not missed:
+        return ". ".join(parts) + ". Nothing was unexplained."
+    counts: dict[str, int] = {}
+    for m in missed:
+        label = explain(m["reason"])["label"]
+        counts[label] = counts.get(label, 0) + 1
+    worst = ", ".join(f"{n} × {label.lower()}" for label, n in
+                      sorted(counts.items(), key=lambda kv: -kv[1]))
+    parts.append(f"{len(missed)} had nothing for kids ({worst})")
+    return ". ".join(parts) + "."
+
+
 def delivery_report(
     day: date_, db: DBSession | None = None, scope: str = SCOPE_ADMIN,
 ) -> dict:
@@ -311,10 +482,12 @@ def delivery_report(
     — including the ability to correlate the same user across days — without
     any address leaving the app. Look the ref up in the dashboard to act on it.
 
-    Until `delivery_outcomes` exists the "why" for a miss is inferred from
-    the surrounding tables rather than recorded at the moment of the
-    decision, so `reason` here is best-effort. `inferred` says which it is,
-    so neither the dashboard nor the agent presents a guess as a fact.
+    Each row's "why" comes from the `delivery_outcomes` row the sending job
+    wrote at the moment it decided, so `inferred` is False. Days from before
+    that table existed fall back to inferring the reason from
+    `stock_articles`, and say so: `inferred` True means the reason is a
+    guess, and neither the dashboard nor the agent should present it as a
+    fact.
     """
     session, own = _own_session(db)
     try:
@@ -334,19 +507,46 @@ def delivery_report(
                 .where(StockArticle.trading_date == day)
             ).all()
         }
+        # Recorded outcomes, queued per (user, ticker) in send order so
+        # repeated alerts on the same stock line up with the right one.
+        outcomes = session.execute(
+            select(DeliveryOutcome)
+            .where(DeliveryOutcome.trading_date == day)
+            .order_by(DeliveryOutcome.sent_at)
+        ).scalars().all()
+        queued: dict[tuple, list[DeliveryOutcome]] = {}
+        for o in outcomes:
+            queued.setdefault((o.channel, o.user_id, o.ticker_id), []).append(o)
+
+        def take(channel: str, user_id: int, ticker_id: int | None) -> DeliveryOutcome | None:
+            q = queued.get((channel, user_id, ticker_id))
+            return q.pop(0) if q else None
+
         alert_rows = []
         for n, user, symbol in alerts:
             up = story_status.get((n.ticker_id, "up"))
             down = story_status.get((n.ticker_id, "down"))
             st = up or down
+            o = take("alert", n.user_id, n.ticker_id)
+            reason = (
+                o.reason if o is not None
+                else _LEGACY_STATUS_REASON.get(st or "", "below_bar")
+            )
             alert_rows.append({
                 "user": user_ref(user, scope),
                 "symbol": symbol,
                 "event_type": n.event_type.value if hasattr(n.event_type, "value") else str(n.event_type),
                 "sent_at": n.sent_at.isoformat(),
+                "sent_et": et(n.sent_at),
                 "story_status": st or "(no story row)",
-                "reason": _infer_reason(st),
-                "inferred": True,
+                "story_state": o.story_state if o else None,
+                "reason": reason,
+                "detail": o.detail if o else None,
+                "age_group": o.age_group if o else None,
+                "age_group_sent": o.age_group_sent if o else None,
+                "article_id": o.article_id if o else None,
+                "inferred": o is None,
+                "explain": explain(reason),
             })
 
         recaps = session.execute(
@@ -360,14 +560,24 @@ def delivery_report(
             .where(RecapSend.trading_date == day)
             .order_by(RecapSend.sent_at)
         ).all()
-        recap_rows = [
-            {
+        recap_rows = []
+        for r, u, idea_key in recaps:
+            o = next(
+                (x for x in outcomes
+                 if x.channel == "recap" and x.user_id == r.user_id), None,
+            )
+            reason = o.reason if o is not None else None
+            recap_rows.append({
                 "user": user_ref(u, scope),
                 "sent_at": r.sent_at.isoformat(),
+                "sent_et": et(r.sent_at),
                 "money_idea": idea_key,
-            }
-            for r, u, idea_key in recaps
-        ]
+                "story_state": o.story_state if o else None,
+                "reason": reason,
+                "detail": o.detail if o else None,
+                "inferred": o is None,
+                "explain": explain(reason) if reason else None,
+            })
 
         got_recap = {r.user_id for r, _, _ in recaps}
         streaks = _miss_streaks(session, day)
@@ -397,12 +607,14 @@ def delivery_report(
                 "missed_days_running": streaks.get(u.id, 0),
                 "help": REASON_HELP.get(reason, "No recap row and no gate explains it — investigate."),
                 "remediation": REMEDIATION.get(reason),
+                "explain": explain(reason),
             })
         return {
             "alerts": alert_rows,
             "recaps": recap_rows,
             "recap_missed": missed,
             "recap_unexplained": sum(1 for m in missed if m["reason"] == "unexplained"),
+            "stories": _story_delivery(alert_rows, recap_rows, outcomes, scope, session),
         }
     finally:
         if own:
@@ -435,16 +647,6 @@ def _miss_streaks(session, day: date_) -> dict[int, int]:
     return out
 
 
-def _infer_reason(story_status: str | None) -> str:
-    if story_status == "ready":
-        return "ready"
-    if story_status in ("no_clear_cause", "failed"):
-        return story_status
-    if story_status == "pending":
-        return "still_generating"
-    return "below_bar_or_capped"
-
-
 def errors_report(day: date_, db: DBSession | None = None, limit: int = 100) -> dict:
     session, own = _own_session(db)
     try:
@@ -467,6 +669,7 @@ def errors_report(day: date_, db: DBSession | None = None, limit: int = 100) -> 
             "items": [
                 {
                     "created_at": r.created_at.isoformat(),
+                    "created_et": et(r.created_at),
                     "level": r.level,
                     "logger": r.logger,
                     "message": r.message[:500],
@@ -503,6 +706,7 @@ def followups_report(
                 "story_status": st,
                 "followup_status": f.status,
                 "sent_at": f.sent_at.isoformat() if f.sent_at else None,
+                "sent_et": et(f.sent_at),
             }
             for f, u, symbol, st in rows
         ]
@@ -527,6 +731,10 @@ _GROWTH_TABLES: list[tuple[str, type, str, str | None]] = [
     ("daily_closes", DailyClose, "captured_at", "price_history_lifetime"),
     ("notification_logs", NotificationLog, "sent_at", None),
     ("stock_articles", StockArticle, "created_at", None),
+    # Unbounded on purpose, like notification_logs: it is the record of what
+    # each family was actually sent, and it grows with emails rather than
+    # with time. Listed here so that growth is visible rather than assumed.
+    ("delivery_outcomes", DeliveryOutcome, "sent_at", None),
 ]
 
 # Rough bytes per row including per-row overhead and index share. Only used
@@ -535,6 +743,7 @@ _EST_ROW_BYTES = {
     "info_logs": 260, "log_entries": 420, "job_runs": 300,
     "intraday_prices": 90, "daily_closes": 90,
     "notification_logs": 220, "stock_articles": 5200,  # content JSON dominates
+    "delivery_outcomes": 300,  # the detail sentence dominates
 }
 # How many recent rows to sample when judging whether a log table is noise.
 _SAMPLE = 2000
@@ -580,7 +789,7 @@ def storage_report(db: DBSession | None = None) -> dict:
     """
     session, own = _own_session(db)
     try:
-        now = datetime.utcnow()
+        now = utcnow()
         tables = []
         total_bytes = 0
         bytes_known = True
@@ -749,7 +958,9 @@ def day_report(
         settings = get_settings()
         report = {
             "date": day.isoformat(),
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": utcnow().isoformat(),
+            "generated_et": et(utcnow()),
+            "timezone": TIMEZONE_NOTE,
             "config": {
                 "ai_articles_enabled": settings.ai_articles_enabled,
                 "ai_provider": settings.ai_provider,
@@ -779,28 +990,149 @@ def day_report(
             session.close()
 
 
+def _job_missing_evidence(jobs: dict, slot: dict) -> tuple[dict, list[dict]]:
+    """Facts and ranked causes for one job that never ran.
+
+    "The job did not run" is almost never the useful sentence; the useful
+    one is which of three very different things happened. The three look
+    identical in the job table and are told apart by what ran *around* the
+    gap, so that is what this assembles:
+
+    * nothing ran all day            → the process was not alive
+    * earlier slots ran, later ones did not → it died mid-session
+    * neighbours ran, this one did not      → this job specifically is broken
+
+    Ordering matters more than completeness here: the admin reads the first
+    cause and checks it, so the first cause has to be the likeliest one
+    given the evidence, not the most common one in general.
+    """
+    slots = jobs["slots"]
+    runs = jobs["all_runs"]
+    mine = slot["expected_et"]
+    earlier_ran = [x["job_id"] for x in slots
+                   if x["expected_et"] < mine and x["status"] != "MISSING"]
+    later_ran = [x["job_id"] for x in slots
+                 if x["expected_et"] > mine and x["status"] != "MISSING"]
+    others_ran = sorted({r["job_name"] for r in runs} - {slot["job_id"]})
+    # The sharpest fact available: did anything at all run AFTER the slot
+    # this job missed? If so the process was demonstrably alive then, which
+    # rules out the whole "container asleep" family and leaves this job
+    # itself. Comparing slot statuses can't do that — two slots a minute
+    # apart say nothing about a process that died at noon.
+    alive_after = any(r["started_at"] > slot["expected_utc"] for r in runs)
+
+    evidence = {
+        "job_id": slot["job_id"],
+        "expected_et": slot["expected_et"],
+        "expected_utc": slot["expected_utc"],
+        "jobs_that_did_run": others_ran,
+        "runs_recorded_today": len(runs),
+        "earlier_slots_that_ran": earlier_ran,
+        "later_slots_that_ran": later_ran,
+        "last_run_today_utc": runs[-1]["started_at"] if runs else None,
+        "something_ran_after_this_slot": alive_after,
+    }
+
+    asleep = {
+        "cause": "The container was not running at that time, so the in-process "
+                 "scheduler never fired. APScheduler lives inside the web process: no "
+                 "process, no jobs, and no error either.",
+        "check": "Check Railway for a restart, a failed deploy, or a service scaled to "
+                 "zero around this time. `runs_recorded_today` being 0 is the tell.",
+    }
+    died_midway = {
+        "cause": f"The process died after {', '.join(earlier_ran) or 'the earlier jobs'} "
+                 "and never came back, so everything from this slot onwards was skipped.",
+        "check": "Compare `last_run_today_utc` with this slot's expected time, then look "
+                 "for a restart or an OOM kill in the Railway logs just after it.",
+    }
+    job_specific = {
+        "cause": "This job alone is broken: its trigger is wrong, or it raised before it "
+                 "could write its audit row.",
+        "check": f"Other jobs ran fine ({', '.join(others_ran)}), so the scheduler was "
+                 "alive. Look for an exception from this job's module, and confirm its "
+                 "CronTrigger has an explicit US/Eastern timezone.",
+    }
+    switched_off = {
+        "cause": "The job is switched off by configuration, so it is correctly not running "
+                 "and only the expectation is wrong.",
+        "check": "Check BATCH_JOBS_ENABLED, INTRADAY_INGEST_ENABLED and RECAP_ENABLED. "
+                 "`expected_jobs` reads these, so a disabled job should not appear here — "
+                 "if it does, the setting disagrees with the schedule.",
+    }
+    not_due = {
+        "cause": "The slot has not actually arrived yet in Eastern time.",
+        "check": "The /watch endpoint filters these out as `not_due_yet`; seeing it here "
+                 "means the day being viewed is not today.",
+    }
+
+    if not runs:
+        causes = [asleep, switched_off, not_due]
+    elif alive_after:
+        causes = [job_specific, switched_off, died_midway]
+    elif earlier_ran:
+        causes = [died_midway, asleep, job_specific]
+    else:
+        causes = [asleep, job_specific, switched_off]
+    return evidence, causes
+
+
 def findings(report: dict) -> list[dict]:
     """Machine-checked problems in a day report, worst first.
 
     These are the deterministic checks — things we can assert without
     judgement. The review agent reads these first and then looks for the
     things rules can't catch (quality, trends, security patterns).
+
+    Each finding carries `evidence` (the facts behind it, so nobody has to
+    take the one-line `detail` on trust) and `causes` (ranked candidate
+    explanations, each with how to tell it from the others). "ingest never
+    ran" is true but useless on its own; "ingest never ran, and so did
+    nothing else all day, so the container was most likely asleep — check
+    whether Railway scaled it to zero" is actionable. The dashboard shows
+    `detail` and expands to the rest.
     """
     out: list[dict] = []
 
-    def add(severity: str, code: str, detail: str, fix: str | None = None) -> None:
-        out.append({"severity": severity, "code": code, "detail": detail, "remediation": fix})
+    def add(severity: str, code: str, detail: str, fix: str | None = None,
+            evidence: dict | None = None, causes: list[dict] | None = None) -> None:
+        out.append({
+            "severity": severity, "code": code, "detail": detail, "remediation": fix,
+            "evidence": evidence or {}, "causes": causes or [],
+        })
 
     jobs = report["jobs"]
     if jobs["trading_day"]:
         for slot in jobs["slots"]:
             if slot["status"] == "MISSING":
+                ev, causes = _job_missing_evidence(jobs, slot)
                 add("high", "job_missing",
                     f"{slot['job_id']} never ran (expected {slot['expected_et']} ET).",
                     "Check the container was awake; APScheduler is in-process so a sleeping "
-                    "container silently skips jobs.")
+                    "container silently skips jobs.",
+                    evidence=ev, causes=causes)
             elif slot["status"] == "FAILED":
-                add("high", "job_failed", f"{slot['job_id']} failed: {slot['error']}", None)
+                add("high", "job_failed", f"{slot['job_id']} failed: {slot['error']}", None,
+                    evidence={
+                        "job_id": slot["job_id"],
+                        "expected_et": slot["expected_et"],
+                        "started_utc": slot["actual_utc"],
+                        "error": slot["error"],
+                        "runs_today": [r for r in jobs["all_runs"]
+                                       if r["job_name"] == slot["job_id"]],
+                    },
+                    causes=[
+                        {"cause": "The job raised partway through, so its work is "
+                                  "half-applied.",
+                         "check": "Read the error above, then check whether the tables it "
+                                  "writes have this day's rows."},
+                        {"cause": "An upstream price API was down or rate-limited.",
+                         "check": "Look for fetch warnings naming individual symbols just "
+                                  "before the failure."},
+                        {"cause": "A later run of the same job succeeded and this is the "
+                                  "first attempt only.",
+                         "check": "`runs_today` in the evidence lists every attempt."},
+                    ])
             elif slot["drift_minutes"] is not None and abs(slot["drift_minutes"]) >= 30:
                 add("high", "job_drift",
                     f"{slot['job_id']} ran {slot['drift_minutes']} min off its {slot['expected_et']} ET slot.",
@@ -822,17 +1154,73 @@ def findings(report: dict) -> list[dict]:
     if report["config"]["ai_articles_enabled"] and jobs["trading_day"] and st["count"] == 0:
         add("medium", "no_stories",
             "Stories are enabled but none were created. Either no move cleared the "
-            "threshold or generation never ran.", None)
+            "threshold or generation never ran.", None,
+            evidence={
+                "min_pct_stock": report["config"].get("min_pct_stock"),
+                "min_pct_fund": report["config"].get("min_pct_fund"),
+                "alerts_sent": len(report["delivery"].get("alerts") or []),
+                "recaps_sent": len(report["delivery"].get("recaps") or []),
+            },
+            causes=[
+                {"cause": "Nothing moved enough to qualify — the ordinary quiet day.",
+                 "check": "If alerts went out, their reasons say below_bar. If none did, "
+                          "nothing crossed any rule either, which agrees."},
+                {"cause": "The story step never ran because the provider is paused or the "
+                          "switch is off on the sending service.",
+                 "check": "Check the delivery reasons for provider_paused or ai_disabled; "
+                          "they are recorded per email."},
+                {"cause": "The intraday job did not run, so no alert triggered a story.",
+                 "check": "Look at the jobs card for a missing intraday_capture."},
+            ])
     failed = st["by_status"].get("failed", 0)
     if failed and st["count"]:
         add("medium" if failed < st["count"] else "high", "stories_failed",
             f"{failed} of {st['count']} stories failed.",
-            REMEDIATION["failed"])
+            REMEDIATION["generation_failed"],
+            evidence={"failed": failed, "total": st["count"],
+                      "by_status": st["by_status"]},
+            causes=explain("generation_failed")["causes"])
     no_cause = st["by_status"].get("no_clear_cause", 0)
     if st["count"] and no_cause / st["count"] >= 0.5:
         add("medium", "mostly_no_cause",
             f"{no_cause} of {st['count']} stories found no verifiable cause.",
-            REMEDIATION["no_clear_cause"])
+            REMEDIATION["no_clear_cause"],
+            evidence={"no_clear_cause": no_cause, "total": st["count"],
+                      "max_searches": report["config"].get("max_searches"),
+                      "news_source": report["config"].get("news_source")},
+            causes=explain("no_clear_cause")["causes"])
+
+    # Per-family story delivery. The stories card counts rows in
+    # `stock_articles`; this counts families who opened an email and found
+    # nothing in it, which is the number that actually matters.
+    sd = report["delivery"].get("stories") or {}
+    if sd.get("nothing_for_kids"):
+        worst: dict[str, int] = {}
+        for m in sd["missed"]:
+            worst[m["reason"]] = worst.get(m["reason"], 0) + 1
+        top_reason = max(worst, key=lambda k: worst[k])
+        add("medium" if sd["nothing_for_kids"] < sd["emails"] else "high",
+            "stories_not_delivered",
+            f"{sd['nothing_for_kids']} of {sd['emails']} email(s) carried nothing for "
+            f"kids; most often {explain(top_reason)['label'].lower()}.",
+            explain(top_reason)["fix"],
+            evidence={"by_reason": sd["by_reason"], "summary": sd["summary"],
+                      "missed": sd["missed"][:20]},
+            causes=explain(top_reason)["causes"])
+    if sd.get("inferred_rows"):
+        add("low", "delivery_not_recorded",
+            f"{sd['inferred_rows']} email(s) have no recorded outcome, so their reason "
+            "is inferred rather than known.",
+            "Expected for days before delivery_outcomes existed. On a current day it "
+            "means a send path is not calling delivery.record.",
+            evidence={"inferred_rows": sd["inferred_rows"], "emails": sd["emails"]},
+            causes=[
+                {"cause": "The day predates the delivery_outcomes table.",
+                 "check": "Compare the date against when it was deployed."},
+                {"cause": "An email is sent by a path that does not record an outcome.",
+                 "check": "Every send should pair a NotificationLog or RecapSend row with "
+                          "a delivery_outcomes row in the same transaction."},
+            ])
 
     ab = report["followups"]["abandoned"]
     if ab:

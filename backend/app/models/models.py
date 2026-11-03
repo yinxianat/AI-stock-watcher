@@ -31,12 +31,14 @@ RecapOptOut    — user who turned the daily watchlist recap off.
 RecapSend      — one row per (user, trading day) recap sent; stops repeats.
 MoneyIdeaSend  — which Money Idea of the Day each user got, per trading day.
 ContentFeedback — parent like/neutral/dislike on AI stories and Money Ideas.
+DeliveryOutcome — what one user received in one email and why, recorded by
+                  the sending job rather than inferred later.
 """
 
 from __future__ import annotations
 
 import enum
-from datetime import date as date_, datetime
+from datetime import date as date_, datetime, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -49,19 +51,66 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
-def utcnow() -> datetime:
-    """Naive-UTC timestamp.
+class UTCDateTime(TypeDecorator):
+    """A datetime column that always hands back an aware UTC value.
 
-    We intentionally use naive datetimes app-wide because SQLite cannot store
-    tz info, and mixing naive/aware datetimes leads to comparison errors. Treat
-    every datetime in this codebase as UTC.
+    Timestamps are STORED exactly as before — naive, in UTC — so the column
+    type on disk is unchanged and no migration is needed. What changes is
+    what Python sees: every read carries `tzinfo=UTC`, so a timestamp can no
+    longer leave this application without saying which timezone it is in.
+    That matters most for the log and monitoring tables, where the reader is
+    a human at 10am wondering whether "15:02" was three hours ago or five.
+
+    Why not `DateTime(timezone=True)`, the obvious answer? On Postgres it
+    gives a real `timestamptz`, but on SQLite the offset is silently
+    discarded and the value comes back naive *and shifted*, so tests would
+    exercise different semantics from production — the worst of both. This
+    type behaves identically on both backends.
+
+    Binding is deliberately forgiving: an aware value is converted to UTC, a
+    naive one is trusted as UTC already. That keeps the thousands of
+    existing naive comparisons in queries working untouched while new code
+    can pass aware values.
     """
-    return datetime.utcnow()
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value  # already naive UTC, by the convention above
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
+def utcnow() -> datetime:
+    """Timezone-aware UTC timestamp. The only clock this app should use.
+
+    Aware, not naive: a bare datetime that has to be *documented* as UTC
+    gets misread eventually, and the one that bit us was a monitoring
+    timestamp nobody could place. `UTCDateTime` stores these as naive UTC,
+    so the storage convention is unchanged — only the values carry their
+    timezone now.
+
+    Everything in this codebase is UTC until it is deliberately converted
+    for display; US/Eastern appears only in the market-hours logic and in
+    what a human is shown.
+    """
+    return datetime.now(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -105,8 +154,8 @@ class User(Base):
     # but only after the user confirms it via ConfirmationToken.
     notify_email: Mapped[str] = mapped_column(String(320), nullable=False)
     notify_email_confirmed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
-    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
     watchlist: Mapped[list[WatchlistItem]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -128,9 +177,9 @@ class LoginToken(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
 class Session(Base):
@@ -139,9 +188,9 @@ class Session(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
 class ConfirmationToken(Base):
@@ -153,9 +202,9 @@ class ConfirmationToken(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     new_email: Mapped[str] = mapped_column(String(320), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
 # ---------- Catalog ----------
@@ -188,7 +237,7 @@ class WatchlistItem(Base):
     ticker_id: Mapped[int] = mapped_column(
         ForeignKey("tickers.id", ondelete="CASCADE"), index=True
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     user: Mapped[User] = relationship(back_populates="watchlist")
     ticker: Mapped[Ticker] = relationship()
@@ -220,9 +269,9 @@ class NotificationRule(Base):
     pct_low: Mapped[float | None] = mapped_column(Float, nullable=True)
     pct_high: Mapped[float | None] = mapped_column(Float, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), default=utcnow, onupdate=utcnow
+        UTCDateTime, default=utcnow, onupdate=utcnow
     )
 
     user: Mapped[User] = relationship(back_populates="rules")
@@ -244,7 +293,7 @@ class EmailOptOut(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class RecapOptOut(Base):
@@ -260,7 +309,7 @@ class RecapOptOut(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class RecapSend(Base):
@@ -275,7 +324,7 @@ class RecapSend(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     trading_date: Mapped[date_] = mapped_column(Date, nullable=False)
-    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    sent_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class MoneyIdeaSend(Base):
@@ -295,7 +344,7 @@ class MoneyIdeaSend(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     idea_key: Mapped[str] = mapped_column(String(40), nullable=False)
     trading_date: Mapped[date_] = mapped_column(Date, nullable=False)
-    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    sent_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class ContentFeedback(Base):
@@ -330,8 +379,8 @@ class ContentFeedback(Base):
     rating: Mapped[str] = mapped_column(String(10), nullable=False)
     age_group: Mapped[str | None] = mapped_column(String(10), nullable=True)
     context_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, onupdate=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
 
 # ---------- Batch outputs ----------
@@ -359,7 +408,7 @@ class IntradayPrice(Base):
         ForeignKey("tickers.id", ondelete="CASCADE"), nullable=False
     )
     captured_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), default=utcnow, nullable=False
+        UTCDateTime, default=utcnow, nullable=False
     )
     price: Mapped[float] = mapped_column(Float, nullable=False)
 
@@ -392,7 +441,7 @@ class DailyClose(Base):
     date: Mapped[date_] = mapped_column(Date, nullable=False)
     close: Mapped[float] = mapped_column(Float, nullable=False)
     captured_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), default=utcnow, nullable=False
+        UTCDateTime, default=utcnow, nullable=False
     )
 
     ticker: Mapped[Ticker] = relationship()
@@ -430,7 +479,7 @@ class PriceSnapshot(Base):
     quarter_high: Mapped[float | None] = mapped_column(Float, nullable=True)
     year_low: Mapped[float | None] = mapped_column(Float, nullable=True)
     year_high: Mapped[float | None] = mapped_column(Float, nullable=True)
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    captured_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     ticker: Mapped[Ticker] = relationship()
 
@@ -458,7 +507,7 @@ class TrendAnalysis(Base):
     is_quarter_high: Mapped[bool] = mapped_column(Boolean, default=False)
     is_year_low: Mapped[bool] = mapped_column(Boolean, default=False)
     is_year_high: Mapped[bool] = mapped_column(Boolean, default=False)
-    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    computed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class NotificationLog(Base):
@@ -480,7 +529,7 @@ class NotificationLog(Base):
     sent_to: Mapped[str] = mapped_column(String(320), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     sent_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), default=utcnow, index=True
+        UTCDateTime, default=utcnow, index=True
     )
 
 
@@ -519,8 +568,8 @@ class StockArticle(Base):
     model: Mapped[str | None] = mapped_column(String(60), nullable=True)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
     ticker: Mapped[Ticker] = relationship()
 
@@ -539,7 +588,7 @@ class StoryPreference(Base):
     )
     age_groups: Mapped[str] = mapped_column(String(40), nullable=False)  # e.g. "3-5,13-17"
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), default=utcnow, onupdate=utcnow
+        UTCDateTime, default=utcnow, onupdate=utcnow
     )
 
 
@@ -564,8 +613,8 @@ class ArticleFollowup(Base):
     in_reply_to: Mapped[str] = mapped_column(String(255), nullable=False)
     subject: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="waiting")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
-    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
 # ---------- Observability ----------
@@ -593,10 +642,10 @@ class JobRun(Base):
     job_name: Mapped[str] = mapped_column(String(60), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)  # SUCCESS / FAILED / SKIPPED
     started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), default=utcnow, nullable=False
+        UTCDateTime, default=utcnow, nullable=False
     )
     finished_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=False), nullable=True
+        UTCDateTime, nullable=True
     )
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -620,7 +669,7 @@ class InfoLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), default=utcnow, nullable=False
+        UTCDateTime, default=utcnow, nullable=False
     )
     level: Mapped[str] = mapped_column(String(10), nullable=False)
     logger: Mapped[str] = mapped_column(String(160), nullable=False)
@@ -641,7 +690,7 @@ class LogEntry(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), default=utcnow, nullable=False
+        UTCDateTime, default=utcnow, nullable=False
     )
     level: Mapped[str] = mapped_column(String(10), nullable=False)
     logger: Mapped[str] = mapped_column(String(160), nullable=False)
@@ -668,7 +717,7 @@ class AdminRole(Base):
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="admin")
-    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+    granted_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class ServiceSession(Base):
@@ -691,6 +740,59 @@ class ServiceSession(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
     client_net: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
+class DeliveryOutcome(Base):
+    """What one user actually received in one email, and why.
+
+    Written at the moment the decision is made, by the job that sends the
+    email — not inferred afterwards from the surrounding tables. That is the
+    whole point: "this alert carried no story because the research found no
+    cause it could verify" is a fact at send time, and by the next morning
+    it is a guess. `reason` is a code from
+    `app.services.delivery.REASONS`; `detail` is the sentence with this
+    send's real numbers in it.
+
+    One row per (email, ticker), so an alert naming one stock makes one row
+    and a recap makes one row for the mover whose story it carried. Durable:
+    there is no retention setting, because the table grows with emails sent
+    rather than with time, and it is the only record of what a family saw.
+    """
+
+    __tablename__ = "delivery_outcomes"
+    __table_args__ = (
+        Index("ix_delivery_outcomes_day_reason", "trading_date", "reason"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # Null for the starter recap, which names no stock.
+    ticker_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tickers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # SET NULL, not CASCADE: this row is the audit trail. If a story is ever
+    # deleted the record that someone received it must survive.
+    article_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stock_articles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    trading_date: Mapped[date_] = mapped_column(Date, nullable=False, index=True)
+    # "alert" | "recap" | "followup" — which email this was.
+    channel: Mapped[str] = mapped_column(String(10), nullable=False)
+    # What the family saw: "story" | "small_move_note" | "market_day_note"
+    # | "pending_followup" | "none".
+    story_state: Mapped[str] = mapped_column(String(20), nullable=False)
+    reason: Mapped[str] = mapped_column(String(30), nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The parent's chosen age group, and the one actually sent. They differ
+    # when the chosen group's version failed a safety check and the nearest
+    # age was substituted — invisible to the parent, and worth seeing here.
+    age_group: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    age_group_sent: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    sent_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, default=utcnow, index=True
+    )

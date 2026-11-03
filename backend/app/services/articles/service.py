@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session as DBSession
 from app.core.settings import get_settings
 from app.db.database import get_session_factory
 from app.models import ArticleFollowup, DailyClose, StockArticle, Ticker, TickerType, User, utcnow
-from app.services import email_prefs
+from app.services import delivery, email_prefs
 from app.services.alerts import AlertChannel, notify_admin
 from app.services.articles import render
 from app.services.articles.preferences import get_age_groups
@@ -383,7 +383,27 @@ def _find(db: DBSession, ticker_id: int, day: date, direction: str) -> StockArti
     ).scalar_one_or_none()
 
 
-def ensure_articles(db: DBSession, candidates: list[Candidate]) -> dict[int, StockArticle]:
+@dataclass
+class StoryPlan:
+    """What `ensure_articles` decided, per candidate ticker.
+
+    `skipped` is the half that used to be thrown away: a candidate with no
+    story in `stories` left no trace of why, so the alert went out as a bare
+    price line and the reason was gone by the time anyone looked. The sending
+    job records these against the user who missed out.
+    """
+
+    stories: dict[int, StockArticle]
+    skipped: dict[int, delivery.StoryOutcome]
+
+
+def _skip(reason: str, detail: str) -> delivery.StoryOutcome:
+    return delivery.StoryOutcome(
+        state=delivery.STATE_NONE, reason=reason, detail=detail,
+    )
+
+
+def ensure_articles(db: DBSession, candidates: list[Candidate]) -> StoryPlan:
     """Story per candidate stock, keyed by ticker id: today's existing one, or
     a new `pending` one being generated. Stocks over the daily cap get none.
 
@@ -391,13 +411,22 @@ def ensure_articles(db: DBSession, candidates: list[Candidate]) -> dict[int, Sto
     story row hits a race with another run.
     """
     settings = get_settings()
-    if not settings.ai_articles_enabled or not candidates:
-        return {}
+    if not candidates:
+        return StoryPlan({}, {})
+    if not settings.ai_articles_enabled:
+        return StoryPlan({}, {
+            c.ticker.id: _skip(
+                "ai_disabled",
+                f"AI_ARTICLES_ENABLED is false, so no story was attempted for "
+                f"{c.ticker.symbol} ({c.move_pct:+.2f}%).",
+            )
+            for c in candidates
+        })
     for service, reason in _missing_keys():
         report_key_problem(service, reason)
-    if stories_paused():
-        return {}
     # While paused, today's finished stories are still used; no new ones.
+    # The early return this replaced also withheld stories that were already
+    # written and paid for, which is the opposite of what a pause is for.
     paused = stories_paused()
     db.commit()
     day = trading_date()
@@ -407,12 +436,18 @@ def ensure_articles(db: DBSession, candidates: list[Candidate]) -> dict[int, Sto
     market_pct: float | None = None
     market_checked = False
     out: dict[int, StockArticle] = {}
+    skipped: dict[int, delivery.StoryOutcome] = {}
 
     for c in sorted(candidates, key=lambda c: abs(c.move_pct), reverse=True):
         direction = _direction(c.move_pct)
         row = _find(db, c.ticker.id, day, direction)
         if row is None:
             if paused:
+                skipped[c.ticker.id] = _skip(
+                    "provider_paused",
+                    f"No provider was usable when {c.ticker.symbol} moved "
+                    f"{c.move_pct:+.2f}%, so no story was attempted.",
+                )
                 continue
             cap = settings.ai_article_max_per_day
             if abs(c.move_pct) >= settings.ai_article_always_pct:
@@ -420,6 +455,11 @@ def ensure_articles(db: DBSession, candidates: list[Candidate]) -> dict[int, Sto
             if created_today >= cap:
                 log.info("Story cap reached (%d today); none for %s",
                          created_today, c.ticker.symbol)
+                skipped[c.ticker.id] = _skip(
+                    "cap_reached",
+                    f"{created_today} stories were already written today (cap {cap} for a "
+                    f"{abs(c.move_pct):.2f}% move), so {c.ticker.symbol} got none.",
+                )
                 continue
             if not market_checked:
                 market_checked = True
@@ -439,6 +479,11 @@ def ensure_articles(db: DBSession, candidates: list[Candidate]) -> dict[int, Sto
                 db.rollback()
                 row = _find(db, c.ticker.id, day, direction)
                 if row is None:
+                    skipped[c.ticker.id] = _skip(
+                        "generation_error",
+                        f"Another run claimed the {c.ticker.symbol} story row and it could "
+                        "not be read back.",
+                    )
                     continue
             else:
                 created_today += 1
@@ -448,7 +493,7 @@ def ensure_articles(db: DBSession, candidates: list[Candidate]) -> dict[int, Sto
                     prev_close=c.prev_close, market_pct=market_pct,
                 ))
         out[c.ticker.id] = row
-    return out
+    return StoryPlan(out, skipped)
 
 
 def wait_for(db: DBSession, articles: list[StockArticle], timeout_s: float) -> None:
@@ -489,8 +534,9 @@ def _view(
         .order_by(DailyClose.date.desc())
         .limit(_TREND_DAYS - 1)
     ).scalars().all()))
-    as_of = (article.completed_at or article.created_at).replace(
-        tzinfo=timezone.utc).astimezone(_ET)
+    # Already aware UTC (`UTCDateTime`), so this is a straight conversion —
+    # it is the "as of 10:02 AM ET" line a parent reads in the email.
+    as_of = (article.completed_at or article.created_at).astimezone(_ET)
     ticker = db.get(Ticker, article.ticker_id)
     return render.StoryView(
         symbol=ticker.symbol if ticker else "",
@@ -526,46 +572,151 @@ def _html(intro: str, block: str, user: User) -> str:
     )
 
 
+@dataclass
+class KidBlock:
+    """The kids' part of one email, and why it is what it is.
+
+    `text`/`html` are None when there was nothing to show, which from the
+    family's side is indistinguishable from a plain price alert — so
+    `outcome` always says which of the dozen reasons produced it.
+    """
+
+    text: str | None
+    html: str | None
+    pending: bool
+    outcome: delivery.StoryOutcome
+
+
+def _story_outcome(
+    db: DBSession, article: StockArticle, ages: list[str],
+) -> tuple[render.StoryView | None, delivery.StoryOutcome]:
+    """The renderable view of a finished story, plus what to record.
+
+    Split out of `kid_block` because the mapping from story status to reason
+    is the part worth reading on its own: five statuses, and only one of
+    them is "the family got a story".
+    """
+    symbol = _symbol(db, article)
+    view = _view(db, article, ages)
+    if view is not None:
+        # `versions_for` falls back to the nearest age when the chosen one
+        # was dropped by a safety check. The parent can't see that happened.
+        available = {v.age_group for v in view.story.versions}
+        sent = render.versions_for(view.story, ages)
+        sent_group = sent[0].age_group if sent else None
+        substituted = bool(sent_group) and not (set(ages) & available)
+        return view, delivery.StoryOutcome(
+            state=delivery.STATE_STORY,
+            reason="age_substituted" if substituted else "ready",
+            detail=(
+                f"{symbol}: no story for ages {', '.join(ages)}, sent the ages "
+                f"{sent_group} version instead."
+                if substituted else
+                f"{symbol}: story sent for ages {sent_group}."
+            ),
+            article_id=article.id,
+            age_group=ages[0] if ages else None,
+            age_group_sent=sent_group,
+        )
+    if article.status == "ready":
+        return None, delivery.StoryOutcome(
+            state=delivery.STATE_NONE, reason="content_unreadable",
+            detail=f"{symbol}: story row {article.id} is ready but its content "
+                   "could not be parsed, so nothing was rendered.",
+            article_id=article.id,
+        )
+    if article.status == "pending":
+        return None, delivery.StoryOutcome(
+            state=delivery.STATE_PENDING, reason="still_generating",
+            detail=f"{symbol}: story was still being written when the email had to go.",
+            article_id=article.id,
+        )
+    if moved_with_market(article.move_pct, article.market_pct):
+        return None, delivery.StoryOutcome(
+            state=delivery.STATE_MARKET_DAY, reason="market_day",
+            detail=f"{symbol} moved {article.move_pct:+.2f}% with the market "
+                   f"({article.market_pct:+.2f}%), so the whole-market note was sent.",
+            article_id=article.id,
+        )
+    if article.status == "no_clear_cause":
+        return None, delivery.StoryOutcome(
+            state=delivery.STATE_NONE, reason="no_clear_cause",
+            detail=f"{symbol} moved {article.move_pct:+.2f}% but research found no cause "
+                   "it could verify, so the email carried nothing for kids.",
+            article_id=article.id,
+        )
+    return None, delivery.StoryOutcome(
+        state=delivery.STATE_NONE, reason="generation_failed",
+        detail=f"{symbol}: generation failed ({article.error or 'no error recorded'}).",
+        article_id=article.id,
+    )
+
+
 def kid_block(
     db: DBSession, user: User, article: StockArticle | None,
     small_move: tuple[Ticker, float] | None = None,
-) -> tuple[str, str, bool] | None:
-    """The kids' part of an email as (text, html, still_pending): the story
-    in the user's age groups, the fixed small-move note, the fixed
-    "whole-market day" note (no story, but the stock moved with the S&P
-    500), or a "still looking" note. None if there's nothing to show. `small_move` is
-    (ticker, move %) for a move under the story bar. `still_pending` means
-    the email promised a follow-up, so the caller must record one."""
+    skipped: delivery.StoryOutcome | None = None,
+) -> KidBlock:
+    """The kids' part of an email: the story in the user's age groups, the
+    fixed small-move note, the fixed "whole-market day" note (no story, but
+    the stock moved with the S&P 500), or a "still looking" note.
+
+    `small_move` is (ticker, move %) for a move under the story bar.
+    `skipped` is the reason `ensure_articles` gave for there being no story
+    at all, so a missing block is still explained. `pending` means the email
+    promised a follow-up, so the caller must record one."""
+    ages = get_age_groups(db, user.id)
     if small_move is not None:
         ticker, move_pct = small_move
-        m = render.SmallMove(ticker.symbol, move_pct, story_bar_pct(ticker),
-                             get_age_groups(db, user.id))
-        return render.small_move_text(m), render.small_move_html(m), False
+        m = render.SmallMove(ticker.symbol, move_pct, story_bar_pct(ticker), ages)
+        return KidBlock(
+            render.small_move_text(m), render.small_move_html(m), False,
+            delivery.StoryOutcome(
+                state=delivery.STATE_SMALL_MOVE, reason="below_bar",
+                detail=f"{ticker.symbol} moved {move_pct:+.2f}%, under the "
+                       f"{story_bar_pct(ticker):.2f}% story bar, so the fixed "
+                       "small-move note was sent.",
+                age_group=ages[0] if ages else None,
+            ),
+        )
     if article is not None:
-        view = _view(db, article, get_age_groups(db, user.id))
+        view, outcome = _story_outcome(db, article, ages)
         if view is not None:
-            return render.story_text(view), render.story_html(view), False
-        if (article.status in ("no_clear_cause", "failed")
-                and moved_with_market(article.move_pct, article.market_pct)):
+            return KidBlock(render.story_text(view), render.story_html(view), False, outcome)
+        if outcome.state == delivery.STATE_MARKET_DAY:
             m = render.MarketMove(_symbol(db, article), article.move_pct,
-                                  article.market_pct, get_age_groups(db, user.id))
-            return render.market_move_text(m), render.market_move_html(m), False
-        if article.status == "pending":
+                                  article.market_pct, ages)
+            return KidBlock(
+                render.market_move_text(m), render.market_move_html(m), False, outcome,
+            )
+        if outcome.state == delivery.STATE_PENDING:
             note = render.still_looking_text(_symbol(db, article))
-            return note, f"<p>{note}</p>", True
-    return None
+            return KidBlock(note, f"<p>{note}</p>", True, outcome)
+        return KidBlock(None, None, False, outcome)
+    # Reached only when the caller asked for no story and gave no reason,
+    # which means the move was under the bar.
+    return KidBlock(None, None, False, skipped or delivery.StoryOutcome(
+        state=delivery.STATE_NONE, reason="below_bar",
+        detail="No story was requested for this move.",
+        age_group=ages[0] if ages else None,
+    ))
 
 
 def build_alert_email(
     db: DBSession, user: User, summary: str, article: StockArticle | None,
     small_move: tuple[Ticker, float] | None = None,
-) -> tuple[str, str | None, bool]:
-    """(text, html, still_pending) for one alert; see `kid_block`."""
-    block = kid_block(db, user, article, small_move)
-    if block is None:
-        return f"{summary}\n\n{_footer_text(user)}", None, False
-    text, html, pending = block
-    return f"{summary}\n\n{text}\n\n{_footer_text(user)}", _html(summary, html, user), pending
+    skipped: delivery.StoryOutcome | None = None,
+) -> tuple[str, str | None, bool, delivery.StoryOutcome]:
+    """(text, html, still_pending, outcome) for one alert; see `kid_block`."""
+    block = kid_block(db, user, article, small_move, skipped)
+    if block.text is None:
+        return f"{summary}\n\n{_footer_text(user)}", None, False, block.outcome
+    return (
+        f"{summary}\n\n{block.text}\n\n{_footer_text(user)}",
+        _html(summary, block.html, user),
+        block.pending,
+        block.outcome,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +758,7 @@ def send_waiting_followups(db: DBSession, article: StockArticle) -> int:
         return 0
     view = _view(db, article, [])
     unsubscribed = email_prefs.opted_out_user_ids(db)
+    ticker = db.get(Ticker, article.ticker_id)
     sent = 0
     for f in waiting:
         user = db.get(User, f.user_id)
@@ -616,6 +768,27 @@ def send_waiting_followups(db: DBSession, article: StockArticle) -> int:
         )
         if not deliverable:
             _claim(db, f.id, "abandoned")
+            if user is not None:
+                # The user was promised a story and will never get one. Record
+                # it here, where the reason is known, rather than leaving the
+                # dashboard to infer it from an `abandoned` follow-up row.
+                delivery.record(
+                    db, user=user, ticker=ticker, channel=delivery.CHANNEL_FOLLOWUP,
+                    trading_date=article.trading_date,
+                    outcome=delivery.StoryOutcome(
+                        state=delivery.STATE_NONE, reason="followup_abandoned",
+                        detail=(
+                            f"Promised a story for {ticker.symbol if ticker else 'this stock'} "
+                            f"and never sent one: story finished as {article.status}."
+                            if view is None else
+                            f"Promised a story for {ticker.symbol if ticker else 'this stock'} "
+                            "but the user is no longer deliverable (unsubscribed or "
+                            "unconfirmed email)."
+                        ),
+                        article_id=article.id,
+                    ),
+                )
+                db.commit()
             continue
         if not _claim(db, f.id, "sent"):
             continue
@@ -635,6 +808,17 @@ def send_waiting_followups(db: DBSession, article: StockArticle) -> int:
             headers=headers,
         )
         sent += 1
+        delivery.record(
+            db, user=user, ticker=ticker, channel=delivery.CHANNEL_FOLLOWUP,
+            trading_date=article.trading_date,
+            outcome=delivery.StoryOutcome(
+                state=delivery.STATE_STORY, reason="followup_sent",
+                detail=f"Follow-up story for {mine.symbol} sent as a reply to the alert.",
+                article_id=article.id,
+                age_group=(mine.age_groups or [None])[0],
+            ),
+        )
+        db.commit()
     return sent
 
 

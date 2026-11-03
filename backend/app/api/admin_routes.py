@@ -255,6 +255,7 @@ def get_watch(caller: Caller = Depends(admin_or_service)) -> dict:
             "not_due_yet": pending,
             "jobs": live["jobs"]["slots"],
             "stories": live["stories"]["by_status"],
+            "delivery": live["delivery"],
             "errors": live["errors"]["errors"],
         },
         "yesterday": {
@@ -268,6 +269,10 @@ def get_watch(caller: Caller = Depends(admin_or_service)) -> dict:
         },
         "storage": live["storage"],
         "config": live["config"],
+        # What every timestamp in this payload means. Served rather than
+        # assumed by the reader: the dashboard labels its clocks from this,
+        # and the agent has no other way to know.
+        "timezone": diagnostics.TIMEZONE_NOTE,
     }
 
 
@@ -300,9 +305,32 @@ def get_health_summary(admin: User = Depends(current_admin)) -> dict:
 
 @router.get("/reason-catalogue")
 def get_reason_catalogue(caller: Caller = Depends(admin_or_service)) -> dict:
-    """What each delivery reason means and what to do about it.
+    """What each delivery reason means, what might have caused it, and what
+    to do about it.
 
     Served rather than duplicated in the frontend and the agent prompt, so
-    there is one wording for every outcome.
+    there is one wording for every outcome. `reasons` is the full entry
+    including ranked causes; `help` and `remediation` are the flat views
+    kept for callers that only want a sentence.
     """
-    return {"help": diagnostics.REASON_HELP, "remediation": diagnostics.REMEDIATION}
+    from app.services import delivery
+
+    return {
+        "reasons": delivery.catalogue(),
+        "help": diagnostics.REASON_HELP,
+        "remediation": diagnostics.REMEDIATION,
+    }
+
+
+@router.get("/delivery")
+def get_delivery(
+    day: str | None = None, caller: Caller = Depends(admin_or_service),
+) -> dict:
+    """Every alert and recap sent on one day, with the recorded reason each
+    one carried a story or didn't.
+
+    Separate from `/watch` because it is per-email rather than per-day: on a
+    busy day this is hundreds of rows, and the dashboard only asks for them
+    when someone opens the card.
+    """
+    return diagnostics.delivery_report(_parse_day(day), scope=caller.scope)

@@ -57,6 +57,7 @@ from app.models import (
     utcnow,
 )
 from app.api.feedback_routes import feedback_links_html, feedback_links_text
+from app.services import delivery
 from app.services.alerts import alert_event_first_notification
 from app.services.articles import service as articles
 from app.services.articles.preferences import get_age_groups
@@ -95,7 +96,7 @@ def is_market_hours_now(now_utc: datetime | None = None) -> bool:
     back to a naive offset that's good enough for cron-bounded jobs.
     """
     if now_utc is None:
-        now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
+        now_utc = utcnow()
     elif now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
 
@@ -134,7 +135,7 @@ def _previous_day_close(db: DBSession, ticker: Ticker) -> float | None:
     The upstream fallback is suppressed in the test environment so the
     pytest suite stays hermetic (no real network calls).
     """
-    today = datetime.utcnow().date()
+    today = utcnow().date()
     row = db.execute(
         select(DailyClose)
         .where(DailyClose.ticker_id == ticker.id, DailyClose.date < today)
@@ -213,16 +214,22 @@ class _Alert:
     summary: str
 
 
-def _send_one_alert(db: DBSession, alert: _Alert, story: StockArticle | None) -> bool:
+def _send_one_alert(
+    db: DBSession, alert: _Alert, story: StockArticle | None,
+    skipped: delivery.StoryOutcome | None = None,
+) -> bool:
     """Send the email and write the NotificationLog row. True iff the
-    SMTP call didn't raise (so we should record it)."""
+    SMTP call didn't raise (so we should record it).
+
+    `skipped` is why there is no story, when `_stories_for` already knows.
+    It ends up in `delivery_outcomes` so a bare alert is never unexplained."""
     user, ticker = alert.user, alert.ticker
     subject = f"[🐵 Little Money Monkey] {ticker.symbol}"
     small_move = None
     if get_settings().ai_articles_enabled and not articles.needs_story(ticker, alert.pct):
         small_move = (ticker, alert.pct)
-    body, body_html, story_pending = articles.build_alert_email(
-        db, user, alert.summary, story, small_move=small_move,
+    body, body_html, story_pending, outcome = articles.build_alert_email(
+        db, user, alert.summary, story, small_move=small_move, skipped=skipped,
     )
     if story is not None:
         ages = get_age_groups(db, user.id)
@@ -262,6 +269,10 @@ def _send_one_alert(db: DBSession, alert: _Alert, story: StockArticle | None) ->
     )
     if story_pending and message_id is not None:
         articles.add_followup(db, story, user, message_id, subject)
+    delivery.record(
+        db, user=user, ticker=ticker, channel=delivery.CHANNEL_ALERT,
+        trading_date=articles.trading_date(), outcome=outcome,
+    )
     return True
 
 
@@ -317,42 +328,69 @@ def _detect_range_alerts(
     return alerts
 
 
-def _stories_for(db: DBSession, alerts: list[_Alert]) -> dict[int, StockArticle]:
+def _stories_for(
+    db: DBSession, alerts: list[_Alert],
+) -> tuple[dict[int, StockArticle], dict[int, delivery.StoryOutcome]]:
     """Stories (by ticker id) for stocks that moved at least the story bar,
-    after waiting up to AI_ARTICLE_WAIT_SECONDS. Empty when stories are off
-    or anything goes wrong — alerts then go out without them."""
+    after waiting up to AI_ARTICLE_WAIT_SECONDS, plus the reason for each
+    ticker that got none. Alerts go out either way — a story problem must
+    never hold up a price alert — so the reasons are the only record of why
+    an alert was bare."""
     settings = get_settings()
     if not settings.ai_articles_enabled:
-        return {}
-    candidates: dict[int, articles.Candidate] = {}
-    for a in alerts:
-        if a.prev_close and articles.needs_story(a.ticker, a.pct):
-            candidates.setdefault(
-                a.ticker.id, articles.Candidate(a.ticker, a.pct, a.price, a.prev_close),
+        return {}, {
+            a.ticker.id: delivery.StoryOutcome(
+                state=delivery.STATE_NONE, reason="ai_disabled",
+                detail=f"AI_ARTICLES_ENABLED is false, so {a.ticker.symbol} "
+                       f"({a.pct:+.2f}%) got a price-only alert.",
             )
+            for a in alerts
+        }
+    candidates: dict[int, articles.Candidate] = {}
+    skipped: dict[int, delivery.StoryOutcome] = {}
+    for a in alerts:
+        if not articles.needs_story(a.ticker, a.pct):
+            continue  # the small-move note covers these; see `_send_one_alert`
+        if not a.prev_close:
+            skipped[a.ticker.id] = delivery.StoryOutcome(
+                state=delivery.STATE_NONE, reason="no_prev_close",
+                detail=f"{a.ticker.symbol} has no previous trading day's close, which the "
+                       "story step needs to describe the move.",
+            )
+            continue
+        candidates.setdefault(
+            a.ticker.id, articles.Candidate(a.ticker, a.pct, a.price, a.prev_close),
+        )
     if not candidates:
-        return {}
+        return {}, skipped
     try:
-        stories = articles.ensure_articles(db, list(candidates.values()))
-        articles.wait_for(db, list(stories.values()), settings.ai_article_wait_seconds)
-        return stories
+        plan = articles.ensure_articles(db, list(candidates.values()))
+        articles.wait_for(db, list(plan.stories.values()), settings.ai_article_wait_seconds)
+        return plan.stories, {**skipped, **plan.skipped}
     except Exception as e:  # noqa: BLE001
         log.warning("Stories unavailable this run: %s", e)
         db.rollback()
-        return {}
+        for tid in candidates:
+            skipped[tid] = delivery.StoryOutcome(
+                state=delivery.STATE_NONE, reason="generation_error",
+                detail=f"The story step raised before any story could be attached: {e}",
+            )
+        return {}, skipped
 
 
 def _send_alerts(
     db: DBSession, alerts: list[_Alert], stories: dict[int, StockArticle],
+    skipped: dict[int, delivery.StoryOutcome] | None = None,
 ) -> tuple[int, list[tuple[User, str, str, str]]]:
     """Returns (#sent, [(user, symbol, event, summary) for first-ever notifications])."""
+    skipped = skipped or {}
     users_with_history: set[int] = {
         uid for (uid,) in db.execute(select(NotificationLog.user_id).distinct()).all()
     }
     sent = 0
     first_events: list[tuple[User, str, str, str]] = []
     for a in alerts:
-        if not _send_one_alert(db, a, stories.get(a.ticker.id)):
+        if not _send_one_alert(db, a, stories.get(a.ticker.id), skipped.get(a.ticker.id)):
             continue
         sent += 1
         if a.user.id not in users_with_history:
@@ -437,8 +475,8 @@ def run_intraday_capture(
                 prev_day_close=prev_day_close, captured_at=now,
             ))
 
-        stories = _stories_for(db, alerts)
-        total_sent, first_events_all = _send_alerts(db, alerts, stories)
+        stories, story_skips = _stories_for(db, alerts)
+        total_sent, first_events_all = _send_alerts(db, alerts, stories, story_skips)
         db.commit()
         # A story that finished just after the wait found no follow-ups to
         # send (they were committed above), so send them now.
