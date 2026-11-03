@@ -26,6 +26,7 @@ from app.api import (
     data_lens_routes,
     feedback_routes,
     money_ideas_routes,
+    root_cause_routes,
     rules_routes,
     tickers_routes,
     trends_routes,
@@ -221,6 +222,7 @@ def create_app() -> FastAPI:
     app.include_router(client_logs.router)
     app.include_router(admin_routes.router)
     app.include_router(data_lens_routes.router)
+    app.include_router(root_cause_routes.router)
     return app
 
 

@@ -90,8 +90,15 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
-def create(**kwargs: Any):
-    model = get_settings().model_for("anthropic")
+def create(model: str | None = None, **kwargs: Any):
+    """One Anthropic call, with the shared timeout, retries and prompt cache.
+
+    `model` overrides the configured story model. The stories never pass it —
+    their model is a setting — but Root Cause lets the admin pick one per
+    question, and routing that through here keeps a single client rather
+    than a second one with its own timeout and retry policy.
+    """
+    model = model or get_settings().model_for("anthropic")
     if model in _FALLBACK_MODELS:
         kwargs.update(betas=[_FALLBACK_BETA], fallbacks="default")
     return _get_client().beta.messages.create(

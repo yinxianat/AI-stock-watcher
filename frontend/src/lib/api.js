@@ -147,7 +147,13 @@ export const api = {
   dataLensSummarize: (sql, limit, opts) =>
     request('/admin/data-lens/summarize',
       { method: 'POST', body: { sql, limit }, auth: true, timeoutMs: 120000, ...opts }),
-
+  // Root Cause — ask why something is happening in production.
+  // Two model calls over a large evidence pack, so the ceiling is generous:
+  // giving up early would replace a real answer with "took too long".
+  rootCauseModels: (opts) => request('/admin/root-cause/models', { auth: true, ...opts }),
+  rootCauseAsk: (question, model, opts) =>
+    request('/admin/root-cause/ask',
+      { method: 'POST', body: { question, model }, auth: true, timeoutMs: 180000, ...opts }),
   // feedback
   rateFeedback: (token) => request('/feedback/rate', { method: 'POST', body: { token } }),
   updateFeedback: (content_type, content_id, rating) =>
