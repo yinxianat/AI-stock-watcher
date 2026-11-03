@@ -308,16 +308,40 @@ def test_missed_recap_reports_empty_watchlist(db_session):
     assert miss["reason"] == "no_watchlist"
 
 
-def test_eligible_user_with_no_recap_is_unexplained(db_session):
-    """A confirmed user who watches tickers but got no recap is the case
-    that needs a human: no gate explains it."""
+def test_a_miss_with_no_recap_run_blames_the_job_not_the_user(db_session):
+    """A confirmed user watching tickers who got no recap, on a day the job
+    never ran. The honest answer is "the job never ran" — reported once,
+    from job_runs — rather than per-user head-scratching."""
     u = _user(db_session, "should@example.com")
     t = _ticker(db_session)
     db_session.add(WatchlistItem(user_id=u.id, ticker_id=t.id))
     db_session.commit()
     rep = diagnostics.delivery_report(DAY, db_session)
     miss = next(m for m in rep["recap_missed"] if m["user"] == "should@example.com")
+    assert miss["reason"] == "recap_job_missing"
+    assert "No watchlist_recap run is recorded" in miss["detail"]
+    assert rep["recap_unexplained"] == 0
+
+
+def test_a_miss_while_the_job_ran_says_what_the_job_did(db_session):
+    """The genuine bug case. It stays "unexplained", but the detail carries
+    the run's status, time and count, which is the first thing anyone would
+    go and look up."""
+    u = _user(db_session, "should@example.com")
+    t = _ticker(db_session)
+    db_session.add(WatchlistItem(user_id=u.id, ticker_id=t.id))
+    db_session.add(JobRun(
+        job_name="watchlist_recap", status="SUCCESS",
+        started_at=datetime(2026, 11, 2, 21, 30, tzinfo=timezone.utc),
+        duration_seconds=2.0, result_summary="day=2026-11-02, emails_sent=0",
+    ))
+    db_session.commit()
+    rep = diagnostics.delivery_report(DAY, db_session)
+    miss = next(m for m in rep["recap_missed"] if m["user"] == "should@example.com")
     assert miss["reason"] == "unexplained"
+    assert "watchlist_recap ran at" in miss["detail"]
+    assert "SUCCESS" in miss["detail"]
+    assert "emails_sent=0" in miss["detail"]
     assert rep["recap_unexplained"] == 1
 
 

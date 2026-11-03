@@ -239,11 +239,14 @@ def _stories(
     except Exception as e:  # noqa: BLE001
         log.warning("Recap: stories unavailable: %s", e)
         db.rollback()
+        etype = type(e).__name__
         return {}, {
             tid: delivery.StoryOutcome(
                 state=delivery.STATE_NONE, reason="generation_error",
-                detail=f"The recap's story step raised before any story could be "
-                       f"attached: {e}",
+                detail=(
+                    f"The recap's story step raised {etype} before any story "
+                    f"could be attached: {e}"
+                ),
             )
             for tid in candidates
         }
@@ -473,6 +476,22 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
         send_email(user.notify_email, subject, body, body_html=html, headers=headers)
     except Exception as e:  # pragma: no cover
         log.warning("Recap email failed for user=%d: %s", user.id, e)
+        # Recorded, not just logged: a failed send is the one case where the
+        # user is owed an email, nothing in the database says so, and the
+        # dashboard would otherwise call it unexplained.
+        delivery.record(
+            db, user=user, ticker=top.ticker, channel=delivery.CHANNEL_RECAP,
+            trading_date=day,
+            outcome=delivery.StoryOutcome(
+                state=delivery.STATE_NONE, reason="send_failed",
+                detail=f"The recap for {top.ticker.symbol} was built but SMTP refused "
+                       f"it: {e}",
+            ),
+        )
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001 - never mask the send failure
+            db.rollback()
         return False
     db.add(RecapSend(user_id=user.id, trading_date=day))
     money_ideas.record(db, user.id, idea, day)
@@ -587,6 +606,18 @@ def _send_starter_recap(
                    headers=email_prefs.alert_email_headers(user))
     except Exception as e:  # pragma: no cover
         log.warning("Starter recap failed for user=%d: %s", user.id, e)
+        delivery.record(
+            db, user=user, ticker=None, channel=delivery.CHANNEL_RECAP,
+            trading_date=day,
+            outcome=delivery.StoryOutcome(
+                state=delivery.STATE_NONE, reason="send_failed",
+                detail=f"The starter recap was built but SMTP refused it: {e}",
+            ),
+        )
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
         return False
     db.add(RecapSend(user_id=user.id, trading_date=day))
     money_ideas.record(db, user.id, idea, day)
@@ -629,23 +660,93 @@ def run_watchlist_recap(db: DBSession | None = None) -> int:
         for user_moves in watch.values():
             user_moves.sort(key=lambda m: abs(m.pct), reverse=True)
 
-        users = [u for u in users if watch.get(u.id)]
+        # Users whose watchlist tickers all lack prices for this day used to
+        # vanish silently here, and the dashboard could only report "eligible
+        # but no gate explains it". The gate is this line, so it says so.
+        priced = [u for u in users if watch.get(u.id)]
+        for u in users:
+            if watch.get(u.id):
+                continue
+            symbols = db.execute(
+                select(Ticker.symbol)
+                .join(WatchlistItem, WatchlistItem.ticker_id == Ticker.id)
+                .where(WatchlistItem.user_id == u.id)
+            ).scalars().all()
+            delivery.record(
+                db, user=u, ticker=None, channel=delivery.CHANNEL_RECAP,
+                trading_date=day,
+                outcome=delivery.StoryOutcome(
+                    state=delivery.STATE_NONE, reason="no_prices",
+                    detail=(
+                        f"No recap sent: none of this user's {len(symbols)} watched "
+                        f"ticker(s) ({', '.join(symbols) or 'none'}) had a price for "
+                        f"{day}, so there was nothing to report."
+                    ),
+                ),
+            )
+        db.commit()
+        users = priced
         tops = {watch[u.id][0].ticker.id: watch[u.id][0] for u in users}
         stories, story_skips = _stories(db, list(tops.values()))
         market_pct = _market_pct(db, day)
+        log.info(
+            "Recap %s: %d user(s) to send, %d stories ready, %d story skips: %s",
+            day, len(users), len(stories),
+            len(story_skips),
+            "; ".join(f"{k}: {v.reason}" for k, v in story_skips.items()) or "none",
+        )
 
         sent = 0
         for user in users:
-            if _send_recap(db, user, watch[user.id], market_pct, stories, day, moves,
-                           story_skips):
-                sent += 1
+            try:
+                if _send_recap(db, user, watch[user.id], market_pct, stories, day, moves,
+                               story_skips):
+                    sent += 1
+            except Exception as e:  # noqa: BLE001 — one user's crash must not skip everyone after them
+                log.warning("Recap crashed for user=%d: %s: %s", user.id, type(e).__name__, e)
+                db.rollback()
+                top = watch[user.id][0]
+                delivery.record(
+                    db, user=user, ticker=top.ticker, channel=delivery.CHANNEL_RECAP,
+                    trading_date=day,
+                    outcome=delivery.StoryOutcome(
+                        state=delivery.STATE_NONE, reason="send_failed",
+                        detail=(
+                            f"The recap for {top.ticker.symbol} raised "
+                            f"{type(e).__name__} while building or sending: {e}"
+                        ),
+                    ),
+                )
+                try:
+                    db.commit()
+                except Exception:  # noqa: BLE001
+                    db.rollback()
 
         # Users with an empty watchlist get the market-only version, so they
         # still hear from us and get the day's money idea.
         starter_sent = 0
         for user in _starter_recipients(db, day):
-            if _send_starter_recap(db, user, market_pct, day):
-                starter_sent += 1
+            try:
+                if _send_starter_recap(db, user, market_pct, day):
+                    starter_sent += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning("Starter recap crashed for user=%d: %s: %s", user.id, type(e).__name__, e)
+                db.rollback()
+                delivery.record(
+                    db, user=user, ticker=None, channel=delivery.CHANNEL_RECAP,
+                    trading_date=day,
+                    outcome=delivery.StoryOutcome(
+                        state=delivery.STATE_NONE, reason="send_failed",
+                        detail=(
+                            f"The starter recap raised {type(e).__name__} "
+                            f"while building or sending: {e}"
+                        ),
+                    ),
+                )
+                try:
+                    db.commit()
+                except Exception:  # noqa: BLE001
+                    db.rollback()
         sent += starter_sent
         # A story that finished just after the wait found no follow-ups to
         # send (they were committed above), so send them now.

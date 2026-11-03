@@ -8,6 +8,7 @@ our own template, from our own data).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 from urllib.parse import urlsplit
 
@@ -52,6 +53,36 @@ def site_root_url(url: str) -> str:
     return f"https://{host}" if host else url
 
 
+@dataclass(frozen=True)
+class DroppedFact:
+    """One fact that failed a check, and which check it was.
+
+    This used to be a bare `continue`. The monitoring dashboard was then
+    left telling an admin that validation "may have" dropped the facts,
+    offering three possibilities, when this function knew exactly which
+    rule fired and on what. Carrying the rule out costs nothing and turns a
+    guess into a fact.
+    """
+
+    fact_id: str
+    rule: str
+    detail: str
+
+
+@dataclass
+class FactCheck:
+    """The surviving facts, and why each of the others went."""
+
+    kept: list[Fact]
+    dropped: list[DroppedFact]
+
+    def rule_counts(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for d in self.dropped:
+            out[d.rule] = out.get(d.rule, 0) + 1
+        return out
+
+
 def validate_facts(
     facts: list[Fact],
     *,
@@ -59,23 +90,47 @@ def validate_facts(
     allowed_domains: list[str],
     today: date,
     max_age_days: int,
-) -> list[Fact]:
-    """Keep only facts that can be trusted to be real, relevant and recent."""
+) -> FactCheck:
+    """Keep only facts that can be trusted to be real, relevant and recent.
+
+    Returns the kept facts and a record of every rejection, so a story that
+    ends up with nothing can say which check emptied it.
+    """
     seen = {normalize_url(u) for u in seen_urls}
     oldest = today - timedelta(days=max_age_days)
     kept: list[Fact] = []
+    dropped: list[DroppedFact] = []
+
+    def drop(fact: Fact, rule: str, detail: str) -> None:
+        dropped.append(DroppedFact(fact_id=fact.id, rule=rule, detail=detail))
+
     for fact in facts:
         if not fact.claim.strip() or not fact.quote.strip():
+            drop(fact, "empty_claim_or_quote", "the claim or the supporting quote was blank")
             continue
         if not is_allowed_url(fact.source_url, allowed_domains):
+            host = urlsplit(fact.source_url.strip()).hostname or fact.source_url
+            drop(fact, "domain_not_allowed",
+                 f"{host} is not in AI_NEWS_DOMAINS (or the link was not https)")
             continue
         if normalize_url(fact.source_url) not in seen:
+            drop(fact, "url_not_in_search_results",
+                 f"{fact.source_url} was never returned by the search — the model "
+                 "supplied the link itself")
             continue
         # Undated pages can't be shown to be about today's move.
-        if fact.published is None or not (oldest <= fact.published <= today + timedelta(days=1)):
+        if fact.published is None:
+            drop(fact, "undated",
+                 f"{fact.source_name} gave no publication date, so it cannot be tied "
+                 "to today's move")
+            continue
+        if not (oldest <= fact.published <= today + timedelta(days=1)):
+            drop(fact, "outside_date_window",
+                 f"published {fact.published}, outside the {max_age_days}-day window "
+                 f"ending {today}")
             continue
         kept.append(fact)
-    return kept
+    return FactCheck(kept=kept, dropped=dropped)
 
 
 def shared_problems(story: Story, facts: list[Fact]) -> list[str]:
