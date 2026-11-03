@@ -513,6 +513,17 @@ def test_the_schema_endpoint_describes_every_table(client, admin_headers):
     assert all(t["purpose"] for t in body["tables"])
 
 
+def test_the_schema_endpoint_states_the_row_cap(client, admin_headers):
+    """The console shows the ceiling before the first query is run.
+
+    Pinned by a test because the alternative is the frontend keeping its own
+    copy of the default, which is then wrong for anyone who raises it.
+    """
+    body = client.get("/admin/data-lens/schema", headers=admin_headers).json()
+    assert body["limits"]["max_rows"] == get_settings().data_lens_max_rows
+    assert body["limits"]["timeout_ms"] == get_settings().data_lens_timeout_ms
+
+
 def test_the_saved_queries_endpoint_is_grouped(client, admin_headers):
     body = client.get("/admin/data-lens/queries", headers=admin_headers).json()
     assert body["count"] > 10

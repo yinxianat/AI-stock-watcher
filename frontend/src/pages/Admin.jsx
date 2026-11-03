@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Link, Navigate } from 'react-router-dom';
 import { api, getToken } from '../lib/api.js';
 import { logError } from '../lib/log.js';
 
@@ -418,6 +418,10 @@ export default function Admin() {
             {watch.timezone.stored}. Dates are Eastern calendar days.
           </p>
         )}
+        <p className="muted" style={{ margin: '8px 0 0', fontSize: 13 }}>
+          A question this page doesn't answer? Ask the database directly in{' '}
+          <Link to="/admin/data-lens">Data Lens</Link>.
+        </p>
       </div>
 
       {/* Today — urgent. Separated from yesterday on purpose: mixing them

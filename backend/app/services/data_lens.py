@@ -447,9 +447,16 @@ def schema_catalogue() -> dict:
             "time_column": note.time_column if note else None,
             "columns": cols[name],
         })
+    settings = get_settings()
     return {
         "tables": tables,
         "blocked_columns": sorted(BLOCKED_COLUMNS),
+        # Served here as well as on a result, so the console can show the
+        # real ceiling before the first query instead of guessing at one.
+        "limits": {
+            "max_rows": settings.data_lens_max_rows,
+            "timeout_ms": settings.data_lens_timeout_ms,
+        },
         "note": (
             "Read-only. Every query runs in a transaction the database itself "
             "refuses writes in, and is rolled back afterwards."

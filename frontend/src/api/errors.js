@@ -60,6 +60,10 @@ export class ValidationError extends ApiError {
       "The information you entered isn't valid. Please check and try again.";
     super(defaultMessage, { status: 422, path, method });
     this.name = "ValidationError";
+    // Kept on `detail` as well as `logDetail` so a caller can read a
+    // structured rejection. Data Lens returns {error, hint} and the hint is
+    // the half that teaches — losing it leaves only "that isn't valid".
+    this.detail = detail;
     this.serverMessage = message;
     this.logDetail = detail;
   }

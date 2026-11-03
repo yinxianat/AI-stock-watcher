@@ -15,6 +15,7 @@ import Help from './pages/Help.jsx';
 import Feedback from './pages/Feedback.jsx';
 import MoneyIdeas from './pages/MoneyIdeas.jsx';
 import Admin from './pages/Admin.jsx';
+import DataLens from './pages/DataLens.jsx';
 
 function RequireAuth({ children }) {
   return getToken() ? children : <Navigate to="/" replace />;
@@ -43,6 +44,7 @@ function Header() {
             <Link to="/money-ideas">Money Ideas</Link>
             <Link to="/settings">Settings</Link>
             {isAdmin && <Link to="/admin">Admin</Link>}
+            {isAdmin && <Link to="/admin/data-lens">Data Lens</Link>}
             <Link to="/help">Help</Link>
             <button
               type="button"
@@ -92,6 +94,7 @@ export default function App() {
         <Route path="/settings" element={<Settings />} />
         <Route path="/money-ideas" element={<MoneyIdeas />} />
         <Route path="/admin" element={<RequireAuth><Admin /></RequireAuth>} />
+        <Route path="/admin/data-lens" element={<RequireAuth><DataLens /></RequireAuth>} />
         <Route path="/feedback" element={<Feedback />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

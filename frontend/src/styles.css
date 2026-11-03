@@ -353,3 +353,192 @@ button.link-button:disabled:hover { background: none; color: var(--muted); text-
 
 /* "Did you mean …?" under an email input */
 .hint { margin: 6px 0 0; font-size: 0.9em; color: var(--muted); }
+
+/* ---------- Data Lens (admin SQL console) ---------- */
+/* Wider than the rest of the app: a result grid with twelve columns is the
+   normal case here, and the alternative to width is horizontal scrolling on
+   every query. */
+.container.lens { max-width: 1440px; }
+
+.dl-layout { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
+/* One column on a narrow screen, with the editor first — the sidebars are
+   reference material and belong below the thing you came to use. */
+@media (max-width: 900px) {
+  .dl-layout { grid-template-columns: 1fr; }
+  .dl-main { order: -1; }
+}
+.dl-side .card, .dl-main .card { margin-bottom: 16px; }
+.dl-side-title { margin: 0 0 2px; font-size: 14px; }
+
+/* The query box. Monospace and a fixed tab size so the saved queries line
+   up the way they were written. */
+.sql-editor { position: relative; }
+.sql-input {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  tab-size: 2;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+.sql-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* Completion menu. Anchored to the box rather than the caret: tracking the
+   caret in a textarea needs a mirrored element and gets the position wrong
+   on wrapped lines, and a menu that is merely nearby is no harder to read. */
+.sql-complete {
+  position: absolute;
+  z-index: 20;
+  left: 12px;
+  right: 12px;
+  bottom: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+}
+.sql-complete li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.sql-complete li.active { background: var(--accent-2); }
+.sql-kind {
+  flex: 0 0 16px;
+  text-align: center;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--bg);
+  background: var(--muted);
+}
+.sql-kind-table { background: var(--ok); }
+.sql-kind-column { background: var(--accent); }
+.sql-kind-keyword { background: var(--muted); }
+.sql-label { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.sql-detail {
+  color: var(--muted);
+  font-size: 11.5px;
+  margin-left: auto;
+  padding-left: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 55%;
+}
+.sql-complete li.active .sql-detail { color: var(--text); }
+
+.dl-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.dl-toolbar label.dl-limit-label { margin: 0 0 0 auto; }
+.dl-limit { width: 90px; }
+.dl-shortcut { font-size: 12px; }
+.dl-help { font-size: 12px; margin: 8px 0 0; }
+.dl-help code, .dl-note code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+/* A rejection is a teaching moment, so it gets the warning colour rather
+   than the error colour: nothing is broken, the query just didn't run. */
+.dl-rejected { border-left: 3px solid #f5c451; }
+.dl-rejected-error {
+  margin: 6px 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
+
+.dl-result-head { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; margin-bottom: 10px; }
+.dl-note { font-size: 12.5px; margin: 0 0 8px; }
+.dl-grid-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+.dl-grid { font-size: 12.5px; }
+.dl-grid th, .dl-grid td {
+  padding: 5px 10px;
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  /* A cell wide enough to push every other column off the screen is worse
+     than a truncated one; the full value is a click away in the copy. */
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dl-grid th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  font-family: inherit;
+}
+.dl-grid tbody tr:hover { background: rgba(79, 158, 255, 0.07); }
+.dl-rownum { color: var(--muted); text-align: right; width: 1%; }
+/* Distinguishable from the string "null", which is a different fact. */
+.dl-null { color: var(--muted); font-style: italic; }
+.dl-pager { display: flex; gap: 12px; align-items: center; justify-content: center; margin-top: 12px; }
+.dl-pager button { padding: 4px 10px; }
+.dl-tz { font-size: 12px; margin: 10px 0 0; }
+
+.dl-category { border-top: 1px solid var(--border); padding: 6px 0; }
+.dl-category:first-of-type { border-top: none; }
+.dl-category-head { margin: 0; font-weight: 600; font-size: 13px; text-align: left; }
+.dl-saved-list { list-style: none; margin: 4px 0 0; padding: 0; }
+.dl-saved-list > li { padding: 6px 0 6px 14px; }
+.dl-saved { margin: 0; font-size: 13px; text-align: left; }
+.dl-saved-question { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+.dl-saved-teaches { margin: 2px 0 0; font-size: 11.5px; color: var(--muted); font-style: italic; }
+
+.dl-tables { list-style: none; margin: 0; padding: 0; max-height: 540px; overflow-y: auto; }
+.dl-table { border-top: 1px solid var(--border); padding: 4px 0; }
+.dl-table:first-child { border-top: none; }
+.dl-table-head { display: flex; align-items: baseline; justify-content: space-between; }
+.dl-table-head .link-button {
+  margin: 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  text-align: left;
+}
+.dl-preview { font-family: inherit !important; font-size: 11.5px !important; color: var(--muted) !important; }
+.dl-table-body { padding: 4px 0 8px 14px; font-size: 12px; }
+.dl-table-body p { margin: 2px 0; }
+.dl-columns { list-style: none; margin: 6px 0 0; padding: 0; }
+.dl-columns li { display: flex; gap: 8px; align-items: baseline; }
+.dl-columns .link-button {
+  margin: 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+}
+.dl-coltype { color: var(--muted); font-size: 11px; }
+
+.dl-history { list-style: none; margin: 0; padding: 0; }
+.dl-history li {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  border-top: 1px solid var(--border);
+  padding: 5px 0;
+}
+.dl-history li:first-child { border-top: none; }
+.dl-history-sql {
+  margin: 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dl-history li .muted { font-size: 11.5px; white-space: nowrap; }

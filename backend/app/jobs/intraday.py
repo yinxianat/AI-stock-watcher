@@ -126,11 +126,18 @@ def is_market_hours_now(now_utc: datetime | None = None) -> bool:
 
 
 def _previous_day_close(db: DBSession, ticker: Ticker) -> float | None:
-    """Most recent DailyClose strictly before today's date for `ticker`.
+    """The previous trading day's close for `ticker`, or None.
 
-    Falls back to the upstream provider's previous-close if our history
-    table has nothing recent — covers the case where a user just signed up
-    and the daily ingest hasn't filled in yet. None on all failures.
+    Only a close we can still believe is the PREVIOUS trading day's counts.
+    This used to return the most recent stored row of any age, which is how
+    an alert came to say "+0.52% vs. the previous trading day's close" on a
+    day the stock was up 2%: ingest had last succeeded four days earlier, so
+    the baseline was the Friday close while the move everyone else quoted
+    was against Monday's. The arithmetic was right and the label was false.
+
+    So a stored row is used only while it is within
+    PREV_CLOSE_MAX_AGE_DAYS; beyond that we ask the provider, whose
+    previous-close field is the same one public quotes compare against.
 
     The upstream fallback is suppressed in the test environment so the
     pytest suite stays hermetic (no real network calls).
@@ -142,8 +149,19 @@ def _previous_day_close(db: DBSession, ticker: Ticker) -> float | None:
         .order_by(DailyClose.date.desc())
         .limit(1)
     ).scalar_one_or_none()
+    max_age = get_settings().prev_close_max_age_days
     if row is not None:
-        return row.close
+        age = (today - row.date).days
+        if age <= max_age:
+            return row.close
+        # Stale. Say so loudly: every alert built on this baseline would
+        # have quoted a percentage nobody else's would agree with.
+        log.warning(
+            "Stale previous close for %s: newest daily_closes row is %s (%d days "
+            "old, max %d) — asking the provider instead so the move matches a "
+            "public quote. Has the daily ingest been failing?",
+            ticker.symbol, row.date, age, max_age,
+        )
 
     if get_settings().app_env == "test":
         return None
@@ -460,6 +478,7 @@ def run_intraday_capture(
         captured = 0
         failed_symbols: list[str] = []
         captured_prices: list[str] = []  # "AAPL=$192.34" for the audit log
+        no_baseline: list[str] = []  # priced, but no trustworthy previous close
         alerts: list[_Alert] = []
         for t in tickers:
             attempted += 1
@@ -483,7 +502,16 @@ def run_intraday_capture(
             captured_prices.append(f"{t.symbol}=${price:.2f}")
 
             if prev_day_close is None or prev_day_close <= 0:
-                # No previous close to compare against yet.
+                # No baseline we trust, so no rule can be evaluated for this
+                # ticker this tick. Deliberately not silent: this is the one
+                # path that drops a ticker without any delivery_outcomes row
+                # to explain it, because no alert was ever built.
+                no_baseline.append(t.symbol)
+                log.warning(
+                    "No usable previous close for %s: skipping its rules this tick "
+                    "rather than comparing against a stale or missing baseline",
+                    t.symbol,
+                )
                 continue
             daily_pct = (price - prev_day_close) / prev_day_close * 100.0
             alerts.extend(_detect_range_alerts(
@@ -521,6 +549,8 @@ def run_intraday_capture(
         )
         if failed_symbols:
             summary += f", failed_symbols=[{', '.join(failed_symbols)}]"
+        if no_baseline:
+            summary += f", no_baseline=[{', '.join(no_baseline)}]"
         log.info("Intraday capture complete (%.2fs): %s", elapsed, summary)
 
         from app.jobs.audit import record_job_run

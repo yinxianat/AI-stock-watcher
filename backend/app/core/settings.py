@@ -163,6 +163,19 @@ class Settings(BaseSettings):
     # through Twelve Data — sign up at https://twelvedata.com (free tier:
     # 800 req/day, 8 req/min — ample for ~50 watched tickers).
     twelvedata_api_key: str = ""
+    # Client-side rate limits, requests per minute per provider. Set below
+    # each free tier's published ceiling (Finnhub 60/min, Twelve Data 8/min)
+    # so a burst can't spend the whole allowance and start collecting 429s.
+    # The jobs spread their calls across the window instead; the intraday
+    # tick is 30 minutes wide, so spacing costs no freshness — the alert
+    # compares against the previous trading day's close, not a recent tick.
+    finnhub_max_per_min: int = 50
+    twelvedata_max_per_min: int = 8
+    # How stale a stored daily close may be and still be trusted as "the
+    # previous trading day's close". 4 calendar days covers a normal
+    # weekend plus one holiday; past that we ask the provider instead of
+    # quietly comparing against a week-old price.
+    prev_close_max_age_days: int = 4
 
     # ---- AI "why it moved" stories ---------------------------------------
     # When a day-over-day PRICE_CHANGE_RANGE alert fires, an AI-written story
