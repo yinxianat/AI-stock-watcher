@@ -51,6 +51,7 @@ SERVICE_SAFE_PATHS: frozenset[str] = frozenset({
     "/admin/storage",          # table growth, retention, log-noise ratio
     "/admin/ml-corpus",        # training-data health, counts only
     "/admin/reason-catalogue",  # static help text
+    "/admin/schedule",         # job times from config, no user rows
 })
 
 # Deliberately NOT service-safe:
@@ -292,6 +293,23 @@ def get_ml_corpus(caller: Caller = Depends(admin_or_service)) -> dict:
     stories exist, how far back they stay usable, and how much human
     feedback has accumulated."""
     return diagnostics.ml_corpus_report()
+
+
+@router.get("/schedule")
+def get_schedule(request: Request, caller: Caller = Depends(admin_or_service)) -> dict:
+    """What is scheduled to run, read from configuration.
+
+    Every time comes from the setting named beside it, so this panel cannot
+    drift from `scheduler.py` the way a written-down copy would. It also
+    compares each configured time against the live APScheduler instance,
+    which is what catches the failure this endpoint exists for: changing
+    RECAP_TIME_ET in Railway does nothing until the container restarts, and
+    the only other symptom is a recap arriving at the old time while every
+    dashboard insists on the new one.
+    """
+    from app.services.diagnostics import schedule_report
+
+    return schedule_report(getattr(request.app.state, "scheduler", None))
 
 
 @router.get("/health-summary")

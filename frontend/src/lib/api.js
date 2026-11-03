@@ -124,7 +124,29 @@ export const api = {
     request(`/admin/delivery${day ? `?day=${encodeURIComponent(day)}` : ''}`,
       { auth: true, ...opts }),
   adminStorage: (opts) => request('/admin/storage', { auth: true, ...opts }),
+  // Job times, read from configuration and cross-checked against the
+  // scheduler that is actually running.
+  adminSchedule: (opts) => request('/admin/schedule', { auth: true, ...opts }),
   adminMlCorpus: (opts) => request('/admin/ml-corpus', { auth: true, ...opts }),
+
+  // Data Lens — the read-only SQL console. The SQL goes in the body, never a
+  // query string: query strings are written to proxy and access logs, and a
+  // SELECT naming someone's email address does not belong in one.
+  //
+  // The longer timeout is deliberate. The server caps a query at
+  // DATA_LENS_TIMEOUT_MS and reports what went wrong; the client giving up
+  // first would replace that explanation with "the request took too long".
+  dataLensSchema: (opts) => request('/admin/data-lens/schema', { auth: true, ...opts }),
+  dataLensQueries: (opts) => request('/admin/data-lens/queries', { auth: true, ...opts }),
+  dataLensRun: (sql, limit, opts) =>
+    request('/admin/data-lens/query',
+      { method: 'POST', body: { sql, limit }, auth: true, timeoutMs: 30000, ...opts }),
+  // Longer again: this one re-runs the query and then waits on an AI. The
+  // provider's own read timeout is 90s, so giving up sooner would turn a slow
+  // answer into a misleading "took too long".
+  dataLensSummarize: (sql, limit, opts) =>
+    request('/admin/data-lens/summarize',
+      { method: 'POST', body: { sql, limit }, auth: true, timeoutMs: 120000, ...opts }),
 
   // feedback
   rateFeedback: (token) => request('/feedback/rate', { method: 'POST', body: { token } }),

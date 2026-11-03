@@ -74,6 +74,15 @@ class Settings(BaseSettings):
     # Batch jobs
     batch_job_times_et: str = "09:35,12:30,16:05"
     batch_jobs_enabled: bool = True
+    # Log and price-history retention sweep. Off-peak by default so a long
+    # delete never overlaps a pipeline run.
+    log_cleanup_time_et: str = "03:15"  # HH:MM in US/Eastern
+    # Minute past each weekday hour that the pipeline heartbeat checks in.
+    # Deliberately not :00 — every cron on the box fires then.
+    heartbeat_minute: int = 20
+    # Self-ping interval that stops Railway sleeping the container. Longer
+    # than Railway's idle window would let the scheduler die between runs.
+    keepalive_interval_seconds: int = 300
 
     # CORS — comma-separated list of origins
     cors_origins: str = "http://localhost:5173"
@@ -104,6 +113,29 @@ class Settings(BaseSettings):
     # How long an issued service token lasts. Short on purpose — the agent
     # only needs it for the length of one run.
     service_token_ttl_minutes: int = 15
+
+    # Data Lens — the admin's read-only SQL console (app/services/data_lens.py).
+    # On by default: it cannot write, and the alternative is the admin running
+    # the same queries in Railway's console with no guard rails at all.
+    data_lens_enabled: bool = True
+    # Hard ceiling on rows returned to the browser, applied when the cursor is
+    # read rather than only as a LIMIT in the text.
+    data_lens_max_rows: int = 500
+    # Postgres statement_timeout for console queries. A careless join should
+    # fail in seconds rather than hold a connection against production.
+    data_lens_timeout_ms: int = 5000
+    # Masking email addresses out of results is the default, so a screenshot
+    # or a stolen session yields pseudonyms. The row id is always shown, which
+    # is enough to correlate against the rest of the dashboard.
+    data_lens_show_emails: bool = False
+    # Asking an AI to read a result and say what it means. Off by default
+    # because unlike the rest of the console it costs money per press, and a
+    # tool that silently bills you is not a tool you should have to opt out of.
+    data_lens_ai_enabled: bool = False
+    # Rows handed to the AI. Far below data_lens_max_rows on purpose: the
+    # whole result goes in the prompt, so this is the cost dial. A hundred
+    # rows is enough to spot a pattern and cheap enough to press repeatedly.
+    data_lens_ai_max_rows: int = 100
 
     # Logging & alerting
     alert_receiver: str = ""  # blank → falls back to smtp_username
@@ -362,6 +394,11 @@ class Settings(BaseSettings):
     @property
     def intraday_market_close(self) -> tuple[int, int]:
         h, m = self.intraday_market_close_et.split(":")
+        return int(h), int(m)
+
+    @property
+    def log_cleanup_time(self) -> tuple[int, int]:
+        h, m = self.log_cleanup_time_et.split(":")
         return int(h), int(m)
 
     @property
