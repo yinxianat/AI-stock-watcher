@@ -149,8 +149,11 @@ def test_setup_email_on_first_start_and_on_every_change(client, keys_ok, emails,
     assert len(emails) == 1
     first = emails[0]
     assert first["subject"] == "AI stories setup: ON, Gemini gemini-3.1-flash-lite, at most $0.25/day"
-    for text in ("first setup report", "Main    Gemini gemini-3.1-flash-lite: $0 (free) per story; key OK",
-                 "Backup  Anthropic claude-haiku-5-5: $0.0042 per story; key OK",
+    # "at most": the figure charges the whole search budget, and a story that
+    # finds its cause on the first search does not spend it.
+    for text in ("first setup report",
+                 "Main    Gemini gemini-3.1-flash-lite: at most $0 (free) per story; key OK",
+                 "Backup  Anthropic claude-haiku-5-5: at most $0.0042 per story; key OK",
                  "Most per day:      $0.25", "Most per month:    $5.29"):
         assert text in first["body"], text
 

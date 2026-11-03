@@ -126,14 +126,22 @@ def check_stop(response, stage: str) -> None:
         raise StoryAIError(f"{stage}: the answer was cut off")
 
 
-def _search_urls(response) -> list[str]:
-    """Every URL web search returned in this response. A failed search's
-    content is an error object, not a list."""
+def _search_results(response) -> tuple[list[str], int]:
+    """Every URL web search returned, and how many searches ran.
+
+    One `web_search_tool_result` block is one search, so counting blocks
+    counts searches. A failed search's content is an error object rather
+    than a list: it still consumed a use, so it counts here too.
+    """
     urls: list[str] = []
+    searches = 0
     for block in response.content:
-        if block.type == "web_search_tool_result" and isinstance(block.content, list):
+        if block.type != "web_search_tool_result":
+            continue
+        searches += 1
+        if isinstance(block.content, list):
             urls += [r.url for r in block.content if getattr(r, "url", None)]
-    return urls
+    return urls, searches
 
 
 def _research_from(report: dict[str, Any]) -> Research:
@@ -187,7 +195,7 @@ def research(req: ArticleRequest) -> ResearchResult:
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": prompts.research_prompt(req)},
     ]
-    usage, seen = Usage(), []
+    usage, seen, searches = Usage(), [], 0
     for _ in range(_MAX_CONTINUATIONS + 1):
         if not tools[0]["allowed_domains"]:
             raise StoryAIError("research: every site in AI_NEWS_DOMAINS blocks web search")
@@ -205,14 +213,19 @@ def research(req: ArticleRequest) -> ResearchResult:
             tools = [{**tools[0], "allowed_domains": _search_domains()}, *tools[1:]]
             continue
         usage += usage_of(response)
-        seen += _search_urls(response)
+        found_urls, ran = _search_results(response)
+        seen += found_urls
+        searches += ran
         check_stop(response, "research")
         report = next(
             (b for b in response.content if b.type == "tool_use" and b.name == _REPORT_TOOL),
             None,
         )
         if report is not None:
-            return ResearchResult(_research_from(report.input), seen_urls=seen, usage=usage)
+            return ResearchResult(
+                _research_from(report.input), seen_urls=seen, usage=usage,
+                searches_used=searches,
+            )
         messages.append({"role": "assistant", "content": response.content})
         if response.stop_reason != "pause_turn":
             # Finished without reporting. (After pause_turn the server
