@@ -637,3 +637,44 @@ button.link-button:disabled:hover { background: none; color: var(--muted); text-
 .dl-schedule .dl-wrap { white-space: normal; min-width: 220px; }
 .dl-schedule code { font-size: 11px; }
 .dl-row-warn { background: rgba(245, 196, 81, 0.1); }
+
+/* ---------- Root Cause (admin diagnostic agent) ---------- */
+.rc-input {
+  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+.rc-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.rc-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.rc-toolbar label.rc-model-label { margin: 0 0 0 auto; }
+.rc-model { width: auto; max-width: 320px; }
+.rc-shortcut { font-size: 12px; }
+.rc-price { font-size: 12px; margin: 8px 0 0; }
+
+/* Examples double as documentation: they show the shape of question this
+   answers well, which is harder to convey in a placeholder. */
+.rc-examples { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; margin-top: 12px; }
+.rc-example { margin: 0; font-size: 12.5px; text-align: left; }
+
+.rc-answer { border-left: 3px solid var(--accent); }
+.rc-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.rc-confidence { font-size: 11px; font-weight: 700; text-transform: uppercase; margin-left: auto; }
+.rc-summary { margin: 8px 0 0; font-size: 14px; }
+.rc-h { margin: 16px 0 4px; font-size: 13px; }
+.rc-fix { margin: 0; padding-left: 20px; font-size: 13.5px; }
+.rc-fix li { margin: 4px 0; }
+.rc-verify { margin: 12px 0 0; font-size: 13px; }
+.rc-evidence { margin: 0; padding-left: 20px; font-size: 12.5px; color: var(--muted); }
+.rc-meta { font-size: 11.5px; margin: 14px 0 0; }
+.rc-caveat { font-size: 11.5px; margin: 4px 0 0; font-style: italic; }
+
+.rc-error { border-left: 3px solid #f5c451; }
+.rc-error-text { margin: 6px 0; font-size: 13px; }

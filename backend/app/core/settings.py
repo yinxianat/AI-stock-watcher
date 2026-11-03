@@ -137,6 +137,21 @@ class Settings(BaseSettings):
     # rows is enough to spot a pattern and cheap enough to press repeatedly.
     data_lens_ai_max_rows: int = 100
 
+    # Root Cause — the admin's diagnostic agent (app/services/root_cause.py).
+    # Answers "why did X happen" from the day report, the logs and the
+    # source, and proposes a fix. Off by default: it costs money per question.
+    root_cause_enabled: bool = False
+    # Models the admin may pick from, cheapest first. Restricted to a list
+    # rather than free text so a typo cannot silently bill a 20x model, and
+    # so the picker can show a price beside each name.
+    root_cause_models: str = "claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5"
+    # Source files the agent may ask to read in one question, and the size
+    # of each. Both exist to bound a single answer's cost.
+    root_cause_max_files: int = 6
+    root_cause_max_file_kb: int = 40
+    # Recent WARNING+ log lines put in front of the agent.
+    root_cause_log_lines: int = 120
+
     # Logging & alerting
     alert_receiver: str = ""  # blank → falls back to smtp_username
     alerts_enabled: bool = True
@@ -289,6 +304,10 @@ class Settings(BaseSettings):
     def recap_time(self) -> tuple[int, int]:
         h, m = self.recap_time_et.split(":")
         return int(h), int(m)
+
+    @property
+    def root_cause_model_list(self) -> list[str]:
+        return [m.strip() for m in self.root_cause_models.split(",") if m.strip()]
 
     @property
     def admin_email_list(self) -> list[str]:
