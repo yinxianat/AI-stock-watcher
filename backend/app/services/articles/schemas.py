@@ -107,6 +107,11 @@ class ResearchResult:
     # URL was made up (or injected) and is dropped.
     seen_urls: list[str] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    # Searches actually run, which is not the same as the budget. Web search
+    # is billed per search performed, so AI_ARTICLE_MAX_SEARCHES is a ceiling
+    # the model is free to come in under — and without this number there is
+    # no way to tell whether raising that ceiling cost anything.
+    searches_used: int = 0
 
 
 @dataclass
@@ -137,3 +142,10 @@ class GenerationResult:
     # "Finnhub"), so a backup provider can take over. None for content
     # failures (no clear cause, safety checks).
     failed_service: str | None = None
+    # What the pipeline observed on the way to this outcome: whether
+    # research found a cause at all, how many facts it returned, which
+    # validation rule rejected each one, and which age versions were
+    # dropped and by which safety layer. Stored with the story and read
+    # back at send time so the monitoring dashboard can say WHY a family
+    # got no story instead of listing what might have happened.
+    diagnostics: dict = field(default_factory=dict)

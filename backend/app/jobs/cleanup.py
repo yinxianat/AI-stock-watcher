@@ -19,7 +19,7 @@ from sqlalchemy import delete
 
 from app.core.settings import get_settings
 from app.db.database import get_session_factory
-from app.models import InfoLog, IntradayPrice, LogEntry
+from app.models import InfoLog, IntradayPrice, LogEntry, utcnow
 from app.services.alerts import parse_lifetime
 from app.services.price_history import prune_daily_closes
 
@@ -33,7 +33,7 @@ def _prune_log_entries(session, lifetime_spec: str) -> int:
         log.error("Invalid LOG_LIFETIME=%r; skipping log_entries cleanup", lifetime_spec)
         return 0
 
-    cutoff = datetime.utcnow() - lifetime
+    cutoff = utcnow() - lifetime
     result = session.execute(delete(LogEntry).where(LogEntry.created_at < cutoff))
     session.commit()
     deleted = result.rowcount or 0
@@ -65,7 +65,7 @@ def _prune_intraday(session, lifetime_spec: str) -> int:
             lifetime_spec,
         )
         return 0
-    cutoff = datetime.utcnow() - lifetime
+    cutoff = utcnow() - lifetime
     result = session.execute(
         delete(IntradayPrice).where(IntradayPrice.captured_at < cutoff)
     )
@@ -87,7 +87,7 @@ def _prune_info_logs(session, lifetime_spec: str) -> int:
             lifetime_spec,
         )
         return 0
-    cutoff = datetime.utcnow() - lifetime
+    cutoff = utcnow() - lifetime
     result = session.execute(
         delete(InfoLog).where(InfoLog.created_at < cutoff)
     )
@@ -108,7 +108,7 @@ def _prune_job_runs(session, lifetime_spec: str) -> int:
         return 0
     from app.models import JobRun
 
-    cutoff = datetime.utcnow() - lifetime
+    cutoff = utcnow() - lifetime
     result = session.execute(
         delete(JobRun).where(JobRun.started_at < cutoff)
     )

@@ -15,20 +15,24 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.api import (
+    admin_routes,
     auth_routes,
     client_logs,
+    data_lens_routes,
     feedback_routes,
     money_ideas_routes,
+    root_cause_routes,
     rules_routes,
     tickers_routes,
     trends_routes,
     watchlist_routes,
 )
+from app.core.ratelimit import limiter
 from app.core.settings import get_settings
 from app.db.database import get_engine, get_session_factory
 from app.db.seed import seed
@@ -164,20 +168,30 @@ async def lifespan(app: FastAPI):
                 log.exception("SHUTDOWN ERROR: error stopping batch scheduler")
 
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
-
-
 def create_app() -> FastAPI:
     settings = get_settings()
+    # The interactive docs publish a complete map of the API. Useful in
+    # development, free reconnaissance on anything internet-facing. Off for
+    # every deployed environment unless API_DOCS_PUBLIC says otherwise, so a
+    # new environment is never public by default.
+    public_docs = settings.docs_are_public
     app = FastAPI(
         title="Little Money Monkey API",
         version="0.1.0",
         debug=settings.app_debug,
         lifespan=lifespan,
+        docs_url="/docs" if public_docs else None,
+        redoc_url="/redoc" if public_docs else None,
+        openapi_url="/openapi.json" if public_docs else None,
     )
-    # Rate limiting
+    # Rate limiting. `default_limits` on the Limiter do nothing on their own —
+    # SlowAPIMiddleware is what applies them to every route. Without it only
+    # routes carrying an explicit @limiter.limit are limited, which is how
+    # this was silently inert.
+    limiter.enabled = settings.rate_limit_enabled
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
 
     # CORS
     app.add_middleware(
@@ -192,7 +206,10 @@ def create_app() -> FastAPI:
     )
 
     @app.get("/healthz", tags=["meta"])
+    @limiter.exempt
     def healthz() -> dict[str, str]:
+        """Liveness probe. Exempt from rate limiting: Railway polls this and
+        a 429 would be read as the service being down."""
         return {"status": "ok"}
 
     app.include_router(auth_routes.router)
@@ -203,6 +220,9 @@ def create_app() -> FastAPI:
     app.include_router(money_ideas_routes.router)
     app.include_router(feedback_routes.router)
     app.include_router(client_logs.router)
+    app.include_router(admin_routes.router)
+    app.include_router(data_lens_routes.router)
+    app.include_router(root_cause_routes.router)
     return app
 
 

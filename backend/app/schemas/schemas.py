@@ -44,6 +44,10 @@ class UserOut(_ORM):
     email: EmailStr
     notify_email: EmailStr
     notify_email_confirmed: bool
+    # Lets the SPA decide whether to show the Admin link. Not a permission
+    # check — every /admin endpoint re-checks server-side, so a client that
+    # lies to itself about this still gets 403.
+    is_admin: bool = False
 
 
 class UpdateNotifyEmailRequest(BaseModel):

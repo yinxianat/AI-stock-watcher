@@ -1,8 +1,9 @@
+import { useEffect, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { ErrorBoundary } from 'react-error-boundary';
 import ErrorFallback from './components/ErrorFallback.jsx';
 import { logRenderError } from './lib/log.js';
-import { clearToken, getToken } from './lib/api.js';
+import { api, clearToken, getToken } from './lib/api.js';
 import Login from './pages/Login.jsx';
 import AuthCallback from './pages/AuthCallback.jsx';
 import Dashboard from './pages/Dashboard.jsx';
@@ -13,6 +14,9 @@ import Unsubscribe from './pages/Unsubscribe.jsx';
 import Help from './pages/Help.jsx';
 import Feedback from './pages/Feedback.jsx';
 import MoneyIdeas from './pages/MoneyIdeas.jsx';
+import Admin from './pages/Admin.jsx';
+import DataLens from './pages/DataLens.jsx';
+import RootCause from './pages/RootCause.jsx';
 
 function RequireAuth({ children }) {
   return getToken() ? children : <Navigate to="/" replace />;
@@ -21,6 +25,16 @@ function RequireAuth({ children }) {
 function Header() {
   const nav = useNavigate();
   const signedIn = !!getToken();
+  // Only admins see the link. This is presentation only — the endpoints
+  // re-check the role, so a client that lies to itself still gets 403.
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    if (!signedIn) {
+      setIsAdmin(false);
+      return;
+    }
+    api.me().then((m) => setIsAdmin(!!m.is_admin)).catch(() => setIsAdmin(false));
+  }, [signedIn]);
   return (
     <header className="app-header">
       <h1>🐵 Little Money Monkey</h1>
@@ -30,6 +44,9 @@ function Header() {
             <Link to="/dashboard">Dashboard</Link>
             <Link to="/money-ideas">Money Ideas</Link>
             <Link to="/settings">Settings</Link>
+            {isAdmin && <Link to="/admin">Admin</Link>}
+            {isAdmin && <Link to="/admin/data-lens">Data Lens</Link>}
+            {isAdmin && <Link to="/admin/root-cause">Root Cause</Link>}
             <Link to="/help">Help</Link>
             <button
               type="button"
@@ -78,6 +95,9 @@ export default function App() {
         <Route path="/rules/:tickerId" element={<RequireAuth><Rules /></RequireAuth>} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/money-ideas" element={<MoneyIdeas />} />
+        <Route path="/admin" element={<RequireAuth><Admin /></RequireAuth>} />
+        <Route path="/admin/data-lens" element={<RequireAuth><DataLens /></RequireAuth>} />
+        <Route path="/admin/root-cause" element={<RequireAuth><RootCause /></RequireAuth>} />
         <Route path="/feedback" element={<Feedback />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

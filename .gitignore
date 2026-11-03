@@ -56,3 +56,9 @@ coverage/
 # Vercel / Railway
 .vercel
 .railway
+
+# Ops runbook — kept locally, deliberately untracked.
+# Holds the real deployment topology and troubleshooting notes; this repo is
+# public. Removed from tracking in the commit that added this line. Earlier
+# versions remain in pushed history.
+DEPLOYMENT.md

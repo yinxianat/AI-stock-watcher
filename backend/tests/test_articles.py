@@ -145,9 +145,22 @@ def test_facts_must_be_real_allowed_and_recent():
     ]
     seen = [GOOD_URL, "https://randomblog.example/apple", "https://reuters.com.evil.example/x",
             GOOD_URL.replace("https", "http")]
-    kept = validate_facts(facts, seen_urls=seen, allowed_domains=DOMAINS,
-                          today=TODAY, max_age_days=2)
-    assert [f.id for f in kept] == ["ok"]
+    check = validate_facts(facts, seen_urls=seen, allowed_domains=DOMAINS,
+                           today=TODAY, max_age_days=2)
+    assert [f.id for f in check.kept] == ["ok"]
+    # Which rule rejected each one, not just that something did. The
+    # monitoring dashboard reports these verbatim, so a wrong label here
+    # becomes wrong advice to the admin.
+    by_id = {d.fact_id: d.rule for d in check.dropped}
+    assert by_id == {
+        "other_site": "domain_not_allowed",
+        "http": "domain_not_allowed",
+        "not_searched": "url_not_in_search_results",
+        "stale": "outside_date_window",
+        "undated": "undated",
+        "lookalike": "domain_not_allowed",
+    }
+    assert check.rule_counts()["domain_not_allowed"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1005,3 +1018,91 @@ def test_writer_sentence_limits_stay_under_the_code_check():
                       r"words in any sentence", text)
         assert m, group
         assert int(m.group(1)) < max_words and int(m.group(2)) < max_sentence, group
+
+
+# ---------------------------------------------------------------------------
+# Counting the searches a story actually used
+#
+# AI_ARTICLE_MAX_SEARCHES is a ceiling, not a quota: web search is billed per
+# search performed, and the model stops as soon as it reports. Without the
+# count there is no way to tell whether raising the ceiling cost anything,
+# which is the question an admin asks before raising it.
+# ---------------------------------------------------------------------------
+
+
+class _Block:
+    def __init__(self, type_, content=None):
+        self.type = type_
+        self.content = content
+
+
+class _Url:
+    def __init__(self, url):
+        self.url = url
+
+
+class _Response:
+    def __init__(self, content):
+        self.content = content
+
+
+def test_each_search_result_block_counts_as_one_search():
+    from app.services.articles.claude import _search_results
+
+    urls, searches = _search_results(_Response([
+        _Block("text"),
+        _Block("web_search_tool_result", [_Url("https://cnbc.com/a"), _Url("https://cnbc.com/b")]),
+        _Block("web_search_tool_result", [_Url("https://finance.yahoo.com/c")]),
+    ]))
+    assert searches == 2
+    assert urls == ["https://cnbc.com/a", "https://cnbc.com/b", "https://finance.yahoo.com/c"]
+
+
+def test_a_failed_search_still_counts():
+    """It consumed a use and was billed, so leaving it out would understate
+    the cost exactly when something is going wrong."""
+    from app.services.articles.claude import _search_results
+
+    urls, searches = _search_results(_Response([
+        _Block("web_search_tool_result", [_Url("https://cnbc.com/a")]),
+        # A failure's content is an error object, not a list.
+        _Block("web_search_tool_result", {"type": "web_search_tool_result_error"}),
+    ]))
+    assert searches == 2
+    assert urls == ["https://cnbc.com/a"]
+
+
+def test_no_searches_is_zero_not_an_error():
+    from app.services.articles.claude import _search_results
+
+    assert _search_results(_Response([_Block("text")])) == ([], 0)
+
+
+def test_the_count_reaches_the_diagnostics():
+    """`searches_used` lands beside `max_searches`, because one without the
+    other says nothing: "1" only means something next to the ceiling it
+    stopped under."""
+    def research_using_one(req):
+        return ResearchResult(
+            Research(cause_found=False, facts=[]),
+            seen_urls=[GOOD_URL],
+            searches_used=1,
+        )
+
+    result = run_pipeline(_request(), research_using_one, _writer(_story()), _reviewer())
+    assert result.diagnostics["searches_used"] == 1
+    assert result.diagnostics["max_searches"] == get_settings().ai_article_max_searches
+
+
+def test_a_story_that_stopped_early_is_visible_as_such():
+    """The whole point: a cause found on the first search costs one search,
+    not the budget, and the diagnostics have to show that or raising the
+    ceiling looks more expensive than it is."""
+    def research_using_one(req):
+        return ResearchResult(
+            Research(cause_found=True, facts=[_fact()]), seen_urls=[GOOD_URL],
+            searches_used=1,
+        )
+
+    result = run_pipeline(_request(), research_using_one, _writer(_story()), _reviewer())
+    assert result.diagnostics["searches_used"] < result.diagnostics["max_searches"]

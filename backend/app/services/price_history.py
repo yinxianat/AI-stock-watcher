@@ -182,11 +182,11 @@ def derive_snapshot_for_ticker(
 def prune_daily_closes(db: DBSession, lifetime: timedelta) -> int:
     """Delete DailyClose rows older than `lifetime`. Returns rows deleted.
 
-    Cutoff is computed from `datetime.utcnow().date()`. Idempotent.
+    Cutoff is computed from `utcnow().date()` (aware UTC). Idempotent.
     """
     from sqlalchemy import delete
 
-    cutoff = (datetime.utcnow() - lifetime).date()
+    cutoff = (utcnow() - lifetime).date()
     result = db.execute(delete(DailyClose).where(DailyClose.date < cutoff))
     db.commit()
     deleted = result.rowcount or 0

@@ -20,7 +20,13 @@ class Settings(BaseSettings):
     """
 
     # App
-    app_env: Literal["development", "production", "test"] = "development"
+    app_env: Literal["development", "uat", "production", "test"] = "development"
+    # Whether the interactive docs (/docs, /redoc, /openapi.json) are served.
+    # Unset means "follow `is_deployed`" — off on any internet-facing
+    # environment, since a complete API map is free reconnaissance. UAT can
+    # set it true deliberately when testers need the docs; production should
+    # not.
+    api_docs_public: bool | None = None
     app_debug: bool = False
     secret_key: str = Field(default="dev-only-insecure-secret-change-me", min_length=16)
     frontend_base_url: str = "http://localhost:5173"
@@ -68,9 +74,83 @@ class Settings(BaseSettings):
     # Batch jobs
     batch_job_times_et: str = "09:35,12:30,16:05"
     batch_jobs_enabled: bool = True
+    # Log and price-history retention sweep. Off-peak by default so a long
+    # delete never overlaps a pipeline run.
+    log_cleanup_time_et: str = "03:15"  # HH:MM in US/Eastern
+    # Minute past each weekday hour that the pipeline heartbeat checks in.
+    # Deliberately not :00 — every cron on the box fires then.
+    heartbeat_minute: int = 20
+    # Self-ping interval that stops Railway sleeping the container. Longer
+    # than Railway's idle window would let the scheduler die between runs.
+    keepalive_interval_seconds: int = 300
 
     # CORS — comma-separated list of origins
     cors_origins: str = "http://localhost:5173"
+
+    # Per-IP rate limiting. Off in tests, which fire far more than the
+    # default ceiling from a single address. Also an off switch for
+    # production that needs no deploy.
+    rate_limit_enabled: bool = True
+    # Sign-in links: the per-address throttle in `send_limits` is bypassed by
+    # rotating target addresses, so this per-IP cap is what actually protects
+    # the SMTP quota and stops the app mailing strangers. Loosen only if real
+    # users get blocked — a household behind one NAT shares this budget.
+    rate_limit_signin: str = "5/hour"
+
+    # Comma-separated emails that always have admin access. This is the
+    # bootstrap: it works before that person has ever signed in, and it means
+    # losing DB access can't lock everyone out of /admin. Additional admins
+    # are granted a row in `admin_roles` instead, which needs no deploy.
+    admin_emails: str = ""
+
+    # The monitoring agent's secret. It is NOT sent on every request: the
+    # agent POSTs it once per run to /admin/service-login and gets a
+    # short-lived token back, so a captured header expires in minutes
+    # instead of being valid until someone rotates this. Blank disables
+    # service access entirely (503), so a missing secret can never mean
+    # "open to everyone". Must be at least 32 characters.
+    admin_api_token: str = ""
+    # How long an issued service token lasts. Short on purpose — the agent
+    # only needs it for the length of one run.
+    service_token_ttl_minutes: int = 15
+
+    # Data Lens — the admin's read-only SQL console (app/services/data_lens.py).
+    # On by default: it cannot write, and the alternative is the admin running
+    # the same queries in Railway's console with no guard rails at all.
+    data_lens_enabled: bool = True
+    # Hard ceiling on rows returned to the browser, applied when the cursor is
+    # read rather than only as a LIMIT in the text.
+    data_lens_max_rows: int = 500
+    # Postgres statement_timeout for console queries. A careless join should
+    # fail in seconds rather than hold a connection against production.
+    data_lens_timeout_ms: int = 5000
+    # Masking email addresses out of results is the default, so a screenshot
+    # or a stolen session yields pseudonyms. The row id is always shown, which
+    # is enough to correlate against the rest of the dashboard.
+    data_lens_show_emails: bool = False
+    # Asking an AI to read a result and say what it means. Off by default
+    # because unlike the rest of the console it costs money per press, and a
+    # tool that silently bills you is not a tool you should have to opt out of.
+    data_lens_ai_enabled: bool = False
+    # Rows handed to the AI. Far below data_lens_max_rows on purpose: the
+    # whole result goes in the prompt, so this is the cost dial. A hundred
+    # rows is enough to spot a pattern and cheap enough to press repeatedly.
+    data_lens_ai_max_rows: int = 100
+
+    # Root Cause — the admin's diagnostic agent (app/services/root_cause.py).
+    # Answers "why did X happen" from the day report, the logs and the
+    # source, and proposes a fix. Off by default: it costs money per question.
+    root_cause_enabled: bool = False
+    # Models the admin may pick from, cheapest first. Restricted to a list
+    # rather than free text so a typo cannot silently bill a 20x model, and
+    # so the picker can show a price beside each name.
+    root_cause_models: str = "claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5"
+    # Source files the agent may ask to read in one question, and the size
+    # of each. Both exist to bound a single answer's cost.
+    root_cause_max_files: int = 6
+    root_cause_max_file_kb: int = 40
+    # Recent WARNING+ log lines put in front of the agent.
+    root_cause_log_lines: int = 120
 
     # Logging & alerting
     alert_receiver: str = ""  # blank → falls back to smtp_username
@@ -82,7 +162,14 @@ class Settings(BaseSettings):
 
     # Price-history retention — how long to keep DailyClose rows. Pruned daily
     # by `app.jobs.cleanup`. Same units as LOG_LIFETIME (see parse_lifetime).
-    price_history_lifetime: str = "365d"
+    #
+    # Deliberately long: these rows are the FEATURES for the planned
+    # story-generation model, and `stock_articles` (the labels) is never
+    # pruned. Shortening this below the age of the oldest story silently
+    # destroys training examples — you keep the story but lose what the
+    # price actually did. `diagnostics` flags that case as ml_data_loss.
+    # Rows are ~90 bytes, so a decade of 50 tickers is a few MB.
+    price_history_lifetime: str = "3650d"
 
     # ---- Intraday capture ----------------------------------------------------
     # Every INTRADAY_TICK_MINUTES, during US-market hours, we capture the
@@ -108,6 +195,19 @@ class Settings(BaseSettings):
     # through Twelve Data — sign up at https://twelvedata.com (free tier:
     # 800 req/day, 8 req/min — ample for ~50 watched tickers).
     twelvedata_api_key: str = ""
+    # Client-side rate limits, requests per minute per provider. Set below
+    # each free tier's published ceiling (Finnhub 60/min, Twelve Data 8/min)
+    # so a burst can't spend the whole allowance and start collecting 429s.
+    # The jobs spread their calls across the window instead; the intraday
+    # tick is 30 minutes wide, so spacing costs no freshness — the alert
+    # compares against the previous trading day's close, not a recent tick.
+    finnhub_max_per_min: int = 50
+    twelvedata_max_per_min: int = 8
+    # How stale a stored daily close may be and still be trusted as "the
+    # previous trading day's close". 4 calendar days covers a normal
+    # weekend plus one holiday; past that we ask the provider instead of
+    # quietly comparing against a week-old price.
+    prev_close_max_age_days: int = 4
 
     # ---- AI "why it moved" stories ---------------------------------------
     # When a day-over-day PRICE_CHANGE_RANGE alert fires, an AI-written story
@@ -171,6 +271,25 @@ class Settings(BaseSettings):
     ai_news_domains: str = "finance.yahoo.com,cnbc.com,cnn.com,axios.com,npr.org,techcrunch.com"
     # News older than this many days doesn't count as today's reason.
     ai_news_max_age_days: int = 2
+
+    # ---- RAG over the FDIC Money Smart curriculum -------------------------
+    # Embeddings for `app/services/rag`. Blank falls back to the offline
+    # fake embedder, so the pipeline runs and tests pass without a key —
+    # but retrieval quality is only meaningful with a real model.
+    # "local" uses model2vec on this machine: free, offline, no quota, and
+    # it installs on Python 3.14 where torch does not reliably. "voyage" is
+    # the hosted option. Embeddings are a build-time step either way, so a
+    # local model costs production nothing.
+    rag_embedding_provider: Literal["local", "voyage"] = "local"
+    rag_local_model: str = "minishlab/potion-base-8M"
+    voyage_api_key: str = ""
+    # voyage-3-lite is 512-dimensional and the cheapest; the others are
+    # 1024. Changing this needs the pgvector column re-created, since
+    # `vector(N)` is fixed-width.
+    rag_embedding_model: str = "voyage-3-lite"
+    # Chunks fed to the generator per query. Each is ~300 tokens, so 5 is
+    # ~1.5K of context — enough grounding without crowding the prompt.
+    rag_top_k: int = 5
     # Whole-market benchmark, so a story can say "most stocks fell today".
     ai_market_symbol: str = "SPY"
 
@@ -185,6 +304,15 @@ class Settings(BaseSettings):
     def recap_time(self) -> tuple[int, int]:
         h, m = self.recap_time_et.split(":")
         return int(h), int(m)
+
+    @property
+    def root_cause_model_list(self) -> list[str]:
+        return [m.strip() for m in self.root_cause_models.split(",") if m.strip()]
+
+    @property
+    def admin_email_list(self) -> list[str]:
+        """Lower-cased, so matching a login email is case-insensitive."""
+        return [e.strip().lower() for e in self.admin_emails.split(",") if e.strip()]
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -237,6 +365,37 @@ class Settings(BaseSettings):
         return [x.strip().lower() for x in self.ai_finnhub_sources.split(",") if x.strip()]
 
     @property
+    def is_deployed(self) -> bool:
+        """True on any environment reachable from the internet.
+
+        Security behaviour keys off THIS, never off `app_env != "production"`.
+        That older form is a deny-list of one: it treats every environment
+        that is not literally named "production" as a trusted laptop, so
+        adding `uat` to the Literal would silently have un-hardened it —
+        cleartext service logins, public docs, a fake embedder. An allow-list
+        fails the safe way instead: a new deployed environment must be named
+        here to be trusted, and until it is, it gets the strict path.
+        """
+        return self.app_env in ("production", "uat")
+
+    @property
+    def docs_are_public(self) -> bool:
+        """Resolved docs visibility: explicit setting, else off when deployed."""
+        if self.api_docs_public is None:
+            return not self.is_deployed
+        return self.api_docs_public
+
+    @property
+    def env_tag(self) -> str:
+        """Short label for alert subjects, e.g. "UAT".
+
+        Production returns "" so its subjects stay exactly as they are today.
+        Everything else is tagged, because an admin alert that does not say
+        which environment it came from costs more time than it saves.
+        """
+        return "" if self.app_env == "production" else self.app_env.upper()
+
+    @property
     def effective_alert_receiver(self) -> str:
         """Where admin alerts get sent. Falls back to the SMTP username."""
         return (self.alert_receiver or self.smtp_username).strip()
@@ -254,6 +413,11 @@ class Settings(BaseSettings):
     @property
     def intraday_market_close(self) -> tuple[int, int]:
         h, m = self.intraday_market_close_et.split(":")
+        return int(h), int(m)
+
+    @property
+    def log_cleanup_time(self) -> tuple[int, int]:
+        h, m = self.log_cleanup_time_et.split(":")
         return int(h), int(m)
 
     @property

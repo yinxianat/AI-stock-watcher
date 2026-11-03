@@ -1,4 +1,4 @@
-# AI Stock Watcher
+# Little Money Monkey 🐵
 
 Email alerts when the markets do something you care about. Pick stocks and
 index funds, define rules ("notify me if SPY drops more than 3%", "alert me

@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session as DBSession
 
-from app.api.deps import current_user, current_user_or_settings_token
+from app.api.deps import current_user, current_user_or_settings_token, is_admin
 from app.db.database import get_db
 from app.models import User
 from app.schemas.schemas import (
@@ -19,6 +19,7 @@ from app.schemas.schemas import (
     UpdateNotifyEmailRequest,
     UserOut,
 )
+from app.core.ratelimit import RateLimit
 from app.core.settings import get_settings
 from app.services.articles.preferences import get_age_groups, set_age_groups
 from app.services.auth import (
@@ -47,7 +48,18 @@ from app.services.signin_backfill import kickoff_signin_backfill
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/request-link", status_code=204, response_class=Response)
+# Per-IP cap on sign-in emails. The per-address throttle in `send_limits`
+# is bypassed by rotating the target address; this is what protects the
+# SMTP quota and stops the app being used to mail strangers.
+_signin_limit = RateLimit(lambda: get_settings().rate_limit_signin, "signin")
+
+
+@router.post(
+    "/request-link",
+    status_code=204,
+    response_class=Response,
+    dependencies=[Depends(_signin_limit)],
+)
 def request_link(
     payload: LoginRequest,
     background_tasks: BackgroundTasks,
@@ -102,8 +114,12 @@ def logout(
 
 
 @router.get("/me", response_model=UserOut)
-def me(user: User = Depends(current_user)) -> UserOut:
-    return UserOut.model_validate(user)
+def me(
+    user: User = Depends(current_user),
+    db: DBSession = Depends(get_db),
+) -> UserOut:
+    out = UserOut.model_validate(user)
+    return out.model_copy(update={"is_admin": is_admin(db, user)})
 
 
 @router.post("/notify-email", status_code=204, response_class=Response)

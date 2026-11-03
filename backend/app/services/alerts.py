@@ -35,7 +35,7 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.settings import get_settings
@@ -102,7 +102,7 @@ def _fingerprint(logger_name: str, message: str) -> str:
 
 
 def _recently_alerted(fp: str, window: timedelta = _DEDUP_WINDOW) -> bool:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     with _dedup_lock:
         last = _dedup_state.get(fp)
         if last is not None and now - last < window:
@@ -138,6 +138,25 @@ def _send_alert_email(
         _stderr(f"alert send failed: {e}")
 
 
+def _env_suffix() -> str:
+    """" [UAT]" on non-production environments, "" in production.
+
+    UAT and production send to the same ALERT_RECEIVER, so without this an
+    admin cannot tell which deployment an alert came from and ends up
+    investigating production for a UAT problem. Production stays untagged so
+    existing subjects, and any inbox filters built on them, do not change.
+
+    Note this is deliberately NOT part of the dedup fingerprint, which keys
+    off the logger name and message only — tagging the subject must not make
+    the same error alert twice.
+    """
+    try:
+        tag = get_settings().env_tag
+    except Exception:  # noqa: BLE001 - alerting must never raise
+        return ""
+    return f" [{tag}]" if tag else ""
+
+
 def notify_admin(
     event: str,
     subject: str,
@@ -154,7 +173,7 @@ def notify_admin(
         AlertChannel.EVENT: "[AISW EVENT]",
         AlertChannel.SUMMARY: "[AISW DAILY]",
     }[channel]
-    full_subject = f"{prefix} {subject}"
+    full_subject = f"{prefix}{_env_suffix()} {subject}"
     full_body = f"Event: {event}\n\n{body_text}"
     _send_alert_email(full_subject, full_body, body_html=body_html)
 
@@ -181,7 +200,10 @@ class EmailAlertHandler(logging.Handler):
             fp = _fingerprint(record.name, msg)
             if _recently_alerted(fp):
                 return
-            subject = f"[AISW ALERT] {record.levelname} {record.name}: {msg[:80]}"
+            subject = (
+                f"[AISW ALERT]{_env_suffix()} "
+                f"{record.levelname} {record.name}: {msg[:80]}"
+            )
             body = self._format_body(record, msg)
             _send_alert_email(subject, body)
         except Exception as e:  # noqa: BLE001
