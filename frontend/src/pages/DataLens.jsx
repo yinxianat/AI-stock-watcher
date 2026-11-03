@@ -208,7 +208,7 @@ function Schedule({ schedule }) {
           column is meaningful.
         </p>
       )}
-      <div className="dl-grid-wrap">
+      <div className="dl-grid-wrap dl-scrolls">
         <table className="dl-grid dl-schedule">
           <thead>
             <tr>
@@ -286,7 +286,7 @@ function Results({ result, page, setPage }) {
           it is the usual reason a correct query looks empty.
         </p>
       ) : (
-        <div className="dl-grid-wrap">
+        <div className="dl-grid-wrap dl-scrolls">
           <table className="dl-grid">
             <thead>
               <tr>
@@ -308,6 +308,19 @@ function Results({ result, page, setPage }) {
             </tbody>
           </table>
         </div>
+      )}
+
+      {total > 0 && (
+        <p className="dl-scroll-hint">
+          {result.columns.length > 6 && (
+            <span>← → {result.columns.length} columns, scroll sideways</span>
+          )}
+          {slice.length > 12 && <span>↑ ↓ scroll inside the table</span>}
+          <span>
+            Showing {slice.length} of {total.toLocaleString()} row
+            {total === 1 ? '' : 's'}
+          </span>
+        </p>
       )}
 
       {pages > 1 && (
@@ -570,7 +583,7 @@ export default function DataLens() {
               {schema.blocked_columns?.length > 0
                 && ` ${schema.blocked_columns.join(', ')} is never readable.`}
             </p>
-            <ul className="dl-tables">
+            <ul className="dl-tables dl-scrolls">
               {schema.tables.map((t) => (
                 <SchemaTable
                   key={t.table} table={t} onPreview={peek} onInsert={insertColumn}
