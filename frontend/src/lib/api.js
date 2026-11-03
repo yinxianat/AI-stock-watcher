@@ -138,6 +138,12 @@ export const api = {
   dataLensRun: (sql, limit, opts) =>
     request('/admin/data-lens/query',
       { method: 'POST', body: { sql, limit }, auth: true, timeoutMs: 30000, ...opts }),
+  // Longer again: this one re-runs the query and then waits on an AI. The
+  // provider's own read timeout is 90s, so giving up sooner would turn a slow
+  // answer into a misleading "took too long".
+  dataLensSummarize: (sql, limit, opts) =>
+    request('/admin/data-lens/summarize',
+      { method: 'POST', body: { sql, limit }, auth: true, timeoutMs: 120000, ...opts }),
 
   // feedback
   rateFeedback: (token) => request('/feedback/rate', { method: 'POST', body: { token } }),

@@ -457,6 +457,14 @@ def schema_catalogue() -> dict:
             "max_rows": settings.data_lens_max_rows,
             "timeout_ms": settings.data_lens_timeout_ms,
         },
+        # Whether "explain this result" can work, so the console can say it is
+        # switched off instead of offering a button whose first press is an
+        # error. `ai_rows` is stated too, because a reader of a summary should
+        # know how much of the result the AI was actually shown.
+        "ai": {
+            "enabled": settings.data_lens_ai_enabled,
+            "rows": settings.data_lens_ai_max_rows,
+        },
         "note": (
             "Read-only. Every query runs in a transaction the database itself "
             "refuses writes in, and is rolled back afterwards."

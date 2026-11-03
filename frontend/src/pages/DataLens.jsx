@@ -113,6 +113,79 @@ function SchemaTable({ table, onPreview, onInsert }) {
   );
 }
 
+// Severity drives the colour, matching the monitoring page so "high" means
+// the same thing on both.
+const SEVERITY = {
+  high: { label: 'Act now', colour: 'var(--danger)' },
+  medium: { label: 'Review', colour: '#f5c451' },
+  low: { label: 'Note', colour: 'var(--muted)' },
+};
+
+// What the AI made of the result. Labelled as AI-written throughout, and
+// shown next to the rows rather than instead of them: every claim it makes is
+// checkable against the grid immediately below, which is the only reason it
+// is safe to read a generated summary of production data at all.
+function Reading({ reading, onPickQuery }) {
+  return (
+    <div className="dl-reading">
+      <div className="dl-reading-head">
+        <strong>{reading.headline}</strong>
+        <span className="muted dl-reading-by">
+          written by {reading.model}
+          {reading.usage?.est_cost && ` · ${reading.usage.est_cost}`}
+          {reading.truncated_for_ai
+            && ` · read ${reading.rows_seen} of ${reading.rows_total} rows`}
+        </span>
+      </div>
+      <p className="dl-reading-summary">{reading.summary}</p>
+
+      {reading.findings?.length > 0 && (
+        <ul className="dl-findings">
+          {reading.findings.map((f, i) => {
+            const s = SEVERITY[f.severity] ?? SEVERITY.low;
+            return (
+              <li key={i} style={{ borderLeftColor: s.colour }}>
+                <span className="dl-sev" style={{ color: s.colour }}>{s.label}</span>
+                <span>{f.detail}</span>
+                {/* The evidence is the point. A finding about production you
+                    cannot check has to be chased before it can be dismissed,
+                    which costs more than it saves. */}
+                <p className="muted dl-evidence">{f.evidence}</p>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {reading.next_queries?.length > 0 && (
+        <div className="dl-next">
+          <strong className="dl-next-title">Worth asking next</strong>
+          <ul>
+            {reading.next_queries.map((q, i) => (
+              <li key={i}>
+                <button
+                  type="button"
+                  className="link-button dl-next-q"
+                  onClick={() => onPickQuery(q.sql)}
+                >
+                  {q.question}
+                </button>
+                {/* Loaded into the editor, never run on click. The admin
+                    presses Run, the same as for anything they typed. */}
+                <code>{q.sql.replace(/\s+/g, ' ')}</code>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <p className="muted dl-reading-caveat">
+        Written by an AI from the rows below. Check anything you intend to act
+        on against the result itself.
+      </p>
+    </div>
+  );
+}
+
 // The grid. Deliberately not sortable by clicking a header: ORDER BY is one
 // of the things this console exists to teach, and a client-side sort over
 // one capped page would also be a lie about the rest of the table.
@@ -218,6 +291,9 @@ export default function DataLens() {
   const [history, setHistory] = useState(loadHistory);
   const [openCategory, setOpenCategory] = useState('start');
   const [copied, setCopied] = useState(false);
+  const [reading, setReading] = useState(null);
+  const [explaining, setExplaining] = useState(false);
+  const [aiError, setAiError] = useState(null);
   const resultRef = useRef(null);
 
   useEffect(() => {
@@ -251,6 +327,11 @@ export default function DataLens() {
     setRunning(true);
     setRejected(null);
     setCopied(false);
+    // The reading describes one specific result. Keeping it on screen past a
+    // re-run would caption the new rows with the old explanation, which is
+    // the one failure mode that would make the feature untrustworthy.
+    setReading(null);
+    setAiError(null);
     const parsed = Number(limit);
     const rows = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
     api.dataLensRun(query, rows)
@@ -286,6 +367,31 @@ export default function DataLens() {
         if (e?.status !== 422 && e?.status !== 401) logError('data-lens', e, 'run');
       })
       .finally(() => setRunning(false));
+  };
+
+  const explain = () => {
+    const query = sql.trim();
+    if (!query || explaining) return;
+    setExplaining(true);
+    setAiError(null);
+    api.dataLensSummarize(query, Number(limit) > 0 ? Math.floor(Number(limit)) : null)
+      .then((r) => {
+        setReading(r);
+        // The summary describes the rows it came back with, not the ones
+        // already on screen, so the grid is replaced too. Otherwise a stale
+        // grid and a fresh summary disagree and neither can be trusted.
+        setResult(r.result ? { ...r.result, timezone: r.timezone } : null);
+        setPage(0);
+      })
+      .catch((e) => {
+        const detail = e?.detail;
+        setAiError({
+          error: detail?.error ?? e?.userMessage ?? e?.message ?? 'No explanation available.',
+          hint: detail?.hint ?? null,
+        });
+        if (![401, 422, 503].includes(e?.status)) logError('data-lens', e, 'summarize');
+      })
+      .finally(() => setExplaining(false));
   };
 
   const pickSaved = (q) => {
@@ -422,6 +528,19 @@ export default function DataLens() {
                 value={limit}
                 onChange={(e) => setLimit(e.target.value)}
               />
+              {/* Not offered at all when it is switched off: a button whose
+                  first press is always an error is worse than no button. */}
+              {schema.ai?.enabled && (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={explain}
+                  disabled={explaining || !sql.trim()}
+                  title={`Re-run this query and have an AI read up to ${schema.ai.rows} rows of it`}
+                >
+                  {explaining ? 'Reading…' : 'Explain this'}
+                </button>
+              )}
               {result && (
                 <button type="button" className="secondary" onClick={copyResult}>
                   {copied ? 'Copied' : 'Copy as TSV'}
@@ -431,6 +550,8 @@ export default function DataLens() {
             <p className="muted dl-help">
               Tab completes a table or column name. Type <code>jr.</code> after
               naming a table to see just its columns.
+              {!schema.ai?.enabled
+                && ' Set DATA_LENS_AI_ENABLED=true for AI explanations of a result.'}
             </p>
           </div>
 
@@ -442,8 +563,22 @@ export default function DataLens() {
             </div>
           )}
 
+          {aiError && (
+            <div className="card dl-rejected">
+              <strong>No explanation this time.</strong>
+              <p className="dl-rejected-error">{aiError.error}</p>
+              {aiError.hint && <p className="muted">{aiError.hint}</p>}
+            </div>
+          )}
+
           {result && (
             <div className="card" ref={resultRef}>
+              {reading && (
+                <Reading
+                  reading={reading}
+                  onPickQuery={(next) => { setSql(next); setRejected(null); }}
+                />
+              )}
               <Results result={result} page={page} setPage={setPage} />
               {result.timezone && (
                 <p className="muted dl-tz">

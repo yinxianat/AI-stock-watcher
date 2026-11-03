@@ -119,6 +119,14 @@ class Settings(BaseSettings):
     # or a stolen session yields pseudonyms. The row id is always shown, which
     # is enough to correlate against the rest of the dashboard.
     data_lens_show_emails: bool = False
+    # Asking an AI to read a result and say what it means. Off by default
+    # because unlike the rest of the console it costs money per press, and a
+    # tool that silently bills you is not a tool you should have to opt out of.
+    data_lens_ai_enabled: bool = False
+    # Rows handed to the AI. Far below data_lens_max_rows on purpose: the
+    # whole result goes in the prompt, so this is the cost dial. A hundred
+    # rows is enough to spot a pattern and cheap enough to press repeatedly.
+    data_lens_ai_max_rows: int = 100
 
     # Logging & alerting
     alert_receiver: str = ""  # blank → falls back to smtp_username

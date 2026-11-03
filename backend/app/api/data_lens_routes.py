@@ -22,7 +22,7 @@ from app.api.deps import current_admin
 from app.core.ratelimit import RateLimit
 from app.core.settings import get_settings
 from app.models import User
-from app.services import data_lens, query_library
+from app.services import data_lens, data_lens_ai, query_library
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +88,46 @@ def post_query(payload: QueryRequest, admin: User = Depends(current_admin)) -> d
         "max_rows": get_settings().data_lens_max_rows,
         "timeout_ms": get_settings().data_lens_timeout_ms,
     }
+    return out
+
+
+@router.post(
+    "/summarize",
+    # Tighter than /query because this one costs money per press. Twenty an
+    # hour is more than a person reading the answers can get through, and far
+    # less than a stuck retry loop would spend.
+    dependencies=[Depends(RateLimit("20/hour", "data_lens_summarize"))],
+)
+def post_summarize(payload: QueryRequest, admin: User = Depends(current_admin)) -> dict:
+    """Re-run a query and have an AI say what the result means.
+
+    The SQL is re-run here rather than accepting rows from the request, so
+    the AI is given exactly what the console's safety layer permits. The
+    result it describes comes back with it, so the page can show both
+    without a second round trip and the admin can check the summary against
+    the rows it was drawn from.
+
+    The AI's suggested follow-up queries are validated and returned as text.
+    Nothing on this path runs SQL that the AI wrote.
+    """
+    try:
+        out = data_lens_ai.summarize(
+            payload.sql, actor=f"user:{admin.id}", limit=payload.limit,
+        )
+    except data_lens.QueryRejected as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": e.message, "hint": e.hint},
+        ) from None
+    except data_lens_ai.SummaryUnavailable as e:
+        # 503, not 422: the question was fine and the data is fine, the
+        # explainer is what is missing. The console stays usable without it.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": e.message, "hint": e.hint},
+        ) from None
+
+    out["timezone"] = _timezone_note()
     return out
 
 
