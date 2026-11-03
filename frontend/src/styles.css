@@ -465,7 +465,17 @@ button.link-button:disabled:hover { background: none; color: var(--muted); text-
 
 .dl-result-head { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; margin-bottom: 10px; }
 .dl-note { font-size: 12.5px; margin: 0 0 8px; }
-.dl-grid-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+/* Scrolls on both axes inside a bounded box instead of growing the page.
+   Without a height the window scrollbar is the only way to move through 500
+   rows — and the sticky header below has no scroll container to stick to, so
+   it does nothing. Maximising the window made this worse, not better: a
+   taller viewport just meant a longer card and a further trip back up. */
+.dl-grid-wrap {
+  overflow: auto;
+  max-height: 65vh;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
 .dl-grid { font-size: 12.5px; }
 .dl-grid th, .dl-grid td {
   padding: 5px 10px;
@@ -480,8 +490,12 @@ button.link-button:disabled:hover { background: none; color: var(--muted); text-
 .dl-grid th {
   position: sticky;
   top: 0;
+  z-index: 1;
   background: var(--panel);
   font-family: inherit;
+  /* The panel background is not fully opaque against a scrolled row's hover
+     tint, so a bottom rule keeps the boundary readable. */
+  box-shadow: inset 0 -1px 0 var(--border);
 }
 .dl-grid tbody tr:hover { background: rgba(79, 158, 255, 0.07); }
 .dl-rownum { color: var(--muted); text-align: right; width: 1%; }
@@ -501,6 +515,37 @@ button.link-button:disabled:hover { background: none; color: var(--muted); text-
 .dl-saved-teaches { margin: 2px 0 0; font-size: 11.5px; color: var(--muted); font-style: italic; }
 
 .dl-tables { list-style: none; margin: 0; padding: 0; max-height: 540px; overflow-y: auto; }
+
+/* macOS hides overlay scrollbars until something is already scrolling, so a
+   pane with sixteen columns in it looks exactly like a pane with six. These
+   keep a visible bar whether or not the pointer is moving. */
+.dl-scrolls {
+  scrollbar-width: thin;
+  scrollbar-color: #46515f var(--bg);
+}
+.dl-scrolls::-webkit-scrollbar { width: 12px; height: 12px; }
+.dl-scrolls::-webkit-scrollbar-track { background: var(--bg); }
+.dl-scrolls::-webkit-scrollbar-thumb {
+  background: #46515f;
+  border-radius: 6px;
+  /* Inset by a border rather than a margin, which is the only way to give a
+     webkit thumb breathing room inside its track. */
+  border: 3px solid var(--bg);
+}
+.dl-scrolls::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+/* Where the two bars meet, so the corner is not a dead grey square. */
+.dl-scrolls::-webkit-scrollbar-corner { background: var(--bg); }
+
+/* Says which way there is more, under the grid where the eye arrives after
+   running out of columns. */
+.dl-scroll-hint {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  margin: 6px 0 0;
+  color: var(--muted);
+}
 .dl-table { border-top: 1px solid var(--border); padding: 4px 0; }
 .dl-table:first-child { border-top: none; }
 .dl-table-head { display: flex; align-items: baseline; justify-content: space-between; }
