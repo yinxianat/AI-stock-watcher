@@ -102,6 +102,11 @@ def run_pipeline(
                 {"fact_id": d.fact_id, "rule": d.rule, "detail": d.detail}
                 for d in check.dropped[:10]
             ],
+            # Both, because one without the other says nothing: "2" is only
+            # meaningful next to the ceiling it stopped under. Searches are
+            # billed per use, so `searches_used` is the real cost and
+            # `max_searches` is only what it was allowed to reach.
+            "searches_used": found.searches_used,
             "max_searches": settings.ai_article_max_searches,
         }
         if check.dropped:

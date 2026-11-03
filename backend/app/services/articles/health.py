@@ -164,7 +164,9 @@ def setup_lines(settings: Settings, statuses: dict[str, str] | None = None) -> l
         model = settings.model_for(provider)
         price = costs.money(costs.story_estimate(provider, settings))
         key = statuses.get(provider, "not checked")
-        return f"  {role:<8}{_NAMES[provider]} {model}: {price} per story; key {key}"
+        # "at most", because story_estimate charges the whole search budget
+        # and a story that finds its cause on the first search does not.
+        return f"  {role:<8}{_NAMES[provider]} {model}: at most {price} per story; key {key}"
 
     lines = ["In use now", row("Main", settings.ai_provider)]
     if len(settings.provider_chain) > 1:

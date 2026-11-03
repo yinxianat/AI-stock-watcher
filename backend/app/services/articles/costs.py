@@ -45,7 +45,16 @@ def token_cost(model: str, input_tokens: int, output_tokens: int,
 
 
 def story_estimate(provider: str, settings: Settings | None = None) -> float | None:
-    """Typical USD for one story written by this provider."""
+    """Worst-case USD for one story written by this provider.
+
+    A CEILING, not an average. It charges the full search budget, but web
+    search is billed per search actually performed and the model stops as
+    soon as it reports — a cause found on the first search costs one search,
+    whatever AI_ARTICLE_MAX_SEARCHES allows. The ceiling is the right basis
+    for a budget alarm; it is the wrong number to read as "what a story
+    costs", so anything showing it says so. `searches_used` in a story's
+    diagnostics is the actual figure.
+    """
     settings = settings or get_settings()
     source = settings.news_source_for(provider)
     tokens_in, tokens_out = _TYPICAL[source]

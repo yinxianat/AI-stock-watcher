@@ -107,6 +107,11 @@ class ResearchResult:
     # URL was made up (or injected) and is dropped.
     seen_urls: list[str] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    # Searches actually run, which is not the same as the budget. Web search
+    # is billed per search performed, so AI_ARTICLE_MAX_SEARCHES is a ceiling
+    # the model is free to come in under — and without this number there is
+    # no way to tell whether raising that ceiling cost anything.
+    searches_used: int = 0
 
 
 @dataclass
