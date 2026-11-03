@@ -42,7 +42,7 @@ backend/
   .env.example
 frontend/
   src/{pages,components,lib}/  …
-DEPLOYMENT.md   Railway + Vercel + alerts ops guide
+(DEPLOYMENT.md  ops guide — kept locally, untracked; see below)
 ```
 
 ## Architecture rules (worth knowing before editing)
@@ -176,3 +176,8 @@ cd frontend && npm install && npm run dev
 `DEPLOYMENT.md` documents env vars, alerting behaviour, daily-summary
 fields, retention units, and troubleshooting for every prod failure mode
 we've actually hit. Check there before guessing.
+
+It is **not in the repository** — it is kept locally and gitignored,
+because this repo is public and the guide describes the real deployment.
+Expect it at the repo root on the maintainer's machine. If it is absent,
+say so rather than inventing deployment steps.
