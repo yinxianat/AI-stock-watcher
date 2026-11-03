@@ -1,4 +1,4 @@
-# Claude Code project context — AI Stock Watcher
+# Claude Code project context — Little Money Monkey
 
 This file is auto-loaded by Claude Code as project memory. Keep it short,
 factual, and current — anything stale here makes Claude worse, not better.
@@ -30,10 +30,12 @@ backend/
     core/       settings (pydantic-settings), security (token signing)
     db/         engine/session, seed
     jobs/       ingest, compute, notify, scheduler, daily_summary,
-                cleanup, heartbeat
+                cleanup, heartbeat, intraday, recap
     models/     SQLAlchemy ORM (single file: models/models.py)
     schemas/    Pydantic request/response shapes
-    services/   auth, confirm_email, emailer, trend, alerts
+    services/   auth, confirm_email, emailer, trend, alerts,
+                articles/ (AI "why it moved" stories)
+                money_ideas.py  (20-idea financial literacy curriculum)
     main.py     FastAPI app factory + lifespan
   tests/        pytest suite (in-memory SQLite, captured emails)
   requirements.txt
@@ -72,12 +74,57 @@ DEPLOYMENT.md   Railway + Vercel + alerts ops guide
 - Business events use the explicit `notify_admin(event, ...)` path in
   `app.services.alerts` (signup, first-ever notification, upstream-API-down,
   daily summary). Not deduped.
+- `recap` job (Mon-Fri 16:30 ET): daily watchlist recap email per user,
+  with the biggest mover's kids' story (shared `StockArticle`, so stories
+  aren't written twice). `RecapOptOut` = user switched it off; `RecapSend`
+  makes it once per user per day.
 - Two daily background jobs: `cleanup` (deletes `log_entries` older than
   `LOG_LIFETIME`) and `daily_summary` (HEALTHY/DEGRADED/UNHEALTHY digest).
-  `heartbeat` runs hourly on weekdays and alerts if no successful pipeline
-  in 26h.
+  `heartbeat` runs hourly on weekdays and alerts once if the last
+  *scheduled* pipeline time (30 min grace) never started. The daily summary
+  counts runs from `job_runs`, not log text.
+
+## AI stories (`app/services/articles/`)
+
+- PRICE_CHANGE_RANGE alerts compare against the previous trading day's
+  close only (the 10-minute tick signal was removed: it duplicated alerts).
+- Day-over-day PRICE_CHANGE_RANGE alerts get a kid-friendly "why it moved"
+  story (four age groups; parents pick in Settings). Off unless
+  `AI_ARTICLES_ENABLED=true`. `AI_PROVIDER` (gemini | anthropic) with
+  optional `AI_FALLBACK_PROVIDER`; keys `GEMINI_API_KEY` / `ANTHROPIC_API_KEY`
+  (`providers.py`; fallback logic in `service._generate_with_ai`).
+- Pipeline: research (Claude web search by default, or Finnhub news) →
+  validate facts in code (quotes word-for-word, links/dates from our data)
+  → write → `language.py` check → independent AI review.
+  Fail closed: anything unchecked is dropped; the alert still goes out.
+- Only moves ≥ `AI_ARTICLE_MIN_PCT_STOCK` (1%) / `AI_ARTICLE_MIN_PCT_FUND`
+  (0.5%, ETFs and indexes) get an AI story; smaller ones get the fixed
+  per-age "small move" note in `render.py` (no AI cost).
+  No cause found but the stock moved with the S&P 500
+  (`service.moved_with_market`) → fixed "whole-market day" note.
+- The AI never writes numbers, links or the disclaimer — `render.py` does,
+  and escapes all AI text. Keep it that way.
+- Key/billing problems only email the admin (`report_key_problem`); users
+  just get a plain alert. `health.py` checks keys at startup (free calls) and
+  emails the setup + cost whenever any AI setting or key changes; prices
+  live in `costs.py` (update `PRICES` when providers change them).
 - All alert delivery is wrapped in try/except — alerting must NEVER raise
   (recursion-safe).
+
+## Money Ideas (`app/services/money_ideas.py`)
+
+- Every daily recap includes one Money Idea of the Day: a 20-idea
+  financial-literacy curriculum for families (companies, shares, risk,
+  compounding, etc.). Text is ours, not AI-written — free, reviewed once.
+- Ideas are sent basics-first (`FOUNDATION` = 4). After the foundation,
+  the next unsent idea that fits the day (SMALL_DAY / MARKET_DAY /
+  BIG_MOVE tag) is preferred. After the full cycle, it picks from the 5
+  oldest-sent ideas.
+- `MoneyIdeaSend` records what each user received and when.
+- `GET /money-ideas` returns the user's history (newest first), with
+  age-appropriate versions. Frontend: `/money-ideas` page + nav link.
+- Language and readability for every version are checked by the same rules
+  as AI stories (see tests).
 
 ## Conventions
 
