@@ -142,30 +142,118 @@ REASONS: dict[str, Reason] = {
     ),
 
     # ---- no story, and something to look at -----------------------------
-    "no_clear_cause": Reason(
-        label="No verifiable cause",
+    "research_found_nothing": Reason(
+        label="Research found no cause",
         what=(
-            "Research ran but nothing survived fact-checking, so the email carried the "
-            "price line and nothing for kids. The family is not told we looked. This is "
-            "the most common cause of a silently story-less alert."
+            "The research stage read the news and reported no cause for the move, so "
+            "there was nothing to fact-check and nothing to write. The email carried the "
+            "price line only. The detail says how many search results it read and what "
+            "its search budget was."
         ),
         ok=False,
         causes=(
-            Cause("The news genuinely does not explain the move (common on small moves, "
-                  "index funds, and stocks moving on flows rather than news).",
-                  "Check the move size. Under ~2% on a large-cap with no headline is "
-                  "usually real: there was nothing to find."),
-            Cause("Facts were found but dropped by validation — quote not word-for-word, "
-                  "URL not in the search results, domain not allow-listed, or article "
-                  "older than AI_NEWS_MAX_AGE_DAYS.",
-                  "Look for \"dropped N unverifiable fact(s)\" in the logs for this symbol. "
-                  "That line is the giveaway: research worked and validation rejected it."),
-            Cause("The search budget was too tight to reach the story.",
-                  "AI_ARTICLE_MAX_SEARCHES is 2 by default. Raise it and re-run the symbol."),
+            Cause("The move genuinely has no reportable cause — most sub-2% moves, index "
+                  "funds, and anything moving on flows rather than news.",
+                  "Compare against the move size in the detail. This is the expected "
+                  "answer for a small move and needs no action."),
+            Cause("The search budget ran out before it reached the story.",
+                  "The detail gives the budget and how many results were read. If the "
+                  "budget is 2 and it read 2, raise AI_ARTICLE_MAX_SEARCHES and retry."),
+            Cause("The research prompt is not finding coverage that exists.",
+                  "Search the symbol and date yourself. If there is an obvious headline "
+                  "we missed, the prompt is the problem, not the budget."),
         ),
-        fix="Check AI_NEWS_DOMAINS coverage and AI_ARTICLE_MAX_SEARCHES. Recurring on a "
-            "liquid large-cap that clearly had news means validation or the search budget "
-            "is too tight, not that the market was quiet.",
+        fix="For a small move, nothing. For a large move on a liquid name with obvious "
+            "news, raise AI_ARTICLE_MAX_SEARCHES first, then look at the research prompt.",
+    ),
+    "facts_all_dropped": Reason(
+        label="Every fact failed validation",
+        what=(
+            "Research DID find a cause, and every fact it cited was then rejected by our "
+            "own checks, so the story was dropped and the family got the price line only. "
+            "This one is ours to fix, not the market's: the detail names which rule "
+            "rejected how many facts, and gives examples."
+        ),
+        ok=False,
+        causes=(
+            Cause("url_not_in_search_results — the model supplied links the search never "
+                  "returned, i.e. it invented or recalled them.",
+                  "Expected occasionally and correctly rejected. If it is most of them, "
+                  "the research prompt is letting the model cite from memory."),
+            Cause("domain_not_allowed — real coverage on a publisher missing from "
+                  "AI_NEWS_DOMAINS.",
+                  "The detail names the host. If it is a reputable outlet, add it to "
+                  "AI_NEWS_DOMAINS; this is the commonest genuinely fixable cause."),
+            Cause("outside_date_window or undated — the coverage is real but older than "
+                  "AI_NEWS_MAX_AGE_DAYS, or the page carried no date.",
+                  "The detail gives the published date and the window. A story that "
+                  "broke before the move is often legitimately out of window."),
+        ),
+        fix="Read the rule names in the detail and fix that rule, not the pipeline: "
+            "add the publisher to AI_NEWS_DOMAINS, widen AI_NEWS_MAX_AGE_DAYS, or tighten "
+            "the research prompt so it stops citing unsearched links.",
+    ),
+    "rejected_by_language_check": Reason(
+        label="Our language check rejected it",
+        what=(
+            "A story was written and our own plain-Python checks rejected it before any "
+            "AI reviewer saw it — reading level, length, banned wording, or a citation "
+            "problem. No AI cost beyond the write. The detail lists the exact problems."
+        ),
+        ok=False,
+        causes=(
+            Cause("The writer prompt for one age group drifts above its reading level.",
+                  "The detail names the field and the check. Readability failures on one "
+                  "age group repeatedly mean that age's prompt needs shortening."),
+            Cause("The story cited a fact id that did not survive validation.",
+                  "Look for \"cites unknown facts\" in the detail — the writer was given "
+                  "facts and referenced a different one."),
+            Cause("The thresholds are too tight for the material.",
+                  "Check language.py limits before loosening anything; these checks are "
+                  "the last thing between the writer and a family's inbox."),
+        ),
+        fix="Fix the prompt the detail points at, in app/services/articles/prompts.py. "
+            "Do not loosen the checks to make a story pass.",
+    ),
+    "rejected_by_reviewer": Reason(
+        label="The AI reviewer rejected it",
+        what=(
+            "The story passed our code checks and the independent AI reviewer then "
+            "rejected it. Fail-closed by design: an unreviewed story is never sent. The "
+            "detail carries the reviewer's own stated problems."
+        ),
+        ok=False,
+        causes=(
+            Cause("The reviewer found a genuine accuracy or tone problem.",
+                  "Read its stated problems in the detail; this is the system working."),
+            Cause("The reviewer is stricter than the writer, so the two prompts disagree.",
+                  "If the same objection recurs across symbols, the writer prompt should "
+                  "be taught the reviewer's rule rather than the reviewer relaxed."),
+            Cause("The reviewer could not run and the story was dropped rather than sent "
+                  "unchecked.",
+                  "That path reports as generation_failed with an exception, not here."),
+        ),
+        fix="Compare the reviewer's objection against the writer prompt. Teach the writer "
+            "the rule; never send an unreviewed story.",
+    ),
+    "no_clear_cause": Reason(
+        label="No story, cause not recorded",
+        what=(
+            "No story was produced and the pipeline recorded nothing about why, which "
+            "means this row was written before diagnostics existed. Rows written since "
+            "report either research_found_nothing or facts_all_dropped — two unrelated "
+            "problems with different fixes, which this single bucket used to hide."
+        ),
+        ok=False,
+        causes=(
+            Cause("The row predates the diagnostics change.",
+                  "Check the trading date against when it was deployed. Nothing to fix; "
+                  "newer rows carry the cause."),
+            Cause("The story was written by a path that does not record diagnostics.",
+                  "On a current date this is a bug: every pipeline exit should set them."),
+        ),
+        fix="Nothing for historical rows. On a current date, check that run_pipeline is "
+            "populating GenerationResult.diagnostics on every exit.",
     ),
     "generation_failed": Reason(
         label="Generation failed",
@@ -367,26 +455,91 @@ REASONS: dict[str, Reason] = {
         ),
         fix="Confirm the starter recap is enabled and the default ticker is seeded.",
     ),
-    "unexplained": Reason(
-        label="Unexplained",
+    "no_prices": Reason(
+        label="No prices for their stocks",
         what=(
-            "The user was eligible and no gate explains why they got nothing. This is "
-            "the one reason that always means a bug."
+            "The user is eligible and watching stocks, but not one of their tickers had "
+            "a price for this trading day, so there was nothing to put in a recap. The "
+            "detail names the tickers. This used to be the commonest cause of an "
+            "\"eligible but no gate explains it\" row."
         ),
         ok=False,
         causes=(
-            Cause("The job never reached this user — it failed partway through the "
-                  "recipient loop.",
-                  "Check the jobs card for a FAILED recap run, and the logs for an "
-                  "exception naming this user id."),
-            Cause("Their email send raised and the failure was only logged.",
-                  "Look for \"Recap email failed for user=N\" with this user's id."),
-            Cause("They became eligible after the job ran (a watchlist added later "
-                  "in the day).",
-                  "Compare the watchlist row's timestamp against the recap run time."),
+            Cause("A batch run missed these tickers, so no daily_closes row was written.",
+                  "Check daily_closes for the named tickers on this date, and the jobs "
+                  "card for a failed or missing batch."),
+            Cause("The tickers were added today and have no history yet.",
+                  "Check when the watchlist rows were created. This fixes itself "
+                  "tomorrow."),
+            Cause("The upstream price API has no data for these symbols at all — a "
+                  "delisting, a bad symbol, or an unsupported exchange.",
+                  "Look for repeated fetch warnings naming the same symbols across "
+                  "several days. That pattern means the symbol, not the job."),
         ),
-        fix="Read the recap job's warnings for this day; an unexplained miss is always "
-            "logged, even when it is not recorded.",
+        fix="Check daily_closes for the named tickers. Persistent gaps on one symbol are "
+            "usually the symbol; gaps across many are the batch job.",
+    ),
+    "send_failed": Reason(
+        label="SMTP refused the email",
+        what=(
+            "The email was built correctly and the mail server rejected it, so the user "
+            "got nothing. The detail carries the exact SMTP error. Nothing retries this: "
+            "the next run's dedup window treats it as already handled."
+        ),
+        ok=False,
+        causes=(
+            Cause("The SMTP credentials are wrong or revoked.",
+                  "The detail will say authentication. A Gmail App Password stops working "
+                  "when the account password changes."),
+            Cause("The recipient address is being rejected — a typo, or a hard bounce.",
+                  "The detail names the failing address and the code. 5xx is permanent, "
+                  "4xx is worth retrying."),
+            Cause("A per-day or per-minute sending quota is exhausted.",
+                  "Check how many emails went out just before this one; Gmail caps daily "
+                  "sends."),
+        ),
+        fix="Read the SMTP error in the detail. Five or more in one run also raises an "
+            "ERROR, which emails the admin on its own.",
+    ),
+    "recap_job_missing": Reason(
+        label="The recap job never ran",
+        what=(
+            "Nobody got a recap because the job itself did not run on this day. Not a "
+            "per-user problem at all, which is why it is stated once here rather than "
+            "guessed at per user."
+        ),
+        ok=False,
+        causes=(
+            Cause("The container was not awake at the scheduled time.",
+                  "The jobs card for this day carries the ranked causes; this reason just "
+                  "points you there."),
+        ),
+        fix="See the jobs card for this day — it has the evidence and the ranked causes.",
+    ),
+    "unexplained": Reason(
+        label="Unexplained",
+        what=(
+            "The user was eligible, the recap job ran, every known gate has been checked "
+            "and none of them applies. This is the one reason that always means a bug — "
+            "and now that no-prices and failed sends are recorded as themselves, it "
+            "should be rare. The detail says what the job did on this day."
+        ),
+        ok=False,
+        causes=(
+            Cause("They became eligible after the job ran — a watchlist or email "
+                  "confirmation added later in the day.",
+                  "Compare the watchlist row's created timestamp against the run time in "
+                  "the detail."),
+            Cause("A send path exists that does not record its outcome.",
+                  "Every send should write a delivery_outcomes row in the same "
+                  "transaction as its RecapSend row. Grep for send_email calls "
+                  "without a matching delivery.record."),
+            Cause("A race: two recap runs overlapped, and the recipient was in "
+                  "the second one's list but the first one committed the RecapSend first.",
+                  "Check job_runs for multiple watchlist_recap entries on this day."),
+        ),
+        fix="Read the recap job's warnings for this day. If the job succeeded and the "
+            "counts add up, a send path is missing its delivery.record call.",
     ),
 }
 

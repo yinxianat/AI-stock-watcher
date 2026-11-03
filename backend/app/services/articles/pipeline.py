@@ -64,9 +64,10 @@ def key_problem_reason(e: Exception) -> str | None:
     return None
 
 
-def _failed(settings, usage: Usage, why: str) -> GenerationResult:
+def _failed(settings, usage: Usage, why: str, diagnostics: dict | None = None) -> GenerationResult:
     return GenerationResult(
         status="failed", model=settings.story_model, usage=usage, error=why[:500],
+        diagnostics=diagnostics or {},
     )
 
 
@@ -75,25 +76,46 @@ def run_pipeline(
 ) -> GenerationResult:
     settings = get_settings()
     usage = Usage()
+    diag: dict = {}
     try:
         found = research(req)
         usage += found.usage
-        facts = validate_facts(
+        check = validate_facts(
             found.research.facts,
             seen_urls=found.seen_urls,
             allowed_domains=settings.story_link_domains,
             today=req.trading_date,
             max_age_days=settings.ai_news_max_age_days,
         )
-        dropped = len(found.research.facts) - len(facts)
-        if dropped:
-            log.info("Story %s: dropped %d unverifiable fact(s)", req.symbol, dropped)
+        facts = check.kept
+        # Recorded whatever happens next: an empty story and a good one are
+        # told apart by these numbers, and so are the two completely
+        # different causes of an empty one — research finding nothing, and
+        # research finding things that failed the checks.
+        diag = {
+            "cause_found": found.research.cause_found,
+            "facts_found": len(found.research.facts),
+            "facts_kept": len(facts),
+            "urls_seen": len(found.seen_urls),
+            "dropped_by_rule": check.rule_counts(),
+            "dropped": [
+                {"fact_id": d.fact_id, "rule": d.rule, "detail": d.detail}
+                for d in check.dropped[:10]
+            ],
+            "max_searches": settings.ai_article_max_searches,
+        }
+        if check.dropped:
+            log.info(
+                "Story %s: dropped %d unverifiable fact(s): %s",
+                req.symbol, len(check.dropped), check.rule_counts(),
+            )
         if not found.research.cause_found or not facts:
             return GenerationResult(
                 status="no_clear_cause",
                 moved_with_market=found.research.moved_with_market,
                 model=settings.story_model,
                 usage=usage,
+                diagnostics=diag,
             )
 
         written = write(req, facts, found.research.moved_with_market)
@@ -104,8 +126,11 @@ def run_pipeline(
         problems = shared_problems(story, facts)
         if problems:
             log.warning("Story %s rejected: %s", req.symbol, "; ".join(problems))
-            return _failed(settings, usage, "rejected: " + "; ".join(problems))
+            diag["rejected_by"] = "language_check_shared"
+            diag["shared_problems"] = problems
+            return _failed(settings, usage, "rejected: " + "; ".join(problems), diag)
         versions, seen = [], set()
+        dropped_versions: dict[str, list[str]] = {}
         for v in story.versions:
             if v.age_group in seen:
                 continue
@@ -113,10 +138,17 @@ def run_pipeline(
             bad = version_problems(v)
             if bad:
                 log.warning("Story %s ages %s dropped: %s", req.symbol, v.age_group, "; ".join(bad))
+                dropped_versions[v.age_group] = bad
             else:
                 versions.append(v)
+        diag["versions_written"] = sorted(seen)
+        if dropped_versions:
+            # Which age group failed which check. An age group that keeps
+            # failing is a prompt problem for that age, not a safety problem.
+            diag["versions_dropped_by_language_check"] = dropped_versions
         if not versions:
-            return _failed(settings, usage, "every age version failed the language check")
+            diag["rejected_by"] = "language_check_all_versions"
+            return _failed(settings, usage, "every age version failed the language check", diag)
         story = story.model_copy(update={"versions": versions})
         used = [f for f in facts if f.id in set(story.fact_ids)]
 
@@ -127,13 +159,20 @@ def run_pipeline(
         verdict = reviewed.review
         if verdict.problems:
             log.warning("Story %s reviewer: %s", req.symbol, "; ".join(verdict.problems))
+            diag["reviewer_problems"] = verdict.problems
         if not verdict.grown_up_ok:
-            return _failed(settings, usage, "reviewer rejected the grown-up summary")
+            diag["rejected_by"] = "reviewer_grown_up_summary"
+            return _failed(settings, usage, "reviewer rejected the grown-up summary", diag)
         approved = set(verdict.approved_age_groups)
+        rejected = [v.age_group for v in story.versions if v.age_group not in approved]
+        if rejected:
+            diag["versions_rejected_by_reviewer"] = sorted(rejected)
         versions = [v for v in story.versions if v.age_group in approved]
         if not versions:
-            return _failed(settings, usage, "reviewer rejected every age version")
+            diag["rejected_by"] = "reviewer_all_versions"
+            return _failed(settings, usage, "reviewer rejected every age version", diag)
         story = story.model_copy(update={"versions": versions})
+        diag["versions_sent"] = sorted(v.age_group for v in versions)
 
         return GenerationResult(
             status="ready",
@@ -142,11 +181,14 @@ def run_pipeline(
             moved_with_market=found.research.moved_with_market,
             model=settings.story_model,
             usage=usage,
+            diagnostics=diag,
         )
     except Exception as e:  # noqa: BLE001 — never let a story break an alert
         log.warning("Story generation failed for %s: %s", req.symbol, e)
+        diag["rejected_by"] = "exception"
+        diag["exception_type"] = type(e).__name__
         return GenerationResult(
             status="failed", model=settings.story_model, usage=usage,
             error=str(e)[:500], key_problem=key_problem_reason(e),
-            failed_service=failed_service(e),
+            failed_service=failed_service(e), diagnostics=diag,
         )

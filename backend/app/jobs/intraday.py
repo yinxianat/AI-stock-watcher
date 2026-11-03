@@ -259,6 +259,17 @@ def _send_one_alert(
         send_email(user.notify_email, subject, body, body_html=body_html, headers=headers)
     except Exception as e:  # pragma: no cover
         log.warning("Intraday email send failed for user=%d: %s", user.id, e)
+        delivery.record(
+            db, user=user, ticker=ticker, channel=delivery.CHANNEL_ALERT,
+            trading_date=articles.trading_date(),
+            outcome=delivery.StoryOutcome(
+                state=delivery.STATE_NONE, reason="send_failed",
+                detail=(
+                    f"The alert for {ticker.symbol} was built but SMTP refused "
+                    f"it: {type(e).__name__}: {e}"
+                ),
+            ),
+        )
         return False
     db.add(
         NotificationLog(
@@ -370,10 +381,15 @@ def _stories_for(
     except Exception as e:  # noqa: BLE001
         log.warning("Stories unavailable this run: %s", e)
         db.rollback()
+        etype = type(e).__name__
         for tid in candidates:
+            sym = candidates[tid].ticker.symbol
             skipped[tid] = delivery.StoryOutcome(
                 state=delivery.STATE_NONE, reason="generation_error",
-                detail=f"The story step raised before any story could be attached: {e}",
+                detail=(
+                    f"The story step for {sym} raised {etype} before any story "
+                    f"could be attached: {e}"
+                ),
             )
         return {}, skipped
 

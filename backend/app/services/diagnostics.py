@@ -586,11 +586,28 @@ def delivery_report(
         watch_counts = dict(session.execute(
             select(WatchlistItem.user_id, func.count()).group_by(WatchlistItem.user_id)
         ).all())
+        # A reason the job recorded beats one this function deduces. The
+        # recorded ones are the cases that used to come out as "eligible but
+        # no gate explains it": their tickers had no prices, or the send was
+        # refused.
+        # Any recorded recap outcome for a user who did NOT get a RecapSend
+        # row is a recorded miss. The earlier filter only checked two codes;
+        # now we accept every reason, because the recorder already knows why.
+        recorded_miss = {
+            o.user_id: o for o in outcomes
+            if o.channel == "recap" and o.user_id not in got_recap
+        }
+        job_note = _recap_job_note(session, day, len(recaps))
         missed = []
         for u in session.execute(select(User)).scalars().all():
             if u.id in got_recap:
                 continue
-            if u.id in opted_out:
+            rec = recorded_miss.get(u.id)
+            detail = None
+            inferred = True
+            if rec is not None:
+                reason, detail, inferred = rec.reason, rec.detail, False
+            elif u.id in opted_out:
                 reason = "opted_out"
             elif u.id in recap_off:
                 reason = "recap_off"
@@ -599,10 +616,15 @@ def delivery_report(
             elif not watch_counts.get(u.id):
                 reason = "no_watchlist"
             else:
-                reason = "unexplained"
+                # Nothing recorded and no gate fits. Rather than shrug, state
+                # what the job actually did — that is a fact, and it is the
+                # first thing anyone would go and look up.
+                reason, detail = job_note
             missed.append({
                 "user": user_ref(u, scope),
                 "reason": reason,
+                "detail": detail,
+                "inferred": inferred,
                 "watch_count": watch_counts.get(u.id, 0),
                 "missed_days_running": streaks.get(u.id, 0),
                 "help": REASON_HELP.get(reason, "No recap row and no gate explains it — investigate."),
@@ -619,6 +641,35 @@ def delivery_report(
     finally:
         if own:
             session.close()
+
+
+def _recap_job_note(session, day: date_, recaps_sent: int) -> tuple[str, str]:
+    """`(reason, detail)` for a miss that no gate explains.
+
+    Reads `job_runs` instead of speculating. Either the job did not run —
+    in which case nobody got a recap and the jobs card already explains
+    why — or it did, and the detail carries its status, when it ran and how
+    many recaps it managed, which is what someone would look up first.
+    """
+    start, end = day_bounds(day)
+    run = session.execute(
+        select(JobRun)
+        .where(JobRun.job_name == "watchlist_recap")
+        .where(JobRun.started_at >= start, JobRun.started_at < end)
+        .order_by(JobRun.started_at.desc())
+    ).scalars().first()
+    if run is None:
+        return (
+            "recap_job_missing",
+            f"No watchlist_recap run is recorded for {day}, so nobody was sent a recap. "
+            "See the jobs card for this day.",
+        )
+    return (
+        "unexplained",
+        f"watchlist_recap ran at {et(run.started_at)} and finished {run.status} "
+        f"({run.result_summary or 'no summary'}); {recaps_sent} recap(s) were recorded. "
+        "This user was eligible, was not gated, and has no recorded outcome.",
+    )
 
 
 def _miss_streaks(session, day: date_) -> dict[int, int]:
@@ -1229,16 +1280,50 @@ def findings(report: dict) -> list[dict]:
             "Raise AI_ARTICLE_WAIT_SECONDS, or investigate why generation outran the promise.")
 
     d = report["delivery"]
+
+    def _missed_with(code: str) -> list[dict]:
+        return [m for m in d["recap_missed"] if m["reason"] == code]
+
+    # Recap misses the job recorded for itself, each stated as what it is.
+    # These used to arrive as "no gate explains it", which sent the reader
+    # looking for a bug when the answer was in hand.
+    for code, severity, headline in (
+        ("send_failed", "high", "the mail server refused their recap"),
+        ("recap_job_missing", "high", "the recap job never ran"),
+        ("no_prices", "medium", "none of their watched tickers had a price"),
+    ):
+        rows = _missed_with(code)
+        if not rows:
+            continue
+        add(severity, f"recap_{code}",
+            f"{len(rows)} user(s) got no recap: {headline}.",
+            explain(code)["fix"],
+            evidence={
+                "users": [
+                    {"user": m["user"], "detail": m["detail"],
+                     "recorded": not m["inferred"]}
+                    for m in rows[:20]
+                ],
+            },
+            causes=explain(code)["causes"])
+
     if d["recap_unexplained"]:
+        rows = _missed_with("unexplained")
         add("high", "recap_unexplained",
             f"{d['recap_unexplained']} user(s) were eligible for a recap but got none, and no "
             "gate explains it.",
-            "Check the recap job log for per-user exceptions.")
-    for m in d["recap_missed"]:
-        if m["reason"] == "email_unconfirmed":
-            add("low", "email_unconfirmed",
-                f"{m['user']} receives nothing: notification email unconfirmed.",
-                REMEDIATION["email_unconfirmed"])
+            explain("unexplained")["fix"],
+            evidence={
+                "users": [{"user": m["user"], "detail": m["detail"],
+                           "missed_days_running": m["missed_days_running"]}
+                          for m in rows[:20]],
+            },
+            causes=explain("unexplained")["causes"])
+    for m in _missed_with("email_unconfirmed"):
+        add("low", "email_unconfirmed",
+            f"{m['user']} receives nothing: notification email unconfirmed.",
+            REMEDIATION["email_unconfirmed"],
+            causes=explain("email_unconfirmed")["causes"])
 
     # Storage is optional so `findings` stays callable on a partial report.
     store = report.get("storage")

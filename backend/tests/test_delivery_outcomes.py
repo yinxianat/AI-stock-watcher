@@ -158,22 +158,93 @@ def test_an_age_substitution_is_visible_even_though_the_parent_cannot_see_it(
 # ---------------------------------------------------------------------------
 
 
-def test_no_clear_cause_is_recorded_rather_than_inferred(client, stories_on, monkeypatch):
-    """The commonest silent miss: research ran, nothing survived
-    fact-checking, and the alert went out as a bare price line."""
-    monkeypatch.setattr(
-        service, "generate_article",
-        lambda req: GenerationResult(status="no_clear_cause", model="fake"),
-    )
-    _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
+def _run_with_result(monkeypatch, result: GenerationResult, symbol: str = "AAPL"):
+    monkeypatch.setattr(service, "generate_article", lambda req: result)
+    _, ticker_id = _setup_user_with_range_rule(symbol, -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
+    run_intraday_capture(fetcher=_fetch({symbol: 106.4}), force=True)
+    return ticker_id
 
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
 
+def test_research_finding_nothing_is_distinguished_from_our_checks_rejecting_it(
+    client, stories_on, monkeypatch,
+):
+    """`no_clear_cause` was one bucket over two unrelated failures. This is
+    the "nothing to find" half — usually correct, and nothing to fix."""
+    _run_with_result(monkeypatch, GenerationResult(
+        status="no_clear_cause", model="fake",
+        diagnostics={"cause_found": False, "facts_found": 0, "facts_kept": 0,
+                     "urls_seen": 7, "dropped_by_rule": {}, "max_searches": 2},
+    ))
+    row = _one()
+    assert row.reason == "research_found_nothing"
+    assert "7 search result(s)" in row.detail
+    assert "budget of 2" in row.detail
+
+
+def test_facts_dropped_by_our_own_checks_names_the_rule_that_fired(
+    client, stories_on, monkeypatch,
+):
+    """The other half, and the one that is ours to fix. The admin must not
+    have to guess which rule emptied the story — validation knew."""
+    _run_with_result(monkeypatch, GenerationResult(
+        status="no_clear_cause", model="fake",
+        diagnostics={
+            "cause_found": True, "facts_found": 3, "facts_kept": 0, "urls_seen": 9,
+            "dropped_by_rule": {"domain_not_allowed": 2, "undated": 1},
+            "dropped": [
+                {"fact_id": "f1", "rule": "domain_not_allowed",
+                 "detail": "fool.example is not in AI_NEWS_DOMAINS"},
+                {"fact_id": "f2", "rule": "undated",
+                 "detail": "Barron's gave no publication date"},
+            ],
+            "max_searches": 2,
+        },
+    ))
+    row = _one()
+    assert row.reason == "facts_all_dropped"
+    assert "found 3 fact(s) and all 3 failed validation" in row.detail
+    assert "2 × domain_not_allowed" in row.detail
+    assert "fool.example is not in AI_NEWS_DOMAINS" in row.detail
+
+
+def test_a_row_without_diagnostics_admits_the_cause_was_not_recorded(
+    client, stories_on, monkeypatch,
+):
+    """Rows written before diagnostics existed must say so rather than
+    present the old generic sentence as if it were an explanation."""
+    _run_with_result(monkeypatch, GenerationResult(status="no_clear_cause", model="fake"))
     row = _one()
     assert row.reason == "no_clear_cause"
-    assert row.story_state == delivery.STATE_NONE
-    assert "no cause" in row.detail
+    assert "predates diagnostics" in row.detail
+
+
+def test_our_language_check_rejecting_a_story_is_named_as_such(
+    client, stories_on, monkeypatch,
+):
+    _run_with_result(monkeypatch, GenerationResult(
+        status="failed", model="fake", error="rejected: grown_up_summary too long",
+        diagnostics={"cause_found": True, "facts_found": 2, "facts_kept": 2,
+                     "rejected_by": "language_check_shared",
+                     "shared_problems": ["grown_up_summary too long"]},
+    ))
+    row = _one()
+    assert row.reason == "rejected_by_language_check"
+    assert "our own language check" in row.detail
+    assert "grown_up_summary too long" in row.detail
+
+
+def test_the_reviewer_rejecting_a_story_is_named_as_such(client, stories_on, monkeypatch):
+    _run_with_result(monkeypatch, GenerationResult(
+        status="failed", model="fake", error="reviewer rejected the grown-up summary",
+        diagnostics={"cause_found": True, "facts_found": 2, "facts_kept": 2,
+                     "rejected_by": "reviewer_grown_up_summary",
+                     "reviewer_problems": ["implies a price prediction"]},
+    ))
+    row = _one()
+    assert row.reason == "rejected_by_reviewer"
+    assert "independent AI reviewer" in row.detail
+    assert "implies a price prediction" in row.detail
 
 
 def test_generation_failure_is_recorded_with_its_error(client, stories_on, monkeypatch):

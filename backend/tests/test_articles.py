@@ -145,9 +145,22 @@ def test_facts_must_be_real_allowed_and_recent():
     ]
     seen = [GOOD_URL, "https://randomblog.example/apple", "https://reuters.com.evil.example/x",
             GOOD_URL.replace("https", "http")]
-    kept = validate_facts(facts, seen_urls=seen, allowed_domains=DOMAINS,
-                          today=TODAY, max_age_days=2)
-    assert [f.id for f in kept] == ["ok"]
+    check = validate_facts(facts, seen_urls=seen, allowed_domains=DOMAINS,
+                           today=TODAY, max_age_days=2)
+    assert [f.id for f in check.kept] == ["ok"]
+    # Which rule rejected each one, not just that something did. The
+    # monitoring dashboard reports these verbatim, so a wrong label here
+    # becomes wrong advice to the admin.
+    by_id = {d.fact_id: d.rule for d in check.dropped}
+    assert by_id == {
+        "other_site": "domain_not_allowed",
+        "http": "domain_not_allowed",
+        "not_searched": "url_not_in_search_results",
+        "stale": "outside_date_window",
+        "undated": "undated",
+        "lookalike": "domain_not_allowed",
+    }
+    assert check.rule_counts()["domain_not_allowed"] == 3
 
 
 # ---------------------------------------------------------------------------

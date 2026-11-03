@@ -137,3 +137,10 @@ class GenerationResult:
     # "Finnhub"), so a backup provider can take over. None for content
     # failures (no clear cause, safety checks).
     failed_service: str | None = None
+    # What the pipeline observed on the way to this outcome: whether
+    # research found a cause at all, how many facts it returned, which
+    # validation rule rejected each one, and which age versions were
+    # dropped and by which safety layer. Stored with the story and read
+    # back at send time so the monitoring dashboard can say WHY a family
+    # got no story instead of listing what might have happened.
+    diagnostics: dict = field(default_factory=dict)

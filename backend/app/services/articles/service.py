@@ -141,6 +141,7 @@ _lock = threading.Lock()
 
 # Per-service problem state: "gemini", "anthropic" or "finnhub".
 _paused_until: dict[str, datetime] = {}
+_pause_reasons: dict[str, str] = {}  # why each provider was paused
 _alerted_at: dict[str, datetime] = {}
 _NAMES = {"gemini": "Gemini", "anthropic": "Anthropic", "finnhub": "Finnhub"}
 _FIX = {
@@ -170,6 +171,31 @@ def stories_paused() -> bool:
     return not usable or (needs_finnhub and not finnhub_ok)
 
 
+def pause_status() -> str:
+    """Human-readable explanation of which providers are down and why.
+
+    Called by the delivery recorder so the `provider_paused` reason
+    carries specifics instead of just "no provider was usable"."""
+    settings = get_settings()
+    parts: list[str] = []
+    for p in settings.provider_chain:
+        name = _NAMES.get(p, p)
+        if not settings.key_for(p):
+            parts.append(f"{name}: no API key configured")
+        elif _is_paused(p):
+            reason = _pause_reasons.get(p, "unknown")
+            parts.append(f"{name}: paused ({reason})")
+        else:
+            parts.append(f"{name}: ok")
+    finnhub_needed = any(settings.news_source_for(p) == "finnhub"
+                         for p in settings.provider_chain
+                         if settings.key_for(p) and not _is_paused(p))
+    if finnhub_needed and not (bool(settings.finnhub_api_key.strip()) and not _is_paused("finnhub")):
+        r = _pause_reasons.get("finnhub", "unknown")
+        parts.append(f"Finnhub (news): {'paused (' + r + ')' if _is_paused('finnhub') else 'no key'}")
+    return "; ".join(parts)
+
+
 def report_key_problem(service: str, reason: str, pause: bool = True) -> None:
     """Tell the admin (only the admin) that a service has a problem, and,
     for key/quota problems, stop using it for AI_KEY_PROBLEM_PAUSE_MINUTES.
@@ -181,6 +207,7 @@ def report_key_problem(service: str, reason: str, pause: bool = True) -> None:
     with _lock:
         if pause:
             _paused_until[service] = now + timedelta(minutes=minutes)
+            _pause_reasons[service] = reason
         last = _alerted_at.get(service)
         due = last is None or now - last >= _KEY_ALERT_REPEAT
         if due:
@@ -227,6 +254,7 @@ def _service_works(service: str) -> None:
     with _lock:
         was_broken = _alerted_at.pop(service, None) is not None
         _paused_until.pop(service, None)
+        _pause_reasons.pop(service, None)
     if was_broken:
         name = _NAMES.get(service, service)
         log.warning("AI stories: %s working again", name)
@@ -314,12 +342,20 @@ def _generate_and_store(article_id: int, req: ArticleRequest) -> None:
         row.output_tokens = result.usage.output_tokens
         row.error = result.error
         row.completed_at = utcnow()
+        # `content` is written for every outcome now, not only for a story.
+        # `diagnostics` is what the pipeline saw on the way here, and for a
+        # story that came back empty it is the only record of why — read back
+        # at send time so the dashboard states the cause instead of listing
+        # candidates. It goes in `content` rather than a new column because
+        # `create_all` cannot add columns to a table production already has.
+        payload: dict = {"diagnostics": result.diagnostics}
         if result.status == "ready" and result.story is not None:
-            row.content = json.dumps({
+            payload.update({
                 "story": result.story.model_dump(),
                 "facts": [f.model_dump(mode="json") for f in result.facts],
                 "moved_with_market": result.moved_with_market,
             })
+        row.content = json.dumps(payload)
         db.commit()
         log.info("Story %s %s: %s", req.symbol, req.direction, result.status)
         send_waiting_followups(db, row)
@@ -446,7 +482,8 @@ def ensure_articles(db: DBSession, candidates: list[Candidate]) -> StoryPlan:
                 skipped[c.ticker.id] = _skip(
                     "provider_paused",
                     f"No provider was usable when {c.ticker.symbol} moved "
-                    f"{c.move_pct:+.2f}%, so no story was attempted.",
+                    f"{c.move_pct:+.2f}%, so no story was attempted. "
+                    f"Provider status: {pause_status()}",
                 )
                 continue
             cap = settings.ai_article_max_per_day
@@ -587,6 +624,123 @@ class KidBlock:
     outcome: delivery.StoryOutcome
 
 
+def story_diagnostics(article: StockArticle) -> dict:
+    """What the pipeline recorded about this story, or {} for a row written
+    before diagnostics existed (in which case the dashboard says so)."""
+    if not article.content:
+        return {}
+    try:
+        return json.loads(article.content).get("diagnostics") or {}
+    except Exception:  # noqa: BLE001 - a monitoring read must not raise
+        return {}
+
+
+def _why_ages_missing(ages: list[str], diag: dict) -> str:
+    """Which safety layer dropped the parent's chosen age group.
+
+    A group that keeps getting substituted is a prompt problem for that
+    age, and the pipeline knows which layer rejected it — so say so rather
+    than leaving the admin to compare two lists by hand.
+    """
+    if not diag:
+        return "The reason was not recorded for this row."
+    dropped = diag.get("versions_dropped_by_language_check") or {}
+    rejected = set(diag.get("versions_rejected_by_reviewer") or [])
+    for g in ages:
+        if g in dropped:
+            return f"Ages {g} failed our language check: {', '.join(dropped[g])}."
+        if g in rejected:
+            return f"Ages {g} was rejected by the AI reviewer."
+    written = diag.get("versions_written")
+    if written and not set(ages) & set(written):
+        return f"The writer only produced ages {', '.join(written)}."
+    return "No layer reported dropping it, so the writer omitted it."
+
+
+def _empty_story_outcome(
+    symbol: str, article: StockArticle, diag: dict,
+) -> delivery.StoryOutcome:
+    """Why a finished story had nothing in it, from what the pipeline saw.
+
+    `no_clear_cause` was one bucket hiding two unrelated failures with
+    different fixes: research genuinely finding nothing (usually correct,
+    nothing to do) and research finding plenty that then failed our own
+    checks (our problem, and fixable). They are separated here because the
+    pipeline already knows which one happened.
+    """
+    found = diag.get("facts_found")
+    if not diag:
+        return delivery.StoryOutcome(
+            state=delivery.STATE_NONE, reason="no_clear_cause",
+            detail=f"{symbol} moved {article.move_pct:+.2f}% and no story was produced. "
+                   "This row predates diagnostics, so the specific cause was not recorded.",
+            article_id=article.id,
+        )
+    if diag.get("cause_found") and found and not diag.get("facts_kept"):
+        rules = diag.get("dropped_by_rule") or {}
+        worst = ", ".join(f"{n} × {rule}" for rule, n in
+                          sorted(rules.items(), key=lambda kv: -kv[1]))
+        examples = "; ".join(d["detail"] for d in (diag.get("dropped") or [])[:2])
+        return delivery.StoryOutcome(
+            state=delivery.STATE_NONE, reason="facts_all_dropped",
+            detail=(
+                f"{symbol}: research found {found} fact(s) and all {found} failed "
+                f"validation ({worst}). Examples: {examples}."
+            ),
+            article_id=article.id,
+        )
+    return delivery.StoryOutcome(
+        state=delivery.STATE_NONE, reason="research_found_nothing",
+        detail=(
+            f"{symbol} moved {article.move_pct:+.2f}% and research reported no cause "
+            f"at all after reading {diag.get('urls_seen', 0)} search result(s) with a "
+            f"budget of {diag.get('max_searches', '?')} search(es). "
+            f"{found or 0} fact(s) were offered."
+        ),
+        article_id=article.id,
+    )
+
+
+def _failed_story_outcome(
+    symbol: str, article: StockArticle, diag: dict,
+) -> delivery.StoryOutcome:
+    """Which safety layer rejected the story, named rather than guessed."""
+    by = diag.get("rejected_by")
+    if by in ("language_check_shared", "language_check_all_versions"):
+        problems = diag.get("shared_problems") or []
+        per_age = diag.get("versions_dropped_by_language_check") or {}
+        what = "; ".join(problems) or "; ".join(
+            f"ages {g}: {', '.join(v)}" for g, v in per_age.items()
+        )
+        return delivery.StoryOutcome(
+            state=delivery.STATE_NONE, reason="rejected_by_language_check",
+            detail=f"{symbol}: our own language check rejected the story — {what}.",
+            article_id=article.id,
+        )
+    if by in ("reviewer_grown_up_summary", "reviewer_all_versions"):
+        problems = diag.get("reviewer_problems") or []
+        part = ("the grown-up summary" if by == "reviewer_grown_up_summary"
+                else "every age version")
+        return delivery.StoryOutcome(
+            state=delivery.STATE_NONE, reason="rejected_by_reviewer",
+            detail=(
+                f"{symbol}: the independent AI reviewer rejected {part}"
+                + (f" — {'; '.join(problems)}" if problems else "")
+                + "."
+            ),
+            article_id=article.id,
+        )
+    return delivery.StoryOutcome(
+        state=delivery.STATE_NONE, reason="generation_failed",
+        detail=(
+            f"{symbol}: generation failed"
+            + (f" ({diag['exception_type']})" if diag.get("exception_type") else "")
+            + f": {article.error or 'no error recorded'}."
+        ),
+        article_id=article.id,
+    )
+
+
 def _story_outcome(
     db: DBSession, article: StockArticle, ages: list[str],
 ) -> tuple[render.StoryView | None, delivery.StoryOutcome]:
@@ -597,6 +751,7 @@ def _story_outcome(
     them is "the family got a story".
     """
     symbol = _symbol(db, article)
+    diag = story_diagnostics(article)
     view = _view(db, article, ages)
     if view is not None:
         # `versions_for` falls back to the nearest age when the chosen one
@@ -605,14 +760,20 @@ def _story_outcome(
         sent = render.versions_for(view.story, ages)
         sent_group = sent[0].age_group if sent else None
         substituted = bool(sent_group) and not (set(ages) & available)
+        if not substituted:
+            return view, delivery.StoryOutcome(
+                state=delivery.STATE_STORY, reason="ready",
+                detail=f"{symbol}: story sent for ages {sent_group}.",
+                article_id=article.id,
+                age_group=ages[0] if ages else None,
+                age_group_sent=sent_group,
+            )
         return view, delivery.StoryOutcome(
-            state=delivery.STATE_STORY,
-            reason="age_substituted" if substituted else "ready",
+            state=delivery.STATE_STORY, reason="age_substituted",
             detail=(
                 f"{symbol}: no story for ages {', '.join(ages)}, sent the ages "
-                f"{sent_group} version instead."
-                if substituted else
-                f"{symbol}: story sent for ages {sent_group}."
+                f"{sent_group} version instead. "
+                + _why_ages_missing(ages, diag)
             ),
             article_id=article.id,
             age_group=ages[0] if ages else None,
@@ -626,30 +787,27 @@ def _story_outcome(
             article_id=article.id,
         )
     if article.status == "pending":
+        waited = ""
+        if article.created_at:
+            secs = (utcnow() - article.created_at).total_seconds()
+            waited = f" It had been running {secs:.0f}s."
         return None, delivery.StoryOutcome(
             state=delivery.STATE_PENDING, reason="still_generating",
-            detail=f"{symbol}: story was still being written when the email had to go.",
+            detail=f"{symbol}: story was still being written when the email had to "
+                   f"go.{waited}",
             article_id=article.id,
         )
     if moved_with_market(article.move_pct, article.market_pct):
         return None, delivery.StoryOutcome(
             state=delivery.STATE_MARKET_DAY, reason="market_day",
             detail=f"{symbol} moved {article.move_pct:+.2f}% with the market "
-                   f"({article.market_pct:+.2f}%), so the whole-market note was sent.",
+                   f"({article.market_pct:+.2f}%), so the whole-market note was sent "
+                   f"instead of a story (status was {article.status}).",
             article_id=article.id,
         )
     if article.status == "no_clear_cause":
-        return None, delivery.StoryOutcome(
-            state=delivery.STATE_NONE, reason="no_clear_cause",
-            detail=f"{symbol} moved {article.move_pct:+.2f}% but research found no cause "
-                   "it could verify, so the email carried nothing for kids.",
-            article_id=article.id,
-        )
-    return None, delivery.StoryOutcome(
-        state=delivery.STATE_NONE, reason="generation_failed",
-        detail=f"{symbol}: generation failed ({article.error or 'no error recorded'}).",
-        article_id=article.id,
-    )
+        return None, _empty_story_outcome(symbol, article, diag)
+    return None, _failed_story_outcome(symbol, article, diag)
 
 
 def kid_block(
