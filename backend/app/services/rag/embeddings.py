@@ -272,10 +272,10 @@ class FakeEmbedder:
 def get_embedder() -> Embedder:
     """The configured embedder.
 
-    Outside production, a missing key falls back to the offline fake so the
-    pipeline is runnable and testable without credentials.
+    On a developer machine, a missing key falls back to the offline fake so
+    the pipeline is runnable and testable without credentials.
 
-    In production it raises instead. The fake embedder is bag-of-words with
+    On any deployed environment it raises instead. The fake embedder is bag-of-words with
     no semantic understanding, so falling back there would leave retrieval
     *appearing* to work while returning nonsense — and confidently
     irrelevant answers to a parent are worse than an error, because nobody
@@ -286,11 +286,11 @@ def get_embedder() -> Embedder:
     if settings.rag_embedding_provider == "local":
         return LocalEmbedder()
     if not settings.voyage_api_key.strip():
-        if settings.app_env == "production":
+        if settings.is_deployed:
             raise EmbeddingError(
                 "VOYAGE_API_KEY is not set. Refusing to fall back to the fake "
-                "embedder in production: retrieval would return meaningless "
-                "results rather than fail."
+                f"embedder in {settings.app_env}: retrieval would return "
+                "meaningless results rather than fail."
             )
         log.warning("VOYAGE_API_KEY is not set; using the offline fake embedder")
         return FakeEmbedder()

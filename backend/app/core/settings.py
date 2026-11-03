@@ -20,7 +20,13 @@ class Settings(BaseSettings):
     """
 
     # App
-    app_env: Literal["development", "production", "test"] = "development"
+    app_env: Literal["development", "uat", "production", "test"] = "development"
+    # Whether the interactive docs (/docs, /redoc, /openapi.json) are served.
+    # Unset means "follow `is_deployed`" — off on any internet-facing
+    # environment, since a complete API map is free reconnaissance. UAT can
+    # set it true deliberately when testers need the docs; production should
+    # not.
+    api_docs_public: bool | None = None
     app_debug: bool = False
     secret_key: str = Field(default="dev-only-insecure-secret-change-me", min_length=16)
     frontend_base_url: str = "http://localhost:5173"
@@ -293,6 +299,37 @@ class Settings(BaseSettings):
     @property
     def ai_finnhub_source_list(self) -> list[str]:
         return [x.strip().lower() for x in self.ai_finnhub_sources.split(",") if x.strip()]
+
+    @property
+    def is_deployed(self) -> bool:
+        """True on any environment reachable from the internet.
+
+        Security behaviour keys off THIS, never off `app_env != "production"`.
+        That older form is a deny-list of one: it treats every environment
+        that is not literally named "production" as a trusted laptop, so
+        adding `uat` to the Literal would silently have un-hardened it —
+        cleartext service logins, public docs, a fake embedder. An allow-list
+        fails the safe way instead: a new deployed environment must be named
+        here to be trusted, and until it is, it gets the strict path.
+        """
+        return self.app_env in ("production", "uat")
+
+    @property
+    def docs_are_public(self) -> bool:
+        """Resolved docs visibility: explicit setting, else off when deployed."""
+        if self.api_docs_public is None:
+            return not self.is_deployed
+        return self.api_docs_public
+
+    @property
+    def env_tag(self) -> str:
+        """Short label for alert subjects, e.g. "UAT".
+
+        Production returns "" so its subjects stay exactly as they are today.
+        Everything else is tagged, because an admin alert that does not say
+        which environment it came from costs more time than it saves.
+        """
+        return "" if self.app_env == "production" else self.app_env.upper()
 
     @property
     def effective_alert_receiver(self) -> str:
