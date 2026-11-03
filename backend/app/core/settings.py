@@ -74,6 +74,15 @@ class Settings(BaseSettings):
     # Batch jobs
     batch_job_times_et: str = "09:35,12:30,16:05"
     batch_jobs_enabled: bool = True
+    # Log and price-history retention sweep. Off-peak by default so a long
+    # delete never overlaps a pipeline run.
+    log_cleanup_time_et: str = "03:15"  # HH:MM in US/Eastern
+    # Minute past each weekday hour that the pipeline heartbeat checks in.
+    # Deliberately not :00 — every cron on the box fires then.
+    heartbeat_minute: int = 20
+    # Self-ping interval that stops Railway sleeping the container. Longer
+    # than Railway's idle window would let the scheduler die between runs.
+    keepalive_interval_seconds: int = 300
 
     # CORS — comma-separated list of origins
     cors_origins: str = "http://localhost:5173"
@@ -385,6 +394,11 @@ class Settings(BaseSettings):
     @property
     def intraday_market_close(self) -> tuple[int, int]:
         h, m = self.intraday_market_close_et.split(":")
+        return int(h), int(m)
+
+    @property
+    def log_cleanup_time(self) -> tuple[int, int]:
+        h, m = self.log_cleanup_time_et.split(":")
         return int(h), int(m)
 
     @property

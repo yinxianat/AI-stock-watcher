@@ -124,6 +124,9 @@ export const api = {
     request(`/admin/delivery${day ? `?day=${encodeURIComponent(day)}` : ''}`,
       { auth: true, ...opts }),
   adminStorage: (opts) => request('/admin/storage', { auth: true, ...opts }),
+  // Job times, read from configuration and cross-checked against the
+  // scheduler that is actually running.
+  adminSchedule: (opts) => request('/admin/schedule', { auth: true, ...opts }),
   adminMlCorpus: (opts) => request('/admin/ml-corpus', { auth: true, ...opts }),
 
   // Data Lens — the read-only SQL console. The SQL goes in the body, never a

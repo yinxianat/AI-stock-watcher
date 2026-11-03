@@ -186,6 +186,63 @@ function Reading({ reading, onPickQuery }) {
   );
 }
 
+// When each background job runs, every time read from the setting named
+// beside it. The point of showing `configured` and `next run` side by side is
+// that they can differ: an env var changed in Railway does nothing until the
+// container restarts, and that gap has no other symptom.
+function Schedule({ schedule }) {
+  return (
+    <div className="card">
+      <h3 className="dl-side-title">When things run</h3>
+      <p className="muted" style={{ fontSize: 12, margin: '0 0 10px' }}>
+        {schedule.note}
+      </p>
+      {schedule.disagreements?.length > 0 && (
+        <div className="flash warn dl-note">
+          {schedule.disagreements.map((d, i) => <p key={i} style={{ margin: 0 }}>{d}</p>)}
+        </div>
+      )}
+      {!schedule.scheduler_running && (
+        <p className="muted dl-note">
+          No scheduler is running in this process, so only the configured
+          column is meaningful.
+        </p>
+      )}
+      <div className="dl-grid-wrap">
+        <table className="dl-grid dl-schedule">
+          <thead>
+            <tr>
+              <th>Job</th><th>What it does</th><th>Cadence</th>
+              <th>Configured</th><th>Set by</th><th>Next run</th>
+            </tr>
+          </thead>
+          <tbody>
+            {schedule.jobs.map((j) => (
+              <tr key={j.job_id} className={j.agrees === false ? 'dl-row-warn' : undefined}>
+                <td>{j.job_id}</td>
+                <td className="dl-wrap">{j.what}</td>
+                <td>{j.cadence}</td>
+                <td>{j.configured}</td>
+                <td><code>{j.setting}</code></td>
+                <td>
+                  {j.enabled === false
+                    ? <span className="dl-null">switched off</span>
+                    : (j.next_run_et ?? <span className="dl-null">—</span>)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {schedule.unlisted?.length > 0 && (
+        <p className="muted dl-note" style={{ marginTop: 8 }}>
+          Registered but not described here: {schedule.unlisted.join(', ')}.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // The grid. Deliberately not sortable by clicking a header: ORDER BY is one
 // of the things this console exists to teach, and a client-side sort over
 // one capped page would also be a lie about the rest of the table.
@@ -280,6 +337,7 @@ export default function DataLens() {
   const signedIn = !!getToken();
   const [schema, setSchema] = useState(null);
   const [library, setLibrary] = useState(null);
+  const [schedule, setSchedule] = useState(null);
   const [denied, setDenied] = useState(null);
 
   const [sql, setSql] = useState('');
@@ -291,6 +349,7 @@ export default function DataLens() {
   const [history, setHistory] = useState(loadHistory);
   const [openCategory, setOpenCategory] = useState('start');
   const [copied, setCopied] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [reading, setReading] = useState(null);
   const [explaining, setExplaining] = useState(false);
   const [aiError, setAiError] = useState(null);
@@ -313,6 +372,13 @@ export default function DataLens() {
           ? 'This account is not an admin.'
           : (e.message || 'Could not load the console.'));
         if (e?.status !== 403 && e?.status !== 401) logError('data-lens', e, 'load');
+      });
+    // Separate request: the console is still useful if this one fails, so a
+    // schedule that will not load should not blank the page.
+    api.adminSchedule()
+      .then(setSchedule)
+      .catch((e) => {
+        if (e?.status !== 403 && e?.status !== 401) logError('data-lens', e, 'schedule');
       });
   }, [signedIn]);
 
@@ -422,6 +488,17 @@ export default function DataLens() {
     navigator.clipboard?.writeText(lines.join('\n'))
       .then(() => setCopied(true))
       .catch((e) => logError('data-lens', e, 'copy'));
+  };
+
+  // The PDF writer is ~200 kB, so it is fetched on the press rather than on
+  // every page load. That also means the first press waits on a download.
+  const savePdf = () => {
+    if (!result || saving) return;
+    setSaving(true);
+    import('../lib/dataLensPdf.js')
+      .then((m) => m.exportPdf({ sql: result.sql, result, reading }))
+      .catch((e) => logError('data-lens', e, 'pdf'))
+      .finally(() => setSaving(false));
   };
 
   if (!signedIn) return <Navigate to="/" replace />;
@@ -546,6 +623,17 @@ export default function DataLens() {
                   {copied ? 'Copied' : 'Copy as TSV'}
                 </button>
               )}
+              {result && (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={savePdf}
+                  disabled={saving}
+                  title="Every row, plus the AI reading if there is one"
+                >
+                  {saving ? 'Building…' : 'Save PDF'}
+                </button>
+              )}
             </div>
             <p className="muted dl-help">
               Tab completes a table or column name. Type <code>jr.</code> after
@@ -588,6 +676,8 @@ export default function DataLens() {
               )}
             </div>
           )}
+
+          {schedule && <Schedule schedule={schedule} />}
 
           {history.length > 0 && (
             <div className="card">

@@ -585,3 +585,10 @@ button.link-button:disabled:hover { background: none; color: var(--muted); text-
   overflow-x: auto;
   white-space: nowrap;
 }
+
+/* The schedule table wants wrapped prose in one column, unlike a result
+   grid where every cell is a value. */
+.dl-schedule td, .dl-schedule th { font-family: inherit; }
+.dl-schedule .dl-wrap { white-space: normal; min-width: 220px; }
+.dl-schedule code { font-size: 11px; }
+.dl-row-warn { background: rgba(245, 196, 81, 0.1); }

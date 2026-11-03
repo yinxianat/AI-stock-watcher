@@ -40,8 +40,6 @@ def _cron(**kwargs) -> CronTrigger:
 # Without this, the in-process scheduler dies when Railway scales to zero.
 # ---------------------------------------------------------------------------
 
-_KEEPALIVE_INTERVAL_SECONDS = 300  # 5 minutes
-
 
 def _self_ping() -> None:
     """Hit our own /healthz endpoint to keep the container awake.
@@ -176,10 +174,17 @@ def start_scheduler() -> BackgroundScheduler:
 
     # ---- Log configuration summary so prod deploys are self-documenting ----
     log.info(
-        "Scheduler config: BATCH_JOB_TIMES_ET=%s, INTRADAY_INGEST_ENABLED=%s, "
+        "Scheduler config: BATCH_JOB_TIMES_ET=%s, RECAP_TIME_ET=%s, "
+        "DAILY_SUMMARY_TIME_ET=%s, LOG_CLEANUP_TIME_ET=%s, HEARTBEAT_MINUTE=%s, "
+        "KEEPALIVE_INTERVAL_SECONDS=%s, INTRADAY_INGEST_ENABLED=%s, "
         "INTRADAY_TICK_MINUTES=%s, MARKET_WINDOW=%s-%s ET, "
         "STOCK_DATA_PROVIDER=%s, DAILY_SUMMARY_ENABLED=%s",
         settings.batch_job_times_et,
+        settings.recap_time_et,
+        settings.daily_summary_time_et,
+        settings.log_cleanup_time_et,
+        settings.heartbeat_minute,
+        settings.keepalive_interval_seconds,
         settings.intraday_ingest_enabled,
         settings.intraday_tick_minutes,
         settings.intraday_market_open_et,
@@ -231,28 +236,30 @@ def start_scheduler() -> BackgroundScheduler:
     else:
         log.warning("Watchlist recap DISABLED — skipping registration")
 
-    # Log retention cleanup — daily at 03:15 ET (off-peak).
+    # Log and price-history retention sweep — off-peak, from config.
     from app.jobs.cleanup import run_cleanup
 
+    ch, cm = settings.log_cleanup_time
     sched.add_job(
         run_cleanup,
-        _cron(hour=3, minute=15),
+        _cron(hour=ch, minute=cm),
         id="log_cleanup",
         replace_existing=True,
     )
-    log.info("Registered job: log_cleanup (daily 03:15 ET)")
+    log.info("Registered job: log_cleanup (daily %02d:%02d ET)", ch, cm)
 
     # Pipeline heartbeat — hourly on weekdays, alerts if no successful
     # pipeline in the last ~26 hours.
     from app.jobs.heartbeat import run_heartbeat
 
+    hb = int(settings.heartbeat_minute) % 60
     sched.add_job(
         run_heartbeat,
-        _cron(day_of_week="mon-fri", minute=20),
+        _cron(day_of_week="mon-fri", minute=hb),
         id="pipeline_heartbeat",
         replace_existing=True,
     )
-    log.info("Registered job: pipeline_heartbeat (Mon-Fri hourly at :20)")
+    log.info("Registered job: pipeline_heartbeat (Mon-Fri hourly at :%02d)", hb)
 
     # Intraday capture — every INTRADAY_TICK_MINUTES during US market hours
     # on weekdays. The job itself also re-checks market hours so it's safe
@@ -290,13 +297,14 @@ def start_scheduler() -> BackgroundScheduler:
         log.warning("Intraday ingest DISABLED — skipping registration")
 
     # Keepalive self-ping — prevents Railway from sleeping the container.
+    keepalive = max(30, int(settings.keepalive_interval_seconds))
     sched.add_job(
         _self_ping,
-        IntervalTrigger(seconds=_KEEPALIVE_INTERVAL_SECONDS),
+        IntervalTrigger(seconds=keepalive),
         id="keepalive_self_ping",
         replace_existing=True,
     )
-    log.info("Registered job: keepalive_self_ping (every %ds)", _KEEPALIVE_INTERVAL_SECONDS)
+    log.info("Registered job: keepalive_self_ping (every %ds)", keepalive)
 
     total_jobs = len(sched.get_jobs())
     log.info("Scheduler starting with %d registered jobs", total_jobs)

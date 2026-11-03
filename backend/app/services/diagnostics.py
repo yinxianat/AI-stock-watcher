@@ -214,7 +214,173 @@ def expected_jobs() -> list[ExpectedJob]:
     if s.daily_summary_enabled:
         sh, sm = s.daily_summary_time
         out.append(ExpectedJob("daily_summary", sh, sm, False))
+    # The retention sweep belongs here too. It was missing, which meant a
+    # cleanup that silently stopped running would never be flagged — and
+    # cleanup stopping is how a disk fills up without anyone noticing.
+    ch, cm = s.log_cleanup_time
+    out.append(ExpectedJob("log_cleanup", ch, cm, False))
     return out
+
+
+# ---------------------------------------------------------------------------
+# What is scheduled, and whether the live scheduler agrees
+#
+# Every time below is read from settings, never written down twice. The
+# cross-check against the running APScheduler is the point: changing
+# RECAP_TIME_ET in Railway does nothing until the container restarts, and
+# without this panel the only symptom is a recap arriving at the old time
+# while the dashboard insists it is configured for the new one.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ScheduledJob:
+    """One registered job: what it does, when config says it runs, and when
+    the live scheduler thinks it runs next."""
+
+    job_id: str
+    what: str
+    cadence: str
+    setting: str
+    configured: str
+    enabled: bool
+    # The configured slot as numbers, so the cross-check compares integers
+    # instead of parsing `configured` back out of its own display string.
+    # `hour` is None for an hourly job (the minute is the whole slot); both
+    # are None for an interval job, which has no wall-clock slot at all.
+    hour: int | None = None
+    minute: int | None = None
+
+
+def scheduled_jobs() -> list[ScheduledJob]:
+    """Every job the scheduler registers, described from configuration."""
+    s = get_settings()
+    out = [
+        ScheduledJob(
+            f"pipeline_{h:02d}{m:02d}",
+            "ingest → compute → notify",
+            "Mon-Fri",
+            "BATCH_JOB_TIMES_ET",
+            f"{h:02d}:{m:02d} ET",
+            s.batch_jobs_enabled,
+            hour=h, minute=m,
+        )
+        for h, m in s.batch_times
+    ]
+    rh, rm = s.recap_time
+    out.append(ScheduledJob(
+        "watchlist_recap", "Daily watchlist recap email per user", "Mon-Fri",
+        "RECAP_TIME_ET", f"{rh:02d}:{rm:02d} ET", s.recap_enabled,
+        hour=rh, minute=rm,
+    ))
+    sh, sm = s.daily_summary_time
+    out.append(ScheduledJob(
+        "daily_summary", "HEALTHY / DEGRADED / UNHEALTHY digest to the admin",
+        "Daily", "DAILY_SUMMARY_TIME_ET", f"{sh:02d}:{sm:02d} ET",
+        s.daily_summary_enabled, hour=sh, minute=sm,
+    ))
+    ch, cm = s.log_cleanup_time
+    out.append(ScheduledJob(
+        "log_cleanup", "Delete logs past LOG_LIFETIME and closes past "
+                       "PRICE_HISTORY_LIFETIME",
+        "Daily", "LOG_CLEANUP_TIME_ET", f"{ch:02d}:{cm:02d} ET", True,
+        hour=ch, minute=cm,
+    ))
+    out.append(ScheduledJob(
+        "pipeline_heartbeat", "Alerts once if no pipeline ran when one was due",
+        "Mon-Fri, hourly", "HEARTBEAT_MINUTE",
+        f":{int(s.heartbeat_minute) % 60:02d} past the hour", True,
+        minute=int(s.heartbeat_minute) % 60,
+    ))
+    oh, om = s.intraday_market_open
+    cl_h, cl_m = s.intraday_market_close
+    out.append(ScheduledJob(
+        "intraday_capture", "Price tick and alert check during market hours",
+        f"Mon-Fri {oh:02d}:{om:02d}-{cl_h:02d}:{cl_m:02d} ET",
+        "INTRADAY_TICK_MINUTES",
+        f"every {s.intraday_tick_minutes} min", s.intraday_ingest_enabled,
+    ))
+    out.append(ScheduledJob(
+        "keepalive_self_ping", "Stops Railway sleeping the container", "Always",
+        "KEEPALIVE_INTERVAL_SECONDS",
+        f"every {s.keepalive_interval_seconds}s", True,
+    ))
+    return out
+
+
+def schedule_report(scheduler: object | None = None) -> dict:
+    """The schedule from configuration, checked against the live scheduler.
+
+    `scheduler` is the APScheduler instance from `app.state`. Without one —
+    in tests, or when BATCH_JOBS_ENABLED is false — the configured half is
+    still reported and the live half says so, rather than the whole panel
+    going blank.
+    """
+    live: dict[str, datetime | None] = {}
+    running = False
+    if scheduler is not None:
+        running = bool(getattr(scheduler, "running", False))
+        for job in getattr(scheduler, "get_jobs", list)():
+            live[job.id] = getattr(job, "next_run_time", None)
+
+    rows = []
+    disagrees = []
+    for job in scheduled_jobs():
+        nxt = live.get(job.job_id)
+        row = {
+            "job_id": job.job_id,
+            "what": job.what,
+            "cadence": job.cadence,
+            "setting": job.setting,
+            "configured": job.configured,
+            "enabled": job.enabled,
+            "registered": job.job_id in live,
+            "next_run": nxt.isoformat() if nxt else None,
+            "next_run_et": et(nxt) if nxt else None,
+            "agrees": None,
+        }
+        # A job that is off is not expected to be registered, so silence is
+        # the right answer rather than a finding.
+        if job.enabled and scheduler is not None and not row["registered"]:
+            row["agrees"] = False
+            disagrees.append(
+                f"{job.job_id} is enabled in config but is not registered with "
+                "the running scheduler."
+            )
+        elif nxt is not None and job.minute is not None:
+            # An interval job has no slot to compare, so `minute is None`
+            # skips it. An hourly job compares the minute only; everything
+            # else compares both halves of the clock.
+            at = nxt.astimezone(_ET)
+            ok = at.minute == job.minute and (
+                job.hour is None or at.hour == job.hour
+            )
+            row["agrees"] = ok
+            if not ok:
+                disagrees.append(
+                    f"{job.job_id} is configured for {job.configured} but the "
+                    f"running scheduler fires it next at {et(nxt)}. The "
+                    "container has not picked up the change — redeploy."
+                )
+        rows.append(row)
+
+    extra = sorted(set(live) - {j.job_id for j in scheduled_jobs()})
+    return {
+        "scheduler_running": running,
+        "scheduler_timezone": "US/Eastern",
+        "timezone": TIMEZONE_NOTE,
+        "jobs": rows,
+        # Registered but not described above: either a job someone added
+        # without listing it here, or a stale id left by a rename.
+        "unlisted": extra,
+        "disagreements": disagrees,
+        "note": (
+            "Every time here is read from the setting named beside it. A "
+            "change in Railway takes effect when the container restarts, so "
+            "a disagreement between the configured and next-run columns "
+            "means a redeploy is pending."
+        ),
+    }
 
 
 def jobs_report(day: date_, db: DBSession | None = None) -> dict:
