@@ -27,6 +27,11 @@ Two reasons history isn't on Finnhub here:
      registration flow — just sign up at https://twelvedata.com and paste
      the key into TWELVEDATA_API_KEY.
 
+Rate limits are enforced on our side before each request, from
+FINNHUB_MAX_PER_MIN (default 50, ceiling 60) and TWELVEDATA_MAX_PER_MIN
+(default 8, which is the ceiling). Both free tiers are per-minute, and the
+jobs are the only callers, so a sliding window is enough.
+
 Adding a new provider: implement quote/prev-close/history functions and
 route them in the public dispatchers below.
 """
@@ -34,7 +39,9 @@ route them in the public dispatchers below.
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from collections import defaultdict, deque
 from datetime import date as date_, datetime, timedelta, timezone
 
 import httpx
@@ -46,6 +53,63 @@ log = logging.getLogger(__name__)
 # httpx timeout for all upstream calls. Kept short so a hung provider can't
 # stall an entire ingest run.
 _HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=10.0)
+
+
+# ---------------------------------------------------------------------------
+# Client-side rate limiting
+# ---------------------------------------------------------------------------
+#
+# Both free tiers are per-minute: Finnhub 60/min, Twelve Data 8/min. The
+# jobs used to fire one request per ticker as fast as httpx would go, so a
+# watchlist bigger than the ceiling burst straight past it and the overflow
+# came back 429 — logged as a fetch warning and then skipped, which looks
+# like an upstream outage rather than our own impatience.
+#
+# A sliding-window limiter is enough here: the callers are a handful of
+# in-process jobs, not a fleet, and the only cost of waiting is wall-clock
+# inside a 30-minute tick.
+
+_rate_lock = threading.Lock()
+_call_times: dict[str, deque[float]] = defaultdict(deque)
+
+# Hard ceiling on how long one call will wait for a slot. Past this the job
+# is better off skipping the ticker than holding the whole run open.
+_MAX_RATE_WAIT = 75.0
+
+
+def _rate_limit(provider: str, per_min: int) -> bool:
+    """Block until `provider` has a request slot free. False if the wait
+    would exceed `_MAX_RATE_WAIT` (caller should skip rather than hang).
+
+    Thread-safe, and the sleep happens outside the lock so concurrent
+    callers queue instead of serialising on it.
+    """
+    if per_min <= 0:
+        return True
+    deadline = time.monotonic() + _MAX_RATE_WAIT
+    while True:
+        now = time.monotonic()
+        with _rate_lock:
+            calls = _call_times[provider]
+            while calls and now - calls[0] >= 60.0:
+                calls.popleft()
+            if len(calls) < per_min:
+                calls.append(now)
+                return True
+            # Oldest call in the window leaves it this many seconds from now.
+            wait = 60.0 - (now - calls[0])
+        if now + wait > deadline:
+            log.warning(
+                "%s rate limit: a slot would not free up for %.1fs (limit %d/min); "
+                "skipping this call", provider, wait, per_min,
+            )
+            return False
+        time.sleep(min(wait + 0.01, 5.0))
+
+
+def reset_rate_limits_for_tests() -> None:
+    with _rate_lock:
+        _call_times.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +261,8 @@ def _finnhub_get(path: str, params: dict) -> dict | None:
     params = dict(params)
     params["token"] = key
     url = _FINNHUB_BASE + path
+    if not _rate_limit("finnhub", get_settings().finnhub_max_per_min):
+        return None
     t0 = time.monotonic()
     try:
         r = httpx.get(url, params=params, timeout=_HTTP_TIMEOUT)
@@ -276,6 +342,8 @@ def _fetch_twelvedata_raw(
         "format": "JSON",
         "apikey": key,
     }
+    if not _rate_limit("twelvedata", get_settings().twelvedata_max_per_min):
+        return None, None, "rate limit: no slot free"
     t0 = time.monotonic()
     try:
         r = httpx.get(
