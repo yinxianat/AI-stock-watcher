@@ -57,6 +57,11 @@ coverage/
 .vercel
 .railway
 
+# Local-only notes. The *.local.* pattern covers any future file too, so a
+# new private note is ignored by default rather than by remembering to add it.
+*.local.md
+*.local.txt
+
 # Ops runbook — kept locally, deliberately untracked.
 # Holds the real deployment topology and troubleshooting notes; this repo is
 # public. Removed from tracking in the commit that added this line. Earlier
