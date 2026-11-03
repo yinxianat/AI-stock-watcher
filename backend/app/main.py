@@ -169,8 +169,10 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     # The interactive docs publish a complete map of the API. Useful in
-    # development, free reconnaissance in production.
-    public_docs = settings.app_env != "production"
+    # development, free reconnaissance on anything internet-facing. Off for
+    # every deployed environment unless API_DOCS_PUBLIC says otherwise, so a
+    # new environment is never public by default.
+    public_docs = settings.docs_are_public
     app = FastAPI(
         title="Little Money Monkey API",
         version="0.1.0",

@@ -73,10 +73,11 @@ def _require_https(request: Request) -> None:
     """Refuse to accept the secret over cleartext.
 
     Railway terminates TLS, so the scheme we see is http and the real one
-    is in X-Forwarded-Proto. Only enforced in production, so local dev and
-    tests work over plain http.
+    is in X-Forwarded-Proto. Enforced on every deployed environment (UAT
+    included — it is on the public internet and holds a real admin secret),
+    and skipped only on a developer machine and in tests, which have no TLS.
     """
-    if get_settings().app_env != "production":
+    if not get_settings().is_deployed:
         return
     proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     if proto.split(",")[0].strip().lower() != "https":

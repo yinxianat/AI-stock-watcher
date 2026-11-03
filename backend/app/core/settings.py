@@ -20,7 +20,13 @@ class Settings(BaseSettings):
     """
 
     # App
-    app_env: Literal["development", "production", "test"] = "development"
+    app_env: Literal["development", "uat", "production", "test"] = "development"
+    # Whether the interactive docs (/docs, /redoc, /openapi.json) are served.
+    # Unset means "follow `is_deployed`" — off on any internet-facing
+    # environment, since a complete API map is free reconnaissance. UAT can
+    # set it true deliberately when testers need the docs; production should
+    # not.
+    api_docs_public: bool | None = None
     app_debug: bool = False
     secret_key: str = Field(default="dev-only-insecure-secret-change-me", min_length=16)
     frontend_base_url: str = "http://localhost:5173"
@@ -205,6 +211,25 @@ class Settings(BaseSettings):
     ai_news_domains: str = "finance.yahoo.com,cnbc.com,cnn.com,axios.com,npr.org,techcrunch.com"
     # News older than this many days doesn't count as today's reason.
     ai_news_max_age_days: int = 2
+
+    # ---- RAG over the FDIC Money Smart curriculum -------------------------
+    # Embeddings for `app/services/rag`. Blank falls back to the offline
+    # fake embedder, so the pipeline runs and tests pass without a key —
+    # but retrieval quality is only meaningful with a real model.
+    # "local" uses model2vec on this machine: free, offline, no quota, and
+    # it installs on Python 3.14 where torch does not reliably. "voyage" is
+    # the hosted option. Embeddings are a build-time step either way, so a
+    # local model costs production nothing.
+    rag_embedding_provider: Literal["local", "voyage"] = "local"
+    rag_local_model: str = "minishlab/potion-base-8M"
+    voyage_api_key: str = ""
+    # voyage-3-lite is 512-dimensional and the cheapest; the others are
+    # 1024. Changing this needs the pgvector column re-created, since
+    # `vector(N)` is fixed-width.
+    rag_embedding_model: str = "voyage-3-lite"
+    # Chunks fed to the generator per query. Each is ~300 tokens, so 5 is
+    # ~1.5K of context — enough grounding without crowding the prompt.
+    rag_top_k: int = 5
     # Whole-market benchmark, so a story can say "most stocks fell today".
     ai_market_symbol: str = "SPY"
 
@@ -274,6 +299,37 @@ class Settings(BaseSettings):
     @property
     def ai_finnhub_source_list(self) -> list[str]:
         return [x.strip().lower() for x in self.ai_finnhub_sources.split(",") if x.strip()]
+
+    @property
+    def is_deployed(self) -> bool:
+        """True on any environment reachable from the internet.
+
+        Security behaviour keys off THIS, never off `app_env != "production"`.
+        That older form is a deny-list of one: it treats every environment
+        that is not literally named "production" as a trusted laptop, so
+        adding `uat` to the Literal would silently have un-hardened it —
+        cleartext service logins, public docs, a fake embedder. An allow-list
+        fails the safe way instead: a new deployed environment must be named
+        here to be trusted, and until it is, it gets the strict path.
+        """
+        return self.app_env in ("production", "uat")
+
+    @property
+    def docs_are_public(self) -> bool:
+        """Resolved docs visibility: explicit setting, else off when deployed."""
+        if self.api_docs_public is None:
+            return not self.is_deployed
+        return self.api_docs_public
+
+    @property
+    def env_tag(self) -> str:
+        """Short label for alert subjects, e.g. "UAT".
+
+        Production returns "" so its subjects stay exactly as they are today.
+        Everything else is tagged, because an admin alert that does not say
+        which environment it came from costs more time than it saves.
+        """
+        return "" if self.app_env == "production" else self.app_env.upper()
 
     @property
     def effective_alert_receiver(self) -> str:
