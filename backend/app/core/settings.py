@@ -105,6 +105,21 @@ class Settings(BaseSettings):
     # only needs it for the length of one run.
     service_token_ttl_minutes: int = 15
 
+    # Data Lens — the admin's read-only SQL console (app/services/data_lens.py).
+    # On by default: it cannot write, and the alternative is the admin running
+    # the same queries in Railway's console with no guard rails at all.
+    data_lens_enabled: bool = True
+    # Hard ceiling on rows returned to the browser, applied when the cursor is
+    # read rather than only as a LIMIT in the text.
+    data_lens_max_rows: int = 500
+    # Postgres statement_timeout for console queries. A careless join should
+    # fail in seconds rather than hold a connection against production.
+    data_lens_timeout_ms: int = 5000
+    # Masking email addresses out of results is the default, so a screenshot
+    # or a stolen session yields pseudonyms. The row id is always shown, which
+    # is enough to correlate against the rest of the dashboard.
+    data_lens_show_emails: bool = False
+
     # Logging & alerting
     alert_receiver: str = ""  # blank → falls back to smtp_username
     alerts_enabled: bool = True

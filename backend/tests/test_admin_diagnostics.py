@@ -59,7 +59,14 @@ def admin_on(client, monkeypatch):
 #     SERVICE_SAFE_PATHS, and sees pseudonyms.
 # ---------------------------------------------------------------------------
 
-HUMAN_ONLY_PATHS = ("/admin/diagnostics", "/admin/health-summary")
+HUMAN_ONLY_PATHS = (
+    "/admin/diagnostics",
+    "/admin/health-summary",
+    # The query console runs arbitrary SELECTs, so it can make no
+    # promise about personal data and the agent must never reach it.
+    "/admin/data-lens/schema",
+    "/admin/data-lens/queries",
+)
 
 
 @pytest.fixture
