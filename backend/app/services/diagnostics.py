@@ -199,6 +199,19 @@ class ExpectedJob:
     hour: int
     minute: int
     weekdays_only: bool
+    # The name the job writes into `job_runs`, which is NOT always its
+    # scheduler id. The pipeline is registered three times as
+    # `pipeline_0935` / `pipeline_1230` / `pipeline_1605` but records every
+    # run as `batch_pipeline`; the retention sweep is registered as
+    # `log_cleanup` and records itself as `cleanup`. Matching a scheduler id
+    # against an audit name finds nothing and reports a job that ran fine as
+    # missing, which is the most expensive kind of monitoring bug: it trains
+    # you to ignore the dashboard.
+    audit_name: str | None = None
+
+    @property
+    def recorded_as(self) -> str:
+        return self.audit_name or self.job_id
 
 
 def expected_jobs() -> list[ExpectedJob]:
@@ -206,7 +219,8 @@ def expected_jobs() -> list[ExpectedJob]:
     so changing BATCH_JOB_TIMES_ET keeps this honest."""
     s = get_settings()
     out = [
-        ExpectedJob(f"pipeline_{h:02d}{m:02d}", h, m, True) for h, m in s.batch_times
+        ExpectedJob(f"pipeline_{h:02d}{m:02d}", h, m, True, audit_name="batch_pipeline")
+        for h, m in s.batch_times
     ]
     if s.recap_enabled:
         rh, rm = s.recap_time
@@ -218,7 +232,7 @@ def expected_jobs() -> list[ExpectedJob]:
     # cleanup that silently stopped running would never be flagged — and
     # cleanup stopping is how a disk fills up without anyone noticing.
     ch, cm = s.log_cleanup_time
-    out.append(ExpectedJob("log_cleanup", ch, cm, False))
+    out.append(ExpectedJob("log_cleanup", ch, cm, False, audit_name="cleanup"))
     return out
 
 
@@ -399,20 +413,29 @@ def jobs_report(day: date_, db: DBSession | None = None) -> dict:
             .order_by(JobRun.started_at)
         ).scalars().all()
 
-        by_id: dict[str, list[JobRun]] = {}
+        by_name: dict[str, list[JobRun]] = {}
         for r in runs:
-            by_id.setdefault(r.job_name, []).append(r)
+            by_name.setdefault(r.job_name, []).append(r)
 
         weekday = day.weekday() < 5
         slots = []
+        # One run belongs to one slot. Three pipeline slots all record
+        # `batch_pipeline`, so taking the first match for each would credit
+        # every slot with the 09:35 run and report the other two as hours
+        # late. Each slot claims the nearest run not already taken.
+        claimed: set[int] = set()
         for exp in expected_jobs():
             if exp.weekdays_only and not weekday:
                 continue
             want_utc = datetime.combine(
                 day, time(exp.hour, exp.minute), tzinfo=_ET
             ).astimezone(_UTC)
-            got = by_id.get(exp.job_id) or []
-            first = got[0] if got else None
+            free = [r for r in by_name.get(exp.recorded_as, []) if id(r) not in claimed]
+            first = min(
+                free, key=lambda r: abs((r.started_at - want_utc).total_seconds()),
+            ) if free else None
+            if first is not None:
+                claimed.add(id(first))
             drift = (
                 round((first.started_at - want_utc).total_seconds() / 60)
                 if first else None
