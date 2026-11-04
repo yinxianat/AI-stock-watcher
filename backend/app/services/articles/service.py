@@ -28,6 +28,7 @@ from concurrent.futures import Executor, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from email.utils import make_msgid, parseaddr
+from time import monotonic
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -71,7 +72,10 @@ def _run_with(provider: str, req: ArticleRequest) -> GenerationResult:
         claude.research if get_settings().news_source_for(provider) == "web_search"
         else partial(news.research_from_news, gen)
     )
-    return run_pipeline(req, research, partial(stages.write, gen), partial(stages.review, gen))
+    return run_pipeline(
+        req, research, partial(stages.write, gen), partial(stages.review, gen),
+        deadline=_current_deadline(),
+    )
 
 
 def _generate_with_ai(req: ArticleRequest) -> GenerationResult:
@@ -291,6 +295,23 @@ def check_config() -> None:
         threading.Thread(target=health.startup_check, name="ai-setup-check", daemon=True).start()
 
 
+# The point past which a retry must not be started, for the story running
+# in THIS thread.
+#
+# A thread-local rather than an argument because `generate_article` is a
+# module-level seam that tests and the fallback-provider logic replace, and
+# most of the doubles take `(req)` alone. Threading a deadline through a
+# seam whose whole purpose is to be swapped out means every double has to
+# remember to forward it, and one that forgets silently removes the time
+# limit instead of failing. `_generate_and_store` and `_run_with` are
+# always the same thread, so this reaches the pipeline either way.
+_deadline = threading.local()
+
+
+def _current_deadline() -> float | None:
+    return getattr(_deadline, "value", None)
+
+
 def _get_executor() -> Executor:
     global _executor
     if _executor is None:
@@ -306,8 +327,9 @@ def _get_executor() -> Executor:
     return _executor
 
 
-def _submit(article_id: int, req: ArticleRequest) -> None:
-    fut = _get_executor().submit(_generate_and_store, article_id, req)
+def _submit(article_id: int, req: ArticleRequest,
+            deadline: float | None = None) -> None:
+    fut = _get_executor().submit(_generate_and_store, article_id, req, deadline)
     with _lock:
         _futures[article_id] = fut
 
@@ -324,9 +346,11 @@ def _is_running(article_id: int) -> bool:
     return fut is not None and not fut.done()
 
 
-def _generate_and_store(article_id: int, req: ArticleRequest) -> None:
+def _generate_and_store(article_id: int, req: ArticleRequest,
+                        deadline: float | None = None) -> None:
     """Runs in a worker thread with its own DB session. Never raises."""
     db = get_session_factory()()
+    _deadline.value = deadline
     try:
         try:
             result = generate_article(req)
@@ -439,14 +463,29 @@ def _skip(reason: str, detail: str) -> delivery.StoryOutcome:
     )
 
 
-def ensure_articles(db: DBSession, candidates: list[Candidate]) -> StoryPlan:
+def ensure_articles(db: DBSession, candidates: list[Candidate],
+                    wait_budget_s: float | None = None) -> StoryPlan:
     """Story per candidate stock, keyed by ticker id: today's existing one, or
     a new `pending` one being generated. Stocks over the daily cap get none.
 
     Commits `db` first, so the caller's pending work isn't lost if creating a
     story row hits a race with another run.
+
+    `wait_budget_s` is how long the caller will wait in `wait_for`, and it
+    is the caller's to state because the two callers differ: an alert waits
+    AI_ARTICLE_WAIT_SECONDS, a recap waits RECAP_STORY_WAIT_SECONDS. It
+    becomes a deadline past which the pipeline will not start a rewrite.
+
+    The deadline is anchored HERE, when the batch is dispatched, not when a
+    story starts running. Generation is pooled at
+    AI_ARTICLE_MAX_CONCURRENT, so a story queued behind others starts late
+    while the caller's clock has been running the whole time. Measuring
+    from each story's own start would hand a queued story a budget that
+    outlives the wait it is supposed to fit inside — which is precisely the
+    overrun the deadline exists to prevent.
     """
     settings = get_settings()
+    deadline = monotonic() + wait_budget_s if wait_budget_s else None
     if not candidates:
         return StoryPlan({}, {})
     if not settings.ai_articles_enabled:
@@ -528,7 +567,7 @@ def ensure_articles(db: DBSession, candidates: list[Candidate]) -> StoryPlan:
                     symbol=c.ticker.symbol, company=c.ticker.name, trading_date=day,
                     direction=direction, move_pct=c.move_pct, price=c.price,
                     prev_close=c.prev_close, market_pct=market_pct,
-                ))
+                ), deadline)
         out[c.ticker.id] = row
     return StoryPlan(out, skipped)
 

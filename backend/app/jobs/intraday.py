@@ -393,7 +393,9 @@ def _stories_for(
     if not candidates:
         return {}, skipped
     try:
-        plan = articles.ensure_articles(db, list(candidates.values()))
+        plan = articles.ensure_articles(
+            db, list(candidates.values()), settings.ai_article_wait_seconds,
+        )
         articles.wait_for(db, list(plan.stories.values()), settings.ai_article_wait_seconds)
         return plan.stories, {**skipped, **plan.skipped}
     except Exception as e:  # noqa: BLE001
