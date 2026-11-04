@@ -796,3 +796,72 @@ class DeliveryOutcome(Base):
     sent_at: Mapped[datetime] = mapped_column(
         UTCDateTime, default=utcnow, index=True
     )
+class FindingState(Base):
+    """An admin's triage decision about one recurring monitoring finding,
+    plus how often that finding has been seen.
+
+    Findings are *derived*: `diagnostics.findings()` recomputes them from
+    the database on every page load, so there is no row to act on and
+    nothing for "I have seen this" to attach to. This table supplies the
+    missing identity — one row per `fingerprint`, which is the finding's
+    `code` plus the one job or table it names, and is therefore stable
+    across recomputation and across days.
+
+    Durable on purpose. It is not named in `app.jobs.cleanup`, so a
+    decision outlives the evidence that prompted it.
+
+    Recurrence lives on the same row rather than in a second table.
+    `days_seen` answers "is this day 1 or day 14?", which is what decides
+    whether a finding is noise or a trend, and keeping it here means there
+    is no growing history table to retain. The cost is that there is no
+    per-day timeline: "seen on 7 days" is available, "which 7" is not.
+
+    `state` is the admin's last *instruction*, never the effective state.
+    An acknowledgement past its `snooze_until`, and a `resolved` row seen
+    again afterwards, both read as new again — computed on read in
+    `app.services.triage`, so no finding can be permanently silenced by a
+    row nobody ever looks at again. That is the difference between a
+    dashboard you trust and one you learn to ignore.
+    """
+
+    __tablename__ = "finding_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # "code" for a finding about the whole system, "code:subject" for one
+    # that names a single job or table. Unique: this IS the identity.
+    fingerprint: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    code: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    subject: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # "new" (observed, never triaged) | "ack" | "working" | "backlog" |
+    # "resolved". A row exists as soon as a finding is seen, triaged or
+    # not, because recurrence is most worth knowing about the thing nobody
+    # has got to yet. Only `app.services.triage.STATES` may be set by a
+    # caller; "new" is storage-only.
+    state: Mapped[str] = mapped_column(String(12), nullable=False)
+    # Worth more than the state itself. "Railway free tier sleeps
+    # overnight, known" tells the next reader why it was parked; "ack"
+    # alone tells them nothing.
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Eastern calendar days, like every other date column here: these are
+    # days on a schedule, not instants. Never compare them to a timestamp.
+    snooze_until: Mapped[date_ | None] = mapped_column(Date, nullable=True)
+    resolved_on: Mapped[date_ | None] = mapped_column(Date, nullable=True)
+
+    first_seen_date: Mapped[date_] = mapped_column(Date, nullable=False)
+    last_seen_date: Mapped[date_] = mapped_column(Date, nullable=False)
+    # Distinct days on which this finding was observed, not observations:
+    # opening the dashboard five times in a morning must not read as five
+    # days of breakage.
+    days_seen: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # The last severity and one-line detail seen, so a triage list can be
+    # rendered without recomputing every day's report.
+    last_severity: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    last_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # The user id, not their address: an admin's email is personal data,
+    # and this table is served to the monitoring agent.
+    updated_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)

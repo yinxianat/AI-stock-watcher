@@ -7,6 +7,7 @@
   --accent: #4f9eff;
   --accent-2: #2d6dc7;
   --danger: #ff6b6b;
+  --warn: #f5c451;
   --ok: #5dd39e;
 }
 
@@ -66,6 +67,107 @@ button {
 button:hover { background: var(--accent-2); }
 button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
 button.danger { background: var(--danger); }
+
+/* Disclosure controls on the monitoring page: a bordered control that reads
+   as "there is more behind this", not a primary action. The `button` rule
+   above sets `color: white`, so a button that overrides only its background
+   renders white text on its own background and disappears. Anything that
+   expands a panel uses this class instead of an inline background. */
+button.disclosure {
+  background: var(--bg);
+  color: var(--accent);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  padding: 6px 12px;
+}
+button.disclosure:hover {
+  background: var(--panel);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+button.disclosure[disabled] { color: var(--muted); cursor: default; }
+button.disclosure[disabled]:hover { background: var(--bg); border-color: var(--border); }
+
+/* ---------- Monitoring triage ---------- */
+
+/* One click from the collapsed row. Anything that costs an expand, a click
+   and a confirm does not get used, and the findings list goes back to
+   being re-read every morning instead of worked through. */
+.triage-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+button.triage-action {
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  min-height: 0;
+}
+button.triage-action:hover {
+  background: var(--panel);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* The state this finding is already in. */
+button.triage-action[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+button.triage-action[disabled] { opacity: 0.5; cursor: default; }
+
+input.triage-note {
+  width: auto;
+  flex: 1 1 180px;
+  min-width: 140px;
+  padding: 3px 8px;
+  font-size: 12px;
+  min-height: 0;
+}
+
+/* Short, loud labels for the two things a reader must not skim past: a
+   finding that was fixed and is back, and a snooze that quietly ended. */
+.triage-flag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  vertical-align: 1px;
+  background: rgba(245, 196, 81, 0.15);
+  color: var(--warn);
+  border: 1px solid rgba(245, 196, 81, 0.4);
+}
+.triage-flag-back {
+  background: rgba(255, 107, 107, 0.15);
+  color: var(--danger);
+  border-color: rgba(255, 107, 107, 0.45);
+}
+.triage-flag-working {
+  background: rgba(79, 158, 255, 0.15);
+  color: var(--accent);
+  border-color: rgba(79, 158, 255, 0.45);
+}
+
+@media (max-width: 600px) {
+  /* Tap targets, but not so tall that five of them push the finding's own
+     text off the screen. */
+  button.triage-action { min-height: 32px; padding: 4px 12px; }
+  /* Back to 16px here on purpose: the phone block's `input { font-size:
+     16px }` is the iOS zoom-on-focus guard, and `input.triage-note` is
+     more specific, so it would have quietly overridden it at every width. */
+  input.triage-note { min-height: 32px; flex-basis: 100%; font-size: 16px; }
+}
 
 label { display: block; margin: 12px 0 4px; color: var(--muted); font-size: 13px; }
 
@@ -292,7 +394,7 @@ td.actions a { margin-right: 12px; }
 }
 
 /* ---------- Email preferences ---------- */
-.flash.warn { background: rgba(255, 193, 7, 0.12); color: #f5c451; }
+.flash.warn { background: rgba(255, 193, 7, 0.12); color: var(--warn); }
 label.toggle {
   display: flex;
   align-items: center;
