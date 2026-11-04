@@ -7,6 +7,7 @@ from .models import (  # noqa: F401
     DailyClose,
     DeliveryOutcome,
     EmailOptOut,
+    FindingState,
     InfoLog,
     IntradayPrice,
     JobRun,

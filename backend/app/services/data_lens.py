@@ -326,6 +326,21 @@ TABLE_NOTES: dict[str, TableNote] = {
         "every sending job, via app/services/delivery.py",
         "sent_at",
     ),
+    "finding_states": TableNote(
+        "The admin's triage decisions about monitoring findings, plus how "
+        "many distinct days each one has been seen. A finding itself is "
+        "derived fresh on every dashboard load and has no row anywhere; "
+        "this is the only durable thing about it. `state` is the last "
+        "instruction given, NOT what the dashboard shows — an `ack` past "
+        "its `snooze_until`, and a `resolved` row whose `last_seen_date` is "
+        "after `resolved_on`, both read as new again. Query "
+        "`days_seen` to find what has been quietly recurring for weeks.",
+        "Durable. Not pruned by the cleanup job: a decision has to outlive "
+        "the evidence that prompted it.",
+        "the dashboard read and the daily summary job, via "
+        "app/services/triage.py",
+        "updated_at",
+    ),
     "article_followups": TableNote(
         "A user whose alert said \"we're still looking\" and is owed the story "
         "as a threaded reply. `status` is waiting → sent | abandoned.",

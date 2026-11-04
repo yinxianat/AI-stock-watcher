@@ -129,6 +129,15 @@ export const api = {
   adminSchedule: (opts) => request('/admin/schedule', { auth: true, ...opts }),
   adminMlCorpus: (opts) => request('/admin/ml-corpus', { auth: true, ...opts }),
 
+  // Triage. The states and their descriptions are served rather than
+  // duplicated here, so the wording cannot drift from the backend's.
+  adminTriageStates: (opts) => request('/admin/triage-states', { auth: true, ...opts }),
+  // The one write on the admin surface. Session auth only — the monitoring
+  // agent can read findings but must not be able to silence them.
+  adminSetFindingState: (fingerprint, body, opts) =>
+    request(`/admin/findings/${encodeURIComponent(fingerprint)}/state`,
+      { method: 'POST', body, auth: true, ...opts }),
+
   // Data Lens — the read-only SQL console. The SQL goes in the body, never a
   // query string: query strings are written to proxy and access logs, and a
   // SELECT naming someone's email address does not belong in one.
