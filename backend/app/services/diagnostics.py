@@ -528,7 +528,15 @@ def _story_why(status: str, diag: dict, move_pct: float) -> str:
     records plenty about each attempt; none of it reached the screen, so
     the one question the count raises — *why* — had no answer on the page.
     """
+    attempts = diag.get("write_attempts") or 1
+
     if status == "ready":
+        if attempts > 1:
+            earlier = (diag.get("rejections") or [{}])[0].get("rejected_by")
+            return (
+                f"Written, checked and sent, but only on attempt {attempts}: the first "
+                f"was rejected ({earlier}). The retry saved this one."
+            )
         return "Written, checked and sent."
     if status == "pending":
         return "Still being written, or abandoned partway."
@@ -547,7 +555,15 @@ def _story_why(status: str, diag: dict, move_pct: float) -> str:
         }.get(rejected, rejected)
         problems = diag.get("shared_problems") or diag.get("reviewer_problems") or []
         tail = f" Reported: {'; '.join(str(x) for x in problems[:3])}." if problems else ""
-        return f"Written, then dropped because {detail}.{tail}"
+        attempted = (
+            f" Rewritten and rejected {attempts} times" if attempts > 1 else ""
+        )
+        skipped = diag.get("retry_skipped")
+        if skipped:
+            attempted += f" No retry: {skipped}."
+        elif attempted:
+            attempted += " — the writer could not get past the reviewer, so nothing was sent."
+        return f"Written, then dropped because {detail}.{tail}{attempted}"
 
     found = diag.get("facts_found") or 0
     kept = diag.get("facts_kept") or 0
@@ -687,10 +703,27 @@ def stories_report(day: date_, db: DBSession | None = None) -> dict:
             for rule, n in (i["diagnostics"].get("dropped_by_rule") or {}).items():
                 dropped_by_rule[rule] = dropped_by_rule.get(rule, 0) + n
 
+        # Whether the retry is earning its keep. `saved` is the number of
+        # stories a family received that they would not have had before,
+        # and `lost_anyway` is what the extra attempts bought nothing on.
+        # Both are needed: the first alone reads as a free win, and the
+        # ratio is what says whether to raise the ceiling, leave it, or
+        # fix the prompt the retries keep failing on.
+        retried = [i for i in items if (i["diagnostics"].get("write_attempts") or 1) > 1]
+        retry_stats = {
+            "retried": len(retried),
+            "saved": sum(1 for i in retried if i["status"] == "ready"),
+            "lost_anyway": sum(1 for i in retried if i["status"] == "failed"),
+            "skipped_no_time": sum(
+                1 for i in items if i["diagnostics"].get("retry_skipped")
+            ),
+        }
+
         return {
             "count": len(items),
             "by_status": by_status,
             "status_labels": {k: STORY_STATUS_LABELS.get(k, k) for k in by_status},
+            "retries": retry_stats,
             "search_budget": _search_budget_verdict(items),
             "dropped_by_rule": dict(
                 sorted(dropped_by_rule.items(), key=lambda kv: -kv[1])

@@ -241,6 +241,23 @@ class Settings(BaseSettings):
     ai_finnhub_sources: str = "Yahoo,CNBC"
     # Web searches per story when AI_NEWS_SOURCE=web_search.
     ai_article_max_searches: int = 2
+    # How many times the WRITER may be asked for this story. 1 is one shot:
+    # a story our language check or the AI reviewer rejects is simply not
+    # sent. 2 lets the writer try again, told what was wrong with the last
+    # attempt.
+    #
+    # The reviewer is deliberately NOT retried and deliberately stays
+    # single. A second reviewer exists to overturn a rejection, and a story
+    # one reviewer judged unsuitable for a child is not something to send
+    # because another model disagreed — no story is better than a wrong
+    # story. So the gate never moves; only the number of chances to clear
+    # it does, and every attempt faces the same strict reviewer.
+    #
+    # Keep this low. Each retry is told what the reviewer objected to,
+    # which is what makes it work and also makes it a writer being coached
+    # past its own safety check. Negligible at 2; not something to raise
+    # casually.
+    ai_article_max_write_attempts: int = 2
     # How long the alert waits for its story. If it isn't ready by then the
     # alert goes out with a "still looking" note and the story follows in a
     # reply email when it's done.

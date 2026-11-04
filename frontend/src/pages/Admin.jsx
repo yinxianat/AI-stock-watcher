@@ -652,6 +652,34 @@ function Stories({ today, yesterday, config }) {
             );
           })}
 
+          {/* Is the retry earning its keep? `saved` alone reads as a free
+              win; the ratio is what says whether to raise the ceiling,
+              leave it, or fix the prompt the retries keep failing on. */}
+          {st.retries?.retried > 0 && (
+            <p style={{ margin: '10px 0 0', fontSize: 13 }}>
+              <strong>Retries:</strong> {st.retries.retried} story
+              {st.retries.retried === 1 ? '' : 'ies'} were written more than once.{' '}
+              {st.retries.saved > 0 && (
+                <span style={{ color: 'var(--ok)' }}>
+                  {st.retries.saved} reached a family that otherwise would have got
+                  nothing.{' '}
+                </span>
+              )}
+              {st.retries.lost_anyway > 0 && (
+                <span className="muted">
+                  {st.retries.lost_anyway} still failed — the writer could not get past
+                  the reviewer.{' '}
+                </span>
+              )}
+              {st.retries.skipped_no_time > 0 && (
+                <span style={{ color: 'var(--warn)' }}>
+                  {st.retries.skipped_no_time} retry/ies were skipped for lack of time in
+                  the alert&apos;s wait budget.
+                </span>
+              )}
+            </p>
+          )}
+
           {/* The two derived verdicts. Both answer a question the counts
               raise and neither was computable by eye from the old card. */}
           {st.search_budget?.verdict && (
