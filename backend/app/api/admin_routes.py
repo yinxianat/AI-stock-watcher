@@ -19,16 +19,17 @@ from datetime import date as date_
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session as DBSession
 
 from app.api.client_logs import _client_net
 from app.api.deps import Caller, admin_or_service, current_admin
 from app.core.ratelimit import RateLimit
 from app.core.settings import get_settings
 from app.models import User
-from app.db.database import get_session_factory
-from app.services import diagnostics, service_auth
+from app.db.database import get_db, get_session_factory
+from app.services import diagnostics, service_auth, triage
 from app.services.alerts import AlertChannel, notify_admin
 
 log = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ SERVICE_SAFE_PATHS: frozenset[str] = frozenset({
     "/admin/storage",          # table growth, retention, log-noise ratio
     "/admin/ml-corpus",        # training-data health, counts only
     "/admin/reason-catalogue",  # static help text
+    "/admin/triage-states",     # static help text
     "/admin/schedule",         # job times from config, no user rows
 })
 
@@ -212,7 +214,10 @@ def get_findings(
 
 
 @router.get("/watch")
-def get_watch(caller: Caller = Depends(admin_or_service)) -> dict:
+def get_watch(
+    caller: Caller = Depends(admin_or_service),
+    db: DBSession = Depends(get_db),
+) -> dict:
     """Today and yesterday in one call, split by urgency.
 
     This is the agent's main entry point. The split matters: a `high`
@@ -237,13 +242,28 @@ def get_watch(caller: Caller = Depends(admin_or_service)) -> dict:
     pending, live_findings = [], []
     for f in live["findings"]:
         if f["code"] == "job_missing":
+            # Matched on the finding's `subject`, which names the slot.
+            # This used to ask whether a job id appeared anywhere in the
+            # detail sentence — true of "cleanup" inside almost any
+            # sentence, and a silent mismatch the day either the id or the
+            # wording changed.
             slot = next(
-                (s for s in live["jobs"]["slots"] if s["job_id"] in f["detail"]), None,
+                (s for s in live["jobs"]["slots"] if s["job_id"] == f.get("subject")),
+                None,
             )
             if slot and slot["expected_et"] > now_et.strftime("%H:%M"):
                 pending.append(slot["job_id"])
                 continue
         live_findings.append(f)
+
+    # Recurrence is recorded on the dashboard read as well as in the daily
+    # digest. Either alone leaves holes — the digest on days nobody looks,
+    # the dashboard on days nobody opens it — and one of the problems this
+    # page reports is the digest job not running, so it cannot be the only
+    # writer. `observe` is idempotent per day and never raises.
+    triage.observe(db, today, live_findings)
+    live_findings = triage.annotate(db, live_findings, today)
+    prior_findings = triage.annotate(db, prior["findings"], today)
 
     act_now = [f for f in live_findings if f["severity"] == "high"]
     return {
@@ -255,14 +275,17 @@ def get_watch(caller: Caller = Depends(admin_or_service)) -> dict:
             "findings": live_findings,
             "not_due_yet": pending,
             "jobs": live["jobs"]["slots"],
-            "stories": live["stories"]["by_status"],
+            # The whole stories report, not just the status counts. The
+            # counts raise the question ("4 found no cause") and the items
+            # are the only thing that answers it.
+            "stories": live["stories"],
             "delivery": live["delivery"],
             "errors": live["errors"]["errors"],
         },
         "yesterday": {
             "date": yesterday.isoformat(),
             "urgency": "review",
-            "findings": prior["findings"],
+            "findings": prior_findings,
             "jobs": prior["jobs"]["slots"],
             "stories": prior["stories"],
             "delivery": prior["delivery"],
@@ -275,6 +298,77 @@ def get_watch(caller: Caller = Depends(admin_or_service)) -> dict:
         # and the agent has no other way to know.
         "timezone": diagnostics.TIMEZONE_NOTE,
     }
+
+
+class TriageRequest(BaseModel):
+    """An admin's decision about one finding."""
+
+    state: str = Field(min_length=1, max_length=12)
+    note: str | None = Field(default=None, max_length=triage.MAX_NOTE_CHARS)
+    # Only meaningful for `ack`. Absent means the default window; the
+    # service rejects anything outside 1..MAX_SNOOZE_DAYS, because an
+    # acknowledgement with no end is how a dashboard stops being read.
+    snooze_days: int | None = Field(default=None, ge=1, le=triage.MAX_SNOOZE_DAYS)
+
+
+@router.get("/triage-states")
+def get_triage_states(caller: Caller = Depends(admin_or_service)) -> dict:
+    """The states an admin can put a finding into, and what each means.
+
+    Served rather than duplicated in the dashboard, so the wording lives
+    in one place — the same arrangement as `/admin/reason-catalogue`.
+    """
+    return {
+        "states": [
+            {
+                "code": code,
+                "label": spec.label,
+                "what": spec.what,
+                "stays_visible": spec.stays_visible,
+                "needs_snooze": spec.needs_snooze,
+            }
+            for code, spec in triage.STATES.items()
+        ],
+        "default_snooze_days": triage.DEFAULT_SNOOZE_DAYS,
+        "max_snooze_days": triage.MAX_SNOOZE_DAYS,
+    }
+
+
+@router.post("/findings/{fingerprint}/state")
+def set_finding_state(
+    body: TriageRequest,
+    fingerprint: str = Path(min_length=1, max_length=160),
+    admin: User = Depends(current_admin),
+    db: DBSession = Depends(get_db),
+) -> dict:
+    """Acknowledge, start work on, park or resolve one finding.
+
+    `current_admin`, not `admin_or_service` — deliberately the only write
+    on this router, and the monitoring agent must not reach it. An agent
+    that can mark its own findings resolved can hide its own blind spots,
+    and the whole value of this page is that what it says is not up to
+    whatever is being monitored. The agent reads `/admin/watch` and reports;
+    deciding stays with a person, and the row records which one.
+
+    Idempotent: posting the same state twice refreshes the note and the
+    snooze window rather than erroring.
+    """
+    try:
+        result = triage.set_state(
+            db,
+            fingerprint_=fingerprint,
+            state=body.state,
+            note=body.note,
+            snooze_days=body.snooze_days,
+            user_id=admin.id,
+            today=_eastern_today(),
+        )
+    except triage.TriageError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from None
+    log.info(
+        "Admin %d set finding %s to %s", admin.id, fingerprint, body.state,
+    )
+    return result
 
 
 @router.get("/storage")

@@ -263,7 +263,8 @@ def research_prompt(req: ArticleRequest) -> str:
     )
 
 
-def writer_prompt(req: ArticleRequest, facts: list[Fact], moved_with_market: bool) -> str:
+def writer_prompt(req: ArticleRequest, facts: list[Fact], moved_with_market: bool,
+                  rejection: list[str] | None = None) -> str:
     went = "went up" if req.direction == "up" else "went down"
     facts_json = json.dumps(
         [{"id": f.id, "claim": f.claim, "quote": f.quote, "source": f.source_name}
@@ -276,11 +277,31 @@ def writer_prompt(req: ArticleRequest, facts: list[Fact], moved_with_market: boo
         if moved_with_market
         else ""
     )
+    # On a retry, what the checker or the reviewer objected to last time.
+    # A blind second go is a coin toss on the same prompt; naming the
+    # problem is what makes the attempt worth paying for. Wrapped in a tag
+    # and labelled as our own note so it reads as instruction from us, not
+    # as fact about the company — and the reviewer's wording never reaches
+    # the story, because the reviewer only ever describes what was wrong.
+    retry_note = ""
+    if rejection:
+        complaints = "\n".join(f"- {r}" for r in rejection[:5])
+        retry_note = (
+            "\n<previous_attempt_rejected>\n"
+            "Your previous version of this story was rejected by our safety "
+            "and accuracy checks for the reasons below. Write it again, fix "
+            "these specific problems, and keep everything else that was "
+            "fine. Do not mention this note, the rejection or the review in "
+            "the story.\n"
+            f"{complaints}\n"
+            "</previous_attempt_rejected>\n"
+        )
     return (
         f"Company: {req.company} (stock symbol {req.symbol})\n"
         f"Today its stock price {went} by {size_words(req.move_pct)} amount.\n"
         f"{market_note}\n"
-        f"<facts>\n{facts_json}\n</facts>\n\n"
+        f"<facts>\n{facts_json}\n</facts>\n"
+        f"{retry_note}\n"
         "Write today's Stock Story for all four age groups."
     )
 

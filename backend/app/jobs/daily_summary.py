@@ -369,6 +369,37 @@ def _story_lines(st: dict) -> list[str]:
     ]
 
 
+def _record_findings_seen() -> None:
+    """Note today's findings in `finding_states`, so recurrence has a floor.
+
+    The dashboard records the same thing when it is opened, which covers
+    the days somebody looks. This covers the days nobody does — and those
+    are the days a finding most needs to be accumulating a history, because
+    "this has happened on 14 of the last 20 days" is the fact that turns
+    a shrug into a priority.
+
+    Idempotent per day and silent on failure: the digest has already been
+    sent by the time this runs, and bookkeeping must not turn a delivered
+    summary into a FAILED job run.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.services import diagnostics, triage
+
+    try:
+        # Eastern calendar day, matching every other date in the reports.
+        today = datetime.now(tz=ZoneInfo("America/New_York")).date()
+        report = diagnostics.day_report(today)
+        session = get_session_factory()()
+        try:
+            triage.observe(session, today, report["findings"])
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 - see docstring
+        log.warning("Could not record today's findings for recurrence", exc_info=True)
+
+
 def run_daily_summary() -> dict:
     """Build + send the daily summary. Returns the data dict (for tests)."""
     import time as _time
@@ -395,6 +426,7 @@ def run_daily_summary() -> dict:
         body,
         channel=AlertChannel.SUMMARY,
     )
+    _record_findings_seen()
     elapsed = _time.monotonic() - t0
     log.info("Daily summary sent (health=%s, %.2fs)", status, elapsed)
     record_job_run(

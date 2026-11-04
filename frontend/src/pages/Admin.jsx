@@ -6,16 +6,33 @@ import { logError } from '../lib/log.js';
 // Severity drives colour and ordering. The backend already ranks findings,
 // so this only has to render them in the order they arrive.
 const SEVERITY = {
-  high: { label: 'Act now', colour: '#cf222e', bg: '#ffebe9' },
-  medium: { label: 'Review', colour: '#9a6700', bg: '#fff8c5' },
-  low: { label: 'Note', colour: '#57606a', bg: '#f6f8fa' },
+  high: {
+    label: 'Act now', lane: 'Act now',
+    colour: 'var(--danger)',
+    bg: 'rgba(255, 107, 107, 0.15)',
+    border: 'rgba(255, 107, 107, 0.45)',
+  },
+  medium: {
+    label: 'Review', lane: 'Worth a look',
+    colour: 'var(--warn)',
+    bg: 'rgba(245, 196, 81, 0.12)',
+    border: 'rgba(245, 196, 81, 0.4)',
+  },
+  low: {
+    label: 'Note', lane: 'Notes',
+    colour: 'var(--muted)',
+    bg: 'var(--bg)',
+    border: 'var(--border)',
+  },
 };
+
+const LANES = ['high', 'medium', 'low'];
 
 function Badge({ severity }) {
   const s = SEVERITY[severity] ?? SEVERITY.low;
   return (
     <span style={{
-      background: s.bg, color: s.colour, border: `1px solid ${s.colour}33`,
+      background: s.bg, color: s.colour, border: `1px solid ${s.border}`,
       borderRadius: 999, padding: '2px 10px', fontSize: 12, fontWeight: 600,
       whiteSpace: 'nowrap',
     }}>
@@ -35,7 +52,7 @@ function Causes({ causes }) {
         <li key={i} style={{ marginBottom: 6 }}>
           {c.cause}
           <br />
-          <span style={{ color: '#57606a' }}>
+          <span style={{ color: 'var(--muted)' }}>
             <strong>How to tell:</strong> {c.check}
           </span>
         </li>
@@ -61,7 +78,7 @@ function Evidence({ evidence }) {
                  gridTemplateColumns: 'auto 1fr', gap: '2px 10px' }}>
       {entries.map(([k, v]) => (
         <Fragment key={k}>
-          <dt style={{ color: '#57606a', whiteSpace: 'nowrap' }}>{k.replace(/_/g, ' ')}</dt>
+          <dt style={{ color: 'var(--muted)', whiteSpace: 'nowrap' }}>{k.replace(/_/g, ' ')}</dt>
           <dd style={{ margin: 0, wordBreak: 'break-word' }}>{show(v)}</dd>
         </Fragment>
       ))}
@@ -69,14 +86,113 @@ function Evidence({ evidence }) {
   );
 }
 
+// The actions an admin can take on one finding.
+//
+// Reachable in a single click from the collapsed row, because the whole
+// point is to get through a list quickly — anything that costs an expand
+// plus a click plus a confirm does not get used, and the list goes back to
+// being re-read every morning. The note is optional and travels with
+// whichever button is pressed, so writing one costs nothing extra and the
+// next reader gets "Railway free tier sleeps overnight, known" instead of
+// a bare status.
+function TriageControls({ item, states, onChange }) {
+  const [note, setNote] = useState(item.triage?.note ?? '');
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState(null);
+  const current = item.triage_state;
+
+  const apply = (state, snoozeDays) => {
+    setBusy(state);
+    setError(null);
+    api.adminSetFindingState(item.fingerprint, {
+      state,
+      note: note.trim() || null,
+      ...(snoozeDays ? { snooze_days: snoozeDays } : {}),
+    })
+      .then((triage) => onChange(item.fingerprint, triage))
+      .catch((e) => {
+        setError(e.message || 'Could not save that');
+        logError('admin', e, 'triage');
+      })
+      .finally(() => setBusy(null));
+  };
+
+  const act = (label, state, snoozeDays) => (
+    <button
+      type="button"
+      className="triage-action"
+      aria-pressed={current === state}
+      disabled={busy !== null}
+      onClick={(e) => { e.stopPropagation(); apply(state, snoozeDays); }}
+      title={states?.[state]?.what}
+    >
+      {busy === state ? '…' : label}
+    </button>
+  );
+
+  return (
+    <div className="triage-strip" onClick={(e) => e.stopPropagation()}>
+      {act('Ack 7d', 'ack', 7)}
+      {act('Ack 30d', 'ack', 30)}
+      {act('Working', 'working')}
+      {act('To-do', 'backlog')}
+      {act('Fixed', 'resolved')}
+      <input
+        type="text"
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        placeholder="why (optional)"
+        maxLength={1000}
+        className="triage-note"
+        aria-label="Note for this finding"
+      />
+      {error && <span style={{ color: 'var(--danger)', fontSize: 12 }}>{error}</span>}
+    </div>
+  );
+}
+
+// How long a finding has been around, and what was decided about it.
+// Day 1 and day 14 need different reactions and used to render
+// identically, which is how something broken for a fortnight keeps being
+// skimmed past.
+function TriageSummary({ triage }) {
+  if (!triage) return null;
+  const bits = [];
+  if (triage.days_seen > 1) {
+    bits.push(`seen on ${triage.days_seen} days`);
+  }
+  if (triage.age_days > 1) {
+    bits.push(`first ${triage.first_seen}`);
+  }
+  if (triage.state === 'ack' && triage.snooze_until) {
+    bits.push(`back on ${triage.snooze_until}`);
+  }
+  if (triage.state === 'resolved' && triage.resolved_on) {
+    bits.push(`marked fixed ${triage.resolved_on}`);
+  }
+  if (!bits.length && !triage.note) return null;
+  return (
+    <p style={{ margin: '3px 0 0', fontSize: 12, color: 'var(--muted)' }}>
+      {bits.join(' · ')}
+      {triage.note && (
+        <>
+          {bits.length ? ' · ' : ''}
+          <em>“{triage.note}”</em>
+        </>
+      )}
+    </p>
+  );
+}
+
 // Click to expand. The one-line detail was the whole dashboard before, and
 // "ingest never ran" is true without being useful — the facts and the
 // ranked causes are what turn it into something to go and do.
-function Finding({ item }) {
+function Finding({ item, states, onTriage }) {
   const [open, setOpen] = useState(false);
   const expandable = !!(item.causes?.length || Object.keys(item.evidence ?? {}).length);
+  const t = item.triage;
   return (
-    <div style={{ padding: '10px 0', borderTop: '1px solid #eaeef2' }}>
+    <div style={{ padding: '10px 0', borderTop: '1px solid var(--border)' }}>
       <div
         style={{ display: 'flex', gap: 10, cursor: expandable ? 'pointer' : 'default' }}
         onClick={expandable ? () => setOpen(!open) : undefined}
@@ -88,23 +204,41 @@ function Finding({ item }) {
       >
         <Badge severity={item.severity} />
         <div style={{ minWidth: 0, flex: 1 }}>
-          <p style={{ margin: 0, fontSize: 14 }}>{item.detail}</p>
+          <p style={{ margin: 0, fontSize: 14 }}>
+            {/* The most important thing a monitoring page can tell you:
+                this was fixed and it is back. Without it, a recurrence
+                reads as a first occurrence and the fix looks like it
+                held. */}
+            {t?.regressed && (
+              <span className="triage-flag triage-flag-back">came back</span>
+            )}
+            {t?.snooze_expired && (
+              <span className="triage-flag">snooze ran out</span>
+            )}
+            {item.triage_state === 'working' && (
+              <span className="triage-flag triage-flag-working">working on it</span>
+            )}
+            {item.detail}
+          </p>
           {item.remediation && (
-            <p style={{ margin: '4px 0 0', fontSize: 13, color: '#57606a' }}>
+            <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--muted)' }}>
               <strong>Fix:</strong> {item.remediation}
             </p>
           )}
-          <code style={{ fontSize: 11, color: '#8c959f' }}>{item.code}</code>
           {expandable && (
-            <span style={{ fontSize: 12, color: '#0969da', marginLeft: 8 }}>
+            <span style={{ fontSize: 12, color: 'var(--accent)' }}>
               {open ? '▾ hide details' : '▸ what happened and why'}
             </span>
+          )}
+          <TriageSummary triage={t} />
+          {onTriage && (
+            <TriageControls item={item} states={states} onChange={onTriage} />
           )}
         </div>
       </div>
       {open && (
         <div style={{ margin: '8px 0 0 34px', paddingLeft: 12,
-                      borderLeft: '2px solid #d0d7de' }}>
+                      borderLeft: '2px solid var(--border)' }}>
           {Object.keys(item.evidence ?? {}).length > 0 && (
             <>
               <strong style={{ fontSize: 12.5 }}>What we know</strong>
@@ -119,8 +253,50 @@ function Finding({ item }) {
               <Causes causes={item.causes} />
             </>
           )}
+          <code style={{ fontSize: 11, color: 'var(--muted)', display: 'block', marginTop: 10 }}>
+            {item.code}
+          </code>
         </div>
       )}
+    </div>
+  );
+}
+
+// One severity's worth of findings, headed by its own count.
+//
+// Before this, every finding on the day went into one list under a heading
+// that counted only the urgent ones, so "1 thing needs attention now"
+// could sit on top of eight visually identical rows. A card that promises
+// triage and delivers a dump is worse than no card: the reader has to
+// re-triage it by hand every morning, which is the job the card exists to
+// do. Notes start collapsed because they are the lane you read last.
+function Lane({ severity, items, startOpen, title, colour, states, onTriage }) {
+  const [open, setOpen] = useState(startOpen);
+  const s = SEVERITY[severity] ?? SEVERITY.low;
+  if (!items.length) return null;
+  return (
+    <div style={{ marginTop: 14 }}>
+      <button
+        type="button"
+        className="link-button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        style={{
+          margin: 0, padding: 0, fontSize: 13, fontWeight: 700,
+          color: colour ?? s.colour, display: 'flex', alignItems: 'center', gap: 6,
+        }}
+      >
+        <span style={{ fontSize: 11 }}>{open ? '▾' : '▸'}</span>
+        {title ?? s.lane} ({items.length})
+      </button>
+      {open && items.map((f) => (
+        <Finding
+          key={f.fingerprint ?? f.code}
+          item={f}
+          states={states}
+          onTriage={onTriage}
+        />
+      ))}
     </div>
   );
 }
@@ -130,7 +306,7 @@ function DeliveryRow({ row }) {
   const [open, setOpen] = useState(false);
   const ex = row.explain ?? {};
   return (
-    <div style={{ padding: '8px 0', borderTop: '1px solid #eaeef2' }}>
+    <div style={{ padding: '8px 0', borderTop: '1px solid var(--border)' }}>
       <div
         style={{ display: 'flex', gap: 10, alignItems: 'baseline', cursor: 'pointer' }}
         onClick={() => setOpen(!open)}
@@ -144,27 +320,27 @@ function DeliveryRow({ row }) {
           {row.user}
         </span>
         <code style={{ fontSize: 12 }}>{row.symbol}</code>
-        <span style={{ fontSize: 12, color: '#57606a' }}>{row.channel}</span>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>{row.channel}</span>
         {(row.sent_et || row.sent_at) && (
-          <span style={{ fontSize: 12, color: '#8c959f' }}>
+          <span style={{ fontSize: 12, color: 'var(--muted)' }}>
             {row.sent_et ?? etClock(row.sent_at)}
           </span>
         )}
         <span style={{
           fontSize: 12, fontWeight: 600,
-          color: ex.ok === false ? '#9a6700' : '#57606a',
+          color: ex.ok === false ? 'var(--warn)' : 'var(--muted)',
         }}>
           {ex.label ?? row.reason}
         </span>
-        <span style={{ fontSize: 12, color: '#0969da' }}>{open ? '▾' : '▸'}</span>
+        <span style={{ fontSize: 12, color: 'var(--accent)' }}>{open ? '▾' : '▸'}</span>
       </div>
       {open && (
         <div style={{ margin: '6px 0 0', paddingLeft: 12,
-                      borderLeft: '2px solid #d0d7de', fontSize: 13 }}>
+                      borderLeft: '2px solid var(--border)', fontSize: 13 }}>
           {row.detail && <p style={{ margin: '0 0 6px' }}><strong>This send:</strong> {row.detail}</p>}
-          {ex.what && <p style={{ margin: '0 0 6px', color: '#57606a' }}>{ex.what}</p>}
+          {ex.what && <p style={{ margin: '0 0 6px', color: 'var(--muted)' }}>{ex.what}</p>}
           {row.inferred && (
-            <p style={{ margin: '0 0 6px', color: '#9a6700' }}>
+            <p style={{ margin: '0 0 6px', color: 'var(--warn)' }}>
               No outcome was recorded for this email, so the reason is inferred from the
               story row rather than known.
             </p>
@@ -176,7 +352,7 @@ function DeliveryRow({ row }) {
             </>
           )}
           {ex.fix && (
-            <p style={{ margin: '8px 0 0', color: '#57606a' }}>
+            <p style={{ margin: '8px 0 0', color: 'var(--muted)' }}>
               <strong>Fix:</strong> {ex.fix}
             </p>
           )}
@@ -205,8 +381,8 @@ function Table({ head, rows, empty }) {
           <tr>
             {head.map((h) => (
               <th key={h} style={{
-                textAlign: 'left', padding: '6px 10px 6px 0', borderBottom: '1px solid #d0d7de',
-                color: '#57606a', fontWeight: 600, whiteSpace: 'nowrap',
+                textAlign: 'left', padding: '6px 10px 6px 0', borderBottom: '1px solid var(--border)',
+                color: 'var(--muted)', fontWeight: 600, whiteSpace: 'nowrap',
               }}>{h}</th>
             ))}
           </tr>
@@ -216,7 +392,7 @@ function Table({ head, rows, empty }) {
             <tr key={i}>
               {cells.map((c, j) => (
                 <td key={j} style={{
-                  padding: '6px 10px 6px 0', borderBottom: '1px solid #eaeef2',
+                  padding: '6px 10px 6px 0', borderBottom: '1px solid var(--border)',
                   whiteSpace: 'nowrap',
                 }}>{c}</td>
               ))}
@@ -259,14 +435,18 @@ function etClock(iso) {
 function StoryDelivery({ today, yesterday }) {
   const [which, setWhich] = useState('today');
   const [all, setAll] = useState(null);
+  const [showAll, setShowAll] = useState(false);
   const [loadingAll, setLoadingAll] = useState(false);
   const day = which === 'today' ? today : yesterday;
   const sd = day.delivery?.stories;
 
-  const loadAll = () => {
+  // Fetches on first open only; after that this is a pure show/hide, so
+  // collapsing a long list and looking again costs nothing.
+  const toggleAll = () => {
+    if (all) { setShowAll(!showAll); return; }
     setLoadingAll(true);
     api.adminDelivery(day.date)
-      .then((r) => setAll(r))
+      .then((r) => { setAll(r); setShowAll(true); })
       .catch((e) => logError('admin', e, 'load-delivery'))
       .finally(() => setLoadingAll(false));
   };
@@ -274,13 +454,13 @@ function StoryDelivery({ today, yesterday }) {
   const tab = (key, label) => (
     <button
       type="button"
-      onClick={() => { setWhich(key); setAll(null); }}
+      onClick={() => { setWhich(key); setAll(null); setShowAll(false); }}
       style={{
         border: 'none', background: 'none', cursor: 'pointer', fontSize: 13,
         padding: '2px 0', marginRight: 14,
         fontWeight: which === key ? 700 : 400,
-        borderBottom: which === key ? '2px solid #0969da' : '2px solid transparent',
-        color: which === key ? '#0969da' : '#57606a',
+        borderBottom: which === key ? '2px solid var(--accent)' : '2px solid transparent',
+        color: which === key ? 'var(--accent)' : 'var(--muted)',
       }}
     >
       {label}
@@ -325,7 +505,21 @@ function StoryDelivery({ today, yesterday }) {
               {sd.missed.map((m, i) => <DeliveryRow key={i} row={m} />)}
             </div>
           )}
-          {all ? (
+          <button
+            type="button"
+            className="disclosure"
+            onClick={toggleAll}
+            disabled={loadingAll}
+            aria-expanded={showAll}
+            style={{ marginTop: 12 }}
+          >
+            {loadingAll
+              ? 'Loading…'
+              : showAll
+                ? '▾ Hide the full list'
+                : '▸ Show every email, including the ones that worked'}
+          </button>
+          {all && showAll && (
             <div style={{ marginTop: 12 }}>
               <strong style={{ fontSize: 13 }}>Every email on this day</strong>
               {all.alerts.map((r, i) => (
@@ -338,20 +532,183 @@ function StoryDelivery({ today, yesterday }) {
                 <DeliveryRow key={`f${i}`} row={r} />
               ))}
             </div>
-          ) : (
-            <button
-              type="button"
-              onClick={loadAll}
-              disabled={loadingAll}
-              style={{
-                marginTop: 12, border: '1px solid #d0d7de', borderRadius: 6,
-                background: '#f6f8fa', padding: '4px 10px', fontSize: 13,
-                cursor: loadingAll ? 'default' : 'pointer',
-              }}
-            >
-              {loadingAll ? 'Loading…' : 'Show every email, including the ones that worked'}
-            </button>
           )}
+        </>
+      )}
+    </Card>
+  );
+}
+
+
+// Which stories were written, and for the ones that weren't, why.
+//
+// This card used to be a two-column table reading `no_clear_cause | 4`.
+// The count is the right thing to lead with, but it raises exactly one
+// question and answered none of it, and "no clear cause" is not an
+// explanation — it is the absence of one. Everything below was already
+// being recorded by the pipeline and thrown away at the edge of the API.
+function Stories({ today, yesterday, config }) {
+  const [which, setWhich] = useState('yesterday');
+  const [openStatus, setOpenStatus] = useState(null);
+  const day = which === 'today' ? today : yesterday;
+  const st = day.stories ?? {};
+  const items = st.items ?? [];
+
+  const tab = (key, label) => (
+    <button
+      type="button"
+      className="link-button"
+      onClick={() => { setWhich(key); setOpenStatus(null); }}
+      style={{
+        margin: '0 14px 0 0', padding: '2px 0', fontSize: 13,
+        fontWeight: which === key ? 700 : 400,
+        borderBottom: which === key ? '2px solid var(--accent)' : '2px solid transparent',
+        color: which === key ? 'var(--accent)' : 'var(--muted)',
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  const statuses = Object.entries(st.by_status ?? {});
+
+  return (
+    <Card
+      title="Stories"
+      subtitle={`Model ${config?.story_model ?? '—'} · click a status for the stories behind it`}
+    >
+      <div style={{ marginBottom: 10 }}>
+        {tab('today', `Today (${today.date})`)}
+        {tab('yesterday', `Yesterday (${yesterday.date})`)}
+      </div>
+
+      {!statuses.length ? (
+        <p className="muted" style={{ fontSize: 13 }}>No stories were generated.</p>
+      ) : (
+        <>
+          {statuses.map(([status, count]) => {
+            const open = openStatus === status;
+            const rows = items.filter((i) => i.status === status);
+            return (
+              <div key={status} style={{ borderTop: '1px solid var(--border)' }}>
+                <button
+                  type="button"
+                  className="link-button"
+                  onClick={() => setOpenStatus(open ? null : status)}
+                  aria-expanded={open}
+                  style={{
+                    margin: 0, padding: '8px 0', fontSize: 13.5, width: '100%',
+                    textAlign: 'left', color: 'var(--text)',
+                  }}
+                >
+                  <span style={{ fontSize: 11, color: 'var(--accent)', marginRight: 6 }}>
+                    {open ? '▾' : '▸'}
+                  </span>
+                  <strong>{count}</strong>{' '}
+                  {st.status_labels?.[status] ?? status}
+                  <code style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 8 }}>
+                    {status}
+                  </code>
+                </button>
+                {open && (rows.length ? rows.map((i, n) => (
+                  <div key={n} style={{ padding: '6px 0 10px 18px', fontSize: 13 }}>
+                    <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                      <code style={{ fontSize: 12.5 }}>{i.symbol}</code>
+                      <span style={{
+                        color: i.move_pct < 0 ? 'var(--danger)' : 'var(--ok)',
+                      }}>
+                        {i.move_pct > 0 ? '+' : ''}{i.move_pct}%
+                      </span>
+                      {i.diagnostics?.searches_used != null && (
+                        <span className="muted">
+                          {i.diagnostics.searches_used}/{i.diagnostics.max_searches} searches
+                        </span>
+                      )}
+                      {i.diagnostics?.urls_seen != null && (
+                        <span className="muted">{i.diagnostics.urls_seen} results read</span>
+                      )}
+                      {i.diagnostics?.facts_found != null && (
+                        <span className="muted">
+                          {i.diagnostics.facts_kept ?? 0}/{i.diagnostics.facts_found} facts kept
+                        </span>
+                      )}
+                      {i.est_cost_usd != null && (
+                        <span className="muted">${i.est_cost_usd.toFixed(4)}</span>
+                      )}
+                    </div>
+                    <p style={{ margin: '3px 0 0', color: 'var(--muted)' }}>{i.why}</p>
+                    {i.error && (
+                      <p style={{ margin: '3px 0 0', color: 'var(--warn)', fontSize: 12.5 }}>
+                        {i.error}
+                      </p>
+                    )}
+                  </div>
+                )) : (
+                  <p className="muted" style={{ fontSize: 12.5, padding: '0 0 8px 18px' }}>
+                    Counted from this day's rows, but the detail isn't in this payload.
+                  </p>
+                ))}
+              </div>
+            );
+          })}
+
+          {/* Is the retry earning its keep? `saved` alone reads as a free
+              win; the ratio is what says whether to raise the ceiling,
+              leave it, or fix the prompt the retries keep failing on. */}
+          {st.retries?.retried > 0 && (
+            <p style={{ margin: '10px 0 0', fontSize: 13 }}>
+              <strong>Retries:</strong> {st.retries.retried} story
+              {st.retries.retried === 1 ? '' : 'ies'} were written more than once.{' '}
+              {st.retries.saved > 0 && (
+                <span style={{ color: 'var(--ok)' }}>
+                  {st.retries.saved} reached a family that otherwise would have got
+                  nothing.{' '}
+                </span>
+              )}
+              {st.retries.lost_anyway > 0 && (
+                <span className="muted">
+                  {st.retries.lost_anyway} still failed — the writer could not get past
+                  the reviewer.{' '}
+                </span>
+              )}
+              {st.retries.skipped_no_time > 0 && (
+                <span style={{ color: 'var(--warn)' }}>
+                  {st.retries.skipped_no_time} retry/ies were skipped for lack of time in
+                  the alert&apos;s wait budget.
+                </span>
+              )}
+            </p>
+          )}
+
+          {/* The two derived verdicts. Both answer a question the counts
+              raise and neither was computable by eye from the old card. */}
+          {st.search_budget?.verdict && (
+            <p className="flash warn" style={{ marginTop: 12, fontSize: 13 }}>
+              <strong>Search budget:</strong> {st.search_budget.verdict}
+            </p>
+          )}
+          {Object.keys(st.dropped_by_rule ?? {}).length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <strong style={{ fontSize: 13 }}>
+                Facts our own checks threw away
+              </strong>
+              <p className="muted" style={{ fontSize: 12.5, margin: '2px 0 6px' }}>
+                Research found these and we dropped them. A rule dominating this
+                list is a setting or a prompt to change, not a quiet market.
+              </p>
+              <Table
+                head={['Rule', 'Facts dropped']}
+                empty=""
+                rows={Object.entries(st.dropped_by_rule).map(([r, n]) => [r, n])}
+              />
+            </div>
+          )}
+
+          <p className="muted" style={{ fontSize: 13, marginTop: 10 }}>
+            Tokens in/out: {(st.input_tokens ?? 0).toLocaleString()} /{' '}
+            {(st.output_tokens ?? 0).toLocaleString()}
+            {st.est_cost_usd != null && ` · estimated $${st.est_cost_usd.toFixed(4)}`}
+          </p>
         </>
       )}
     </Card>
@@ -364,12 +721,22 @@ export default function Admin() {
   const [watch, setWatch] = useState(null);
   const [me, setMe] = useState(null);
   const [error, setError] = useState(null);
+  const [states, setStates] = useState(null);
+  // Decisions made since the page loaded, keyed by fingerprint. Applied
+  // over the fetched findings rather than refetching the whole day report,
+  // which takes seconds and scans several tables.
+  const [edits, setEdits] = useState({});
 
   useEffect(() => {
     if (!signedIn) return;
     api.me().then(setMe).catch((e) => {
       if (e?.status !== 401) logError('admin', e, 'load-me');
     });
+    // Advisory: the triage strip still works without it, just without
+    // the hover descriptions, so a failure here is not worth a message.
+    api.adminTriageStates()
+      .then((r) => setStates(Object.fromEntries(r.states.map((x) => [x.code, x]))))
+      .catch(() => {});
     api.adminWatch()
       .then(setWatch)
       .catch((e) => {
@@ -401,8 +768,57 @@ export default function Admin() {
   if (!watch) return <div className="container"><p>Loading…</p></div>;
 
   const { today, yesterday, storage, config } = watch;
-  const actNow = today.act_now ?? [];
-  const laterToday = (today.findings ?? []).filter((f) => f.severity !== 'high');
+
+  // `act_now` is the high-severity subset of `findings`, so the page used
+  // to read both and render them back to back — correct, but it meant the
+  // severity split existed in the data and nowhere on the screen. One
+  // list, bucketed once; anything with an unrecognised severity falls into
+  // notes rather than vanishing.
+  // A decision taken a moment ago wins over the payload it arrived in.
+  const withEdits = (list) => (list ?? []).map((f) => {
+    const t = edits[f.fingerprint];
+    if (!t) return f;
+    const spec = states?.[t.state];
+    return {
+      ...f,
+      triage: t,
+      triage_state: t.state,
+      // `stays_visible` is the backend's word on which states keep a
+      // finding on screen. Falling back to showing it is the safe
+      // direction: never hide something because a lookup was missing.
+      hidden: spec ? !spec.stays_visible : false,
+    };
+  });
+
+  const todayFindings = withEdits(today.findings);
+
+  // Being worked on comes out of the severity lanes into its own, because
+  // it is the only state that keeps a finding on screen and mixing it back
+  // in makes "act now" a list of things already in hand.
+  const working = todayFindings.filter((f) => f.triage_state === 'working');
+  const parked = todayFindings.filter((f) => f.hidden);
+  const open_ = todayFindings.filter(
+    (f) => !f.hidden && f.triage_state !== 'working',
+  );
+
+  const byLane = Object.fromEntries(LANES.map((sev) => [sev, []]));
+  for (const f of open_) {
+    (byLane[f.severity] ?? byLane.low).push(f);
+  }
+
+  const headline = byLane.high.length
+    ? { colour: SEVERITY.high.colour,
+        text: `⚠️ ${byLane.high.length} thing${byLane.high.length > 1 ? 's' : ''} need attention now` }
+    : byLane.medium.length
+      ? { colour: SEVERITY.medium.colour,
+          text: `${byLane.medium.length} thing${byLane.medium.length > 1 ? 's' : ''} worth a look — nothing urgent` }
+      : working.length
+        ? { colour: SEVERITY.medium.colour,
+            text: `Nothing new — ${working.length} being worked on` }
+        : { colour: 'var(--ok)', text: '✅ Nothing needs attention right now' };
+
+  const onTriage = (fingerprint, triage) =>
+    setEdits((prev) => ({ ...prev, [fingerprint]: triage }));
 
   return (
     <div className="container">
@@ -425,21 +841,54 @@ export default function Admin() {
       </div>
 
       {/* Today — urgent. Separated from yesterday on purpose: mixing them
-          buries a live problem under history. */}
+          buries a live problem under history. Within the day, split by
+          severity so the headline count and the rows below it agree. */}
       <div className="card" style={{
-        borderLeft: `4px solid ${actNow.length ? SEVERITY.high.colour : '#1a7f37'}`,
+        borderLeft: `4px solid ${headline.colour}`,
       }}>
-        <h3 style={{ margin: '0 0 4px' }}>
-          {actNow.length ? `⚠️ ${actNow.length} thing${actNow.length > 1 ? 's' : ''} need attention now` : '✅ Nothing needs attention right now'}
-        </h3>
+        <h3 style={{ margin: '0 0 4px' }}>{headline.text}</h3>
         <p className="muted" style={{ margin: 0, fontSize: 13 }}>Today, {today.date}</p>
-        {actNow.map((f, i) => <Finding key={i} item={f} />)}
-        {!actNow.length && !laterToday.length && (
+        {/* Your own queue first: what you said you were doing. */}
+        <Lane
+          severity="medium"
+          title="Being worked on"
+          colour="var(--accent)"
+          items={working}
+          startOpen
+          states={states}
+          onTriage={onTriage}
+        />
+        {LANES.map((sev) => (
+          <Lane
+            key={sev}
+            severity={sev}
+            items={byLane[sev]}
+            // Notes are the lane you read last, so they arrive folded.
+            startOpen={sev !== 'low'}
+            states={states}
+            onTriage={onTriage}
+          />
+        ))}
+        {/* Folded, but never dropped. A parked finding you cannot find
+            again is the same as one that was never reported. */}
+        <Lane
+          severity="low"
+          title="Parked — acknowledged, on the to-do list or marked fixed"
+          items={parked}
+          startOpen={false}
+          states={states}
+          onTriage={onTriage}
+        />
+        {!todayFindings.length && (
           <p className="muted" style={{ fontSize: 13, marginTop: 8 }}>
             Jobs are on schedule and nothing has errored.
           </p>
         )}
-        {laterToday.map((f, i) => <Finding key={`l${i}`} item={f} />)}
+        {todayFindings.length > 0 && !open_.length && !working.length && (
+          <p className="muted" style={{ fontSize: 13, marginTop: 8 }}>
+            Everything flagged today has been dealt with or parked.
+          </p>
+        )}
         {(today.not_due_yet ?? []).length > 0 && (
           <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>
             Not due yet: {today.not_due_yet.join(', ')}
@@ -464,7 +913,14 @@ export default function Admin() {
       <Card title="Yesterday" subtitle="For review, not urgent.">
         {(yesterday.findings ?? []).length === 0
           ? <p className="muted" style={{ fontSize: 13 }}>Nothing flagged.</p>
-          : yesterday.findings.map((f, i) => <Finding key={i} item={f} />)}
+          : withEdits(yesterday.findings).map((f) => (
+            <Finding
+              key={f.fingerprint ?? f.code}
+              item={f}
+              states={states}
+              onTriage={onTriage}
+            />
+          ))}
       </Card>
 
       <StoryDelivery today={today} yesterday={yesterday} />
@@ -496,19 +952,7 @@ export default function Admin() {
         )}
       </Card>
 
-      <Card title="Stories" subtitle={`Yesterday · model ${config?.story_model ?? '—'}`}>
-        <Table
-          head={['Status', 'Count']}
-          empty="No stories were generated."
-          rows={Object.entries(yesterday.stories?.by_status ?? {}).map(([k, v]) => [k, v])}
-        />
-        <p className="muted" style={{ fontSize: 13, marginTop: 8 }}>
-          Tokens in/out: {(yesterday.stories?.input_tokens ?? 0).toLocaleString()} /{' '}
-          {(yesterday.stories?.output_tokens ?? 0).toLocaleString()}
-          {yesterday.stories?.est_cost_usd != null
-            && ` · estimated $${yesterday.stories.est_cost_usd.toFixed(4)}`}
-        </p>
-      </Card>
+      <Stories today={today} yesterday={yesterday} config={config} />
 
       <Card
         title="Storage"

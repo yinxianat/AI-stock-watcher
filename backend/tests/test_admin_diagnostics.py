@@ -218,6 +218,14 @@ def test_day_bounds_handles_dst_offset():
 
 
 def _job(db, name: str, started: datetime, status: str = "SUCCESS") -> None:
+    """Insert an audit row.
+
+    `name` is the name the job records itself under, NOT its scheduler id.
+    These are different vocabularies — the pipeline is scheduled three times
+    as `pipeline_HHMM` and records every run as `batch_pipeline` — and
+    fabricating a row under the scheduler id is how a mismatch between the
+    two went unnoticed until it reported a healthy pipeline as missing.
+    """
     db.add(JobRun(job_name=name, status=status, started_at=started, duration_seconds=1.0))
     db.commit()
 
@@ -228,7 +236,7 @@ def test_job_on_time_has_no_drift(db_session, monkeypatch):
     monkeypatch.setenv("DAILY_SUMMARY_ENABLED", "false")
     get_settings.cache_clear()
     # 09:35 ET == 14:35 UTC on this date.
-    _job(db_session, "pipeline_0935", datetime(2026, 11, 2, 14, 35))
+    _job(db_session, "batch_pipeline", datetime(2026, 11, 2, 14, 35))
     rep = diagnostics.jobs_report(DAY, db_session)
     slot = next(s for s in rep["slots"] if s["job_id"] == "pipeline_0935")
     assert slot["status"] == "SUCCESS"
@@ -242,7 +250,7 @@ def test_pacific_drift_is_flagged_as_a_finding(db_session, monkeypatch):
     monkeypatch.setenv("RECAP_ENABLED", "false")
     monkeypatch.setenv("DAILY_SUMMARY_ENABLED", "false")
     get_settings.cache_clear()
-    _job(db_session, "pipeline_0935", datetime(2026, 11, 2, 17, 35))  # 09:35 PT
+    _job(db_session, "batch_pipeline", datetime(2026, 11, 2, 17, 35))  # 09:35 PT
     rep = diagnostics.jobs_report(DAY, db_session)
     slot = next(s for s in rep["slots"] if s["job_id"] == "pipeline_0935")
     assert slot["drift_minutes"] == 180
@@ -887,7 +895,7 @@ def test_watch_payload_matches_what_the_admin_page_reads(client, admin_session):
 
 
 def test_job_slot_fields_the_page_renders_are_present(client, admin_session, db_session):
-    _job(db_session, "pipeline_0935", datetime(2026, 11, 2, 14, 35))
+    _job(db_session, "batch_pipeline", datetime(2026, 11, 2, 14, 35))
     b = client.get("/admin/watch", headers=admin_session).json()
     for slot in b["today"]["jobs"]:
         for k in ("job_id", "expected_et", "status", "drift_minutes"):

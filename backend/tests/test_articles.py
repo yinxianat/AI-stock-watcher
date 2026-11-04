@@ -246,19 +246,63 @@ def _research(*facts: Fact, cause_found=True, seen=(GOOD_URL,)):
     )
 
 
-def _writer(story: Story, calls: list | None = None):
-    def write(req, facts, moved_with_market):
+def _writer(story: Story, calls: list | None = None, rejections: list | None = None):
+    """A writer double.
+
+    `rejection` must be accepted even when a test does not care about it:
+    the pipeline passes it on a retry, and a double that refuses the
+    keyword raises a TypeError the pipeline catches as a generation
+    failure — a real bug hidden behind a plausible-looking result.
+    """
+    def write(req, facts, moved_with_market, rejection=None):
         if calls is not None:
             calls.append([f.id for f in facts])
+        if rejections is not None:
+            rejections.append(rejection)
         return WriteResult(story)
     return write
 
 
-def _reviewer(approve=AGE_GROUPS, grown_up_ok=True, calls: list | None = None):
+def _writer_sequence(stories: list[Story], rejections: list | None = None):
+    """A writer that returns a different story each time it is called, so a
+    retry can be given something the reviewer will accept."""
+    seen = {"n": 0}
+
+    def write(req, facts, moved_with_market, rejection=None):
+        if rejections is not None:
+            rejections.append(rejection)
+        story = stories[min(seen["n"], len(stories) - 1)]
+        seen["n"] += 1
+        return WriteResult(story)
+    return write
+
+
+def _reviewer(approve=AGE_GROUPS, grown_up_ok=True, calls: list | None = None,
+              problems=()):
     def review(req, facts, story):
         if calls is not None:
             calls.append([v.age_group for v in story.versions])
-        return ReviewResult(Review(grown_up_ok=grown_up_ok, approved_age_groups=list(approve)))
+        return ReviewResult(Review(
+            grown_up_ok=grown_up_ok, approved_age_groups=list(approve),
+            problems=list(problems),
+        ))
+    return review
+
+
+def _reviewer_sequence(verdicts: list[dict], calls: list | None = None):
+    """Rejects, then approves — so a retry has somewhere to get to."""
+    seen = {"n": 0}
+
+    def review(req, facts, story):
+        if calls is not None:
+            calls.append([v.age_group for v in story.versions])
+        v = verdicts[min(seen["n"], len(verdicts) - 1)]
+        seen["n"] += 1
+        return ReviewResult(Review(
+            grown_up_ok=v.get("grown_up_ok", True),
+            approved_age_groups=list(v.get("approve", AGE_GROUPS)),
+            problems=list(v.get("problems", [])),
+        ))
     return review
 
 

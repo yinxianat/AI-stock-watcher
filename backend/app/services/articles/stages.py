@@ -17,9 +17,14 @@ STORY_SCHEMA = strict_schema(Story.model_json_schema())
 REVIEW_SCHEMA = strict_schema(Review.model_json_schema())
 
 
-def write(gen: JSONGenerator, req: ArticleRequest, facts: list[Fact], moved_with_market: bool) -> WriteResult:
+def write(gen: JSONGenerator, req: ArticleRequest, facts: list[Fact],
+          moved_with_market: bool, rejection: list[str] | None = None) -> WriteResult:
+    """Write the story. `rejection` is why the last attempt was thrown out,
+    passed only on a retry so the rewrite is aimed rather than blind."""
     text, usage = gen.generate(
-        prompts.WRITER_SYSTEM, prompts.writer_prompt(req, facts, moved_with_market), STORY_SCHEMA,
+        prompts.WRITER_SYSTEM,
+        prompts.writer_prompt(req, facts, moved_with_market, rejection),
+        STORY_SCHEMA,
     )
     return WriteResult(Story.model_validate_json(text), usage)
 

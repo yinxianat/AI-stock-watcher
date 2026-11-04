@@ -59,7 +59,7 @@ from app.models import (
     utcnow,
 )
 
-from app.services import delivery
+from app.services import delivery, triage
 
 log = logging.getLogger(__name__)
 
@@ -199,6 +199,19 @@ class ExpectedJob:
     hour: int
     minute: int
     weekdays_only: bool
+    # The name the job writes into `job_runs`, which is NOT always its
+    # scheduler id. The pipeline is registered three times as
+    # `pipeline_0935` / `pipeline_1230` / `pipeline_1605` but records every
+    # run as `batch_pipeline`; the retention sweep is registered as
+    # `log_cleanup` and records itself as `cleanup`. Matching a scheduler id
+    # against an audit name finds nothing and reports a job that ran fine as
+    # missing, which is the most expensive kind of monitoring bug: it trains
+    # you to ignore the dashboard.
+    audit_name: str | None = None
+
+    @property
+    def recorded_as(self) -> str:
+        return self.audit_name or self.job_id
 
 
 def expected_jobs() -> list[ExpectedJob]:
@@ -206,7 +219,8 @@ def expected_jobs() -> list[ExpectedJob]:
     so changing BATCH_JOB_TIMES_ET keeps this honest."""
     s = get_settings()
     out = [
-        ExpectedJob(f"pipeline_{h:02d}{m:02d}", h, m, True) for h, m in s.batch_times
+        ExpectedJob(f"pipeline_{h:02d}{m:02d}", h, m, True, audit_name="batch_pipeline")
+        for h, m in s.batch_times
     ]
     if s.recap_enabled:
         rh, rm = s.recap_time
@@ -218,7 +232,7 @@ def expected_jobs() -> list[ExpectedJob]:
     # cleanup that silently stopped running would never be flagged — and
     # cleanup stopping is how a disk fills up without anyone noticing.
     ch, cm = s.log_cleanup_time
-    out.append(ExpectedJob("log_cleanup", ch, cm, False))
+    out.append(ExpectedJob("log_cleanup", ch, cm, False, audit_name="cleanup"))
     return out
 
 
@@ -399,20 +413,29 @@ def jobs_report(day: date_, db: DBSession | None = None) -> dict:
             .order_by(JobRun.started_at)
         ).scalars().all()
 
-        by_id: dict[str, list[JobRun]] = {}
+        by_name: dict[str, list[JobRun]] = {}
         for r in runs:
-            by_id.setdefault(r.job_name, []).append(r)
+            by_name.setdefault(r.job_name, []).append(r)
 
         weekday = day.weekday() < 5
         slots = []
+        # One run belongs to one slot. Three pipeline slots all record
+        # `batch_pipeline`, so taking the first match for each would credit
+        # every slot with the 09:35 run and report the other two as hours
+        # late. Each slot claims the nearest run not already taken.
+        claimed: set[int] = set()
         for exp in expected_jobs():
             if exp.weekdays_only and not weekday:
                 continue
             want_utc = datetime.combine(
                 day, time(exp.hour, exp.minute), tzinfo=_ET
             ).astimezone(_UTC)
-            got = by_id.get(exp.job_id) or []
-            first = got[0] if got else None
+            free = [r for r in by_name.get(exp.recorded_as, []) if id(r) not in claimed]
+            first = min(
+                free, key=lambda r: abs((r.started_at - want_utc).total_seconds()),
+            ) if free else None
+            if first is not None:
+                claimed.add(id(first))
             drift = (
                 round((first.started_at - want_utc).total_seconds() / 60)
                 if first else None
@@ -477,9 +500,149 @@ def prices_report(day: date_, db: DBSession | None = None) -> dict:
             session.close()
 
 
+# What an article's `status` column means, in words that cannot be mistaken
+# for a delivery reason.
+#
+# `stock_articles.status` and `delivery_outcomes.reason` both have a value
+# spelled `no_clear_cause`, and they mean unrelated things: the article
+# status is the ordinary quiet-day outcome ("the pipeline finished and
+# found nothing"), while the delivery reason means "we failed to record
+# why" and its catalogue entry says the row predates diagnostics. Reading
+# one against the other sends you looking for a bug that isn't there.
+#
+# The stored values are deliberately left alone — they are on live rows in
+# a table that is never pruned because it is training data — so the two are
+# told apart by how they are labelled.
+STORY_STATUS_LABELS: dict[str, str] = {
+    "pending": "Still being written",
+    "ready": "Written and sent",
+    "no_clear_cause": "Finished, no cause found",
+    "failed": "Generation failed",
+}
+
+
+def _story_why(status: str, diag: dict, move_pct: float) -> str:
+    """Why this story came out the way it did, from what the pipeline saw.
+
+    The card used to show `no_clear_cause | 4` and stop. The pipeline
+    records plenty about each attempt; none of it reached the screen, so
+    the one question the count raises — *why* — had no answer on the page.
+    """
+    attempts = diag.get("write_attempts") or 1
+
+    if status == "ready":
+        if attempts > 1:
+            earlier = (diag.get("rejections") or [{}])[0].get("rejected_by")
+            return (
+                f"Written, checked and sent, but only on attempt {attempts}: the first "
+                f"was rejected ({earlier}). The retry saved this one."
+            )
+        return "Written, checked and sent."
+    if status == "pending":
+        return "Still being written, or abandoned partway."
+    if not diag:
+        return ("Nothing was recorded about this attempt: the row predates "
+                "diagnostics. Newer rows carry the cause.")
+
+    rejected = diag.get("rejected_by")
+    if rejected:
+        detail = {
+            "language_check_shared": "our own language check rejected the shared text",
+            "language_check_all_versions": "every age version failed our language check",
+            "reviewer_grown_up_summary": "the AI reviewer rejected the grown-up summary",
+            "reviewer_all_versions": "the AI reviewer rejected every age version",
+            "exception": f"it raised {diag.get('exception_type', 'an error')}",
+        }.get(rejected, rejected)
+        problems = diag.get("shared_problems") or diag.get("reviewer_problems") or []
+        tail = f" Reported: {'; '.join(str(x) for x in problems[:3])}." if problems else ""
+        attempted = (
+            f" Rewritten and rejected {attempts} times" if attempts > 1 else ""
+        )
+        skipped = diag.get("retry_skipped")
+        if skipped:
+            attempted += f" No retry: {skipped}."
+        elif attempted:
+            attempted += " — the writer could not get past the reviewer, so nothing was sent."
+        return f"Written, then dropped because {detail}.{tail}{attempted}"
+
+    found = diag.get("facts_found") or 0
+    kept = diag.get("facts_kept") or 0
+    used = diag.get("searches_used")
+    allowed = diag.get("max_searches")
+    budget = f"{used} of {allowed}" if used is not None and allowed else "an unknown number of"
+
+    if found and not kept:
+        rules = diag.get("dropped_by_rule") or {}
+        worst = ", ".join(f"{n}× {rule}" for rule, n in
+                          sorted(rules.items(), key=lambda kv: -kv[1])[:3])
+        return (
+            f"Research found {found} fact(s) using {budget} searches and our own "
+            f"checks dropped all {found} ({worst}). This is our problem, not the "
+            "market's — the news was there."
+        )
+    return (
+        f"Research read {diag.get('urls_seen', 0)} result(s) using {budget} searches "
+        f"and reported no cause for a {move_pct:+.2f}% move. "
+        + ("Nothing to fix if the move was small: most small moves have no "
+           "reportable cause." if abs(move_pct) < 2 else
+           "A move this size usually has a cause, so this one is worth a look.")
+    )
+
+
+def _search_budget_verdict(items: list[dict]) -> dict:
+    """Did the search ceiling stop these stories, or did the model stop?
+
+    The question `AI_ARTICLE_MAX_SEARCHES` actually turns on, answerable
+    from data we already record and previously never read. The two cases
+    look identical on the dashboard and have opposite fixes:
+
+    * stories using **all** their searches and still finding nothing are
+      budget-bound, and raising the ceiling should help;
+    * stories stopping **under** the ceiling chose to stop, so more budget
+      buys nothing — the prompt or the allowed news domains are the limit.
+
+    Searches are billed per search performed, so the ceiling is a cap on
+    spend and not a target to reach.
+    """
+    empty = [i for i in items
+             if i["status"] == "no_clear_cause" and i.get("diagnostics")]
+    rated = [i for i in empty
+             if i["diagnostics"].get("searches_used") is not None
+             and i["diagnostics"].get("max_searches")]
+    if not rated:
+        return {"rated": 0, "verdict": None,
+                "used": 0, "allowed": 0, "at_ceiling": 0, "stopped_early": 0}
+
+    at_ceiling = [i for i in rated
+                  if i["diagnostics"]["searches_used"] >= i["diagnostics"]["max_searches"]]
+    allowed = max(i["diagnostics"]["max_searches"] for i in rated)
+    used = sum(i["diagnostics"]["searches_used"] for i in rated)
+
+    if len(at_ceiling) >= max(1, len(rated) // 2):
+        verdict = (
+            f"{len(at_ceiling)} of {len(rated)} causeless stories used their whole "
+            f"budget of {allowed} search(es). The ceiling is the limit here, so "
+            "raising AI_ARTICLE_MAX_SEARCHES is likely to find causes it currently "
+            "cannot reach."
+        )
+    else:
+        verdict = (
+            f"{len(rated) - len(at_ceiling)} of {len(rated)} causeless stories stopped "
+            f"under their budget of {allowed} search(es), so the search never ran out "
+            "— raising AI_ARTICLE_MAX_SEARCHES would buy nothing. Look at the prompt "
+            "and at AI_NEWS_DOMAINS instead: a cause found on an excluded domain is "
+            "dropped as if it was never there."
+        )
+    return {
+        "rated": len(rated), "verdict": verdict, "used": used, "allowed": allowed,
+        "at_ceiling": len(at_ceiling), "stopped_early": len(rated) - len(at_ceiling),
+    }
+
+
 def stories_report(day: date_, db: DBSession | None = None) -> dict:
     """Every story row for the day, with token spend and estimated cost."""
     from app.services.articles import costs
+    from app.services.articles.service import story_diagnostics
 
     session, own = _own_session(db)
     try:
@@ -503,10 +666,19 @@ def stories_report(day: date_, db: DBSession | None = None) -> dict:
                     facts = len(json.loads(a.content).get("facts") or [])
                 except (ValueError, TypeError):
                     facts = 0
+            # What the pipeline recorded on the way through: facts found
+            # and kept, searches used against the ceiling they stopped
+            # under, and which rule dropped each rejected fact. All of it
+            # was already being written to `content`; none of it reached
+            # the dashboard, which showed a status count and no reason.
+            diag = story_diagnostics(a)
             items.append({
                 "symbol": symbol,
                 "direction": a.direction,
                 "status": a.status,
+                "status_label": STORY_STATUS_LABELS.get(a.status, a.status),
+                "diagnostics": diag,
+                "why": _story_why(a.status, diag, a.move_pct),
                 "move_pct": round(a.move_pct, 2),
                 "market_pct": round(a.market_pct, 2) if a.market_pct is not None else None,
                 "facts": facts,
@@ -521,9 +693,41 @@ def stories_report(day: date_, db: DBSession | None = None) -> dict:
         by_status: dict[str, int] = {}
         for i in items:
             by_status[i["status"]] = by_status.get(i["status"], 0) + 1
+        # Which of our own validation rules did the dropping, across the
+        # whole day. `domain_not_allowed` dominating is a settings problem
+        # (AI_NEWS_DOMAINS); `quote_not_verbatim` dominating is a writer
+        # problem. Same symptom on the card, unrelated fixes, and until
+        # now both invisible.
+        dropped_by_rule: dict[str, int] = {}
+        for i in items:
+            for rule, n in (i["diagnostics"].get("dropped_by_rule") or {}).items():
+                dropped_by_rule[rule] = dropped_by_rule.get(rule, 0) + n
+
+        # Whether the retry is earning its keep. `saved` is the number of
+        # stories a family received that they would not have had before,
+        # and `lost_anyway` is what the extra attempts bought nothing on.
+        # Both are needed: the first alone reads as a free win, and the
+        # ratio is what says whether to raise the ceiling, leave it, or
+        # fix the prompt the retries keep failing on.
+        retried = [i for i in items if (i["diagnostics"].get("write_attempts") or 1) > 1]
+        retry_stats = {
+            "retried": len(retried),
+            "saved": sum(1 for i in retried if i["status"] == "ready"),
+            "lost_anyway": sum(1 for i in retried if i["status"] == "failed"),
+            "skipped_no_time": sum(
+                1 for i in items if i["diagnostics"].get("retry_skipped")
+            ),
+        }
+
         return {
             "count": len(items),
             "by_status": by_status,
+            "status_labels": {k: STORY_STATUS_LABELS.get(k, k) for k in by_status},
+            "retries": retry_stats,
+            "search_budget": _search_budget_verdict(items),
+            "dropped_by_rule": dict(
+                sorted(dropped_by_rule.items(), key=lambda kv: -kv[1])
+            ),
             "input_tokens": sum(i["input_tokens"] for i in items),
             "output_tokens": sum(i["output_tokens"] for i in items),
             "est_cost_usd": round(total_cost, 4) if cost_known else None,
@@ -1294,6 +1498,50 @@ def _job_missing_evidence(jobs: dict, slot: dict) -> tuple[dict, list[dict]]:
     return evidence, causes
 
 
+# What each finding code *is*, in a few words, independent of the day it
+# fired on. The `detail` line describes one occurrence ("pipeline_0935
+# never ran"); this names the class, so several occurrences can be grouped
+# under one heading and a triage list can be read without re-deriving the
+# day. One place for the wording, like `delivery.REASONS` —
+# `test_finding_identity.py` fails the build on a code with no entry here.
+FINDING_TITLES: dict[str, str] = {
+    "job_missing": "A scheduled job never ran",
+    "job_failed": "A scheduled job failed",
+    "job_drift": "A job ran a long way from its slot",
+    "no_alert_receiver": "Admin alerts have nowhere to go",
+    "no_closes": "No closing prices were saved",
+    "no_stories": "Stories are on, but none were written",
+    "stories_failed": "Story generation failed",
+    "mostly_no_cause": "Most stories found no verifiable cause",
+    "stories_not_delivered": "Emails went out with nothing for kids",
+    "delivery_not_recorded": "Emails with no recorded outcome",
+    "followups_abandoned": "A promised follow-up never arrived",
+    "recap_send_failed": "Recaps the mail server refused",
+    "recap_recap_job_missing": "The recap job never ran",
+    "recap_no_prices": "Recaps with no prices to report",
+    "recap_unexplained": "Recaps missing with no gate to explain it",
+    "email_unconfirmed": "A notification email is unconfirmed",
+    "retention_not_enforced": "A table has stopped being pruned",
+    "unbounded_growth": "A table grows with no retention window",
+    "log_mostly_noise": "A log table is mostly repeats",
+    "ml_data_loss": "Training data has lost its price context",
+    "errors_logged": "Errors were logged",
+}
+
+# The recap misses the job records for itself. The finding code is a
+# literal in each row rather than built with an f-string, so the catalogue
+# test can see it: a code assembled at runtime is a code no scan can check.
+#   (delivery reason, finding code, severity, headline)
+_RECAP_FINDINGS: tuple[tuple[str, str, str, str], ...] = (
+    ("send_failed", "recap_send_failed", "high",
+     "the mail server refused their recap"),
+    ("recap_job_missing", "recap_recap_job_missing", "high",
+     "the recap job never ran"),
+    ("no_prices", "recap_no_prices", "medium",
+     "none of their watched tickers had a price"),
+)
+
+
 def findings(report: dict) -> list[dict]:
     """Machine-checked problems in a day report, worst first.
 
@@ -1312,9 +1560,26 @@ def findings(report: dict) -> list[dict]:
     out: list[dict] = []
 
     def add(severity: str, code: str, detail: str, fix: str | None = None,
-            evidence: dict | None = None, causes: list[dict] | None = None) -> None:
+            evidence: dict | None = None, causes: list[dict] | None = None,
+            subject: str | None = None) -> None:
+        """Record one finding.
+
+        `subject` is the one job or table the finding is about, given
+        explicitly rather than left inside `detail` for a reader to parse
+        back out. Two things depend on it: the triage fingerprint, so a
+        decision about the 09:35 pipeline does not also silence the 16:05
+        one; and `/watch`, which used to decide whether a job was merely
+        not due yet by testing whether its id appeared as a substring of
+        this sentence.
+
+        `title` is not stored per finding — it comes from the catalogue, so
+        the wording cannot drift between two findings with the same code.
+        """
         out.append({
-            "severity": severity, "code": code, "detail": detail, "remediation": fix,
+            "severity": severity, "code": code, "subject": subject,
+            "title": FINDING_TITLES.get(code, code.replace("_", " ").capitalize()),
+            "fingerprint": triage.fingerprint(code, subject),
+            "detail": detail, "remediation": fix,
             "evidence": evidence or {}, "causes": causes or [],
         })
 
@@ -1327,9 +1592,10 @@ def findings(report: dict) -> list[dict]:
                     f"{slot['job_id']} never ran (expected {slot['expected_et']} ET).",
                     "Check the container was awake; APScheduler is in-process so a sleeping "
                     "container silently skips jobs.",
-                    evidence=ev, causes=causes)
+                    evidence=ev, causes=causes, subject=slot["job_id"])
             elif slot["status"] == "FAILED":
                 add("high", "job_failed", f"{slot['job_id']} failed: {slot['error']}", None,
+                    subject=slot["job_id"],
                     evidence={
                         "job_id": slot["job_id"],
                         "expected_et": slot["expected_et"],
@@ -1354,7 +1620,8 @@ def findings(report: dict) -> list[dict]:
                 add("high", "job_drift",
                     f"{slot['job_id']} ran {slot['drift_minutes']} min off its {slot['expected_et']} ET slot.",
                     "A consistent 180-min drift means the CronTrigger is resolving in Pacific, "
-                    "not Eastern — every trigger needs an explicit timezone.")
+                    "not Eastern — every trigger needs an explicit timezone.",
+                    subject=slot["job_id"])
 
     if not report["config"]["alert_receiver_set"]:
         add("high", "no_alert_receiver",
@@ -1453,15 +1720,11 @@ def findings(report: dict) -> list[dict]:
     # Recap misses the job recorded for itself, each stated as what it is.
     # These used to arrive as "no gate explains it", which sent the reader
     # looking for a bug when the answer was in hand.
-    for code, severity, headline in (
-        ("send_failed", "high", "the mail server refused their recap"),
-        ("recap_job_missing", "high", "the recap job never ran"),
-        ("no_prices", "medium", "none of their watched tickers had a price"),
-    ):
+    for code, finding_code, severity, headline in _RECAP_FINDINGS:
         rows = _missed_with(code)
         if not rows:
             continue
-        add(severity, f"recap_{code}",
+        add(severity, finding_code,
             f"{len(rows)} user(s) got no recap: {headline}.",
             explain(code)["fix"],
             evidence={
@@ -1485,6 +1748,12 @@ def findings(report: dict) -> list[dict]:
                           for m in rows[:20]],
             },
             causes=explain("unexplained")["causes"])
+    # No subject, so every unconfirmed address shares one fingerprint.
+    # The obvious subject would be the user, but the only identifier in
+    # scope here is already pseudonymised for the agent — so the
+    # fingerprint would differ between the two callers of the same
+    # endpoint, and a decision made on the dashboard would not match the
+    # finding the agent sees. Triaged as a class instead.
     for m in _missed_with("email_unconfirmed"):
         add("low", "email_unconfirmed",
             f"{m['user']} receives nothing: notification email unconfirmed.",
@@ -1501,13 +1770,15 @@ def findings(report: dict) -> list[dict]:
                     f"{t['retention_setting']} keeps {t['retention_days']}d — cleanup "
                     "has stopped pruning it.",
                     "Check the log_cleanup job ran (daily 03:15 ET) and look for errors from "
-                    "app.jobs.cleanup.")
+                    "app.jobs.cleanup.",
+                    subject=t["table"])
             if t["unbounded"] and t["rows_added_24h"] > 1000:
                 add("medium", "unbounded_growth",
                     f"{t['table']} grows with no retention setting and added "
                     f"{t['rows_added_24h']} rows in 24h ({t['mb']} MB so far).",
                     "Decide a retention window and add it to the cleanup job, or this table "
-                    "grows until storage costs money.")
+                    "grows until storage costs money.",
+                    subject=t["table"])
         for name, q in store["log_quality"].items():
             if q["duplicate_ratio"] is not None and q["duplicate_ratio"] >= 0.9 and q["sampled_rows"] >= 200:
                 worst = q["top_messages"][0] if q["top_messages"] else None
@@ -1516,7 +1787,8 @@ def findings(report: dict) -> list[dict]:
                     f"message shape"
                     + (f"; '{worst['shape'][:60]}' alone is {worst['pct_of_sample']}%." if worst else "."),
                     "Downgrade the repeated lines to DEBUG or shorten this table's retention — "
-                    "you're paying to store the same sentence.")
+                    "you're paying to store the same sentence.",
+                    subject=name)
 
     ml = report.get("ml_corpus")
     if ml and ml["stories_without_price_context"]:
