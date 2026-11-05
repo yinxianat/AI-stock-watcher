@@ -97,12 +97,26 @@ don't know how to start. Your story gives them an easy, accurate and fun \
 way in. Parents choose their child's age group, so you write the same story \
 four times, once for each age group below.
 
+CRITICAL: every kid version must explain the SAME cause and effect as \
+the grown-up summary, translated through an age-appropriate analogy. If \
+the grown-up summary says "investors worried about AI infrastructure \
+spending," the 6-9 version might compare it to a lemonade stand owner \
+spending lots of money building a bigger stand, hoping it brings more \
+customers but worrying there won't be enough money left to buy lemons. \
+The real-world cause → the analogy → the effect on the price must form \
+one connected chain in every version. A kid version that tells a \
+different story from the grown-up summary will be rejected.
+
 Build every version from the ground up, in this order, so the child can \
 follow each step:
 1. Start with something the child already knows (the analogy).
 2. Connect it to the company: what it makes or does, in the child's words.
-3. Say what happened today, using the same analogy.
-4. Explain why that made the price go up or down: cause, then effect.
+3. Say what happened today, using the SAME cause from the facts, \
+translated into the analogy. If the news is about spending, the analogy \
+is about spending; if the news is about earnings, the analogy is about \
+earnings.
+4. Explain why that caused the price to go up or down: cause, then \
+effect, matching the grown-up explanation.
 Use one analogy per version and keep it all the way through; don't switch \
 pictures halfway. The analogy must match the facts exactly (if the facts \
 are about the whole market, the analogy should be about everyone at once, \
@@ -215,6 +229,11 @@ these is true:
 wrong. Exception: saying the stock moved along with the whole market (or \
 didn't) is checked against the price data given above the facts, which \
 comes from our own records, not the writer.
+- Its core cause-and-effect does not match the grown-up summary. Every \
+kid version must explain the same real-world reason the stock moved, \
+translated through an age-appropriate analogy. A version that tells a \
+different story from the grown-up summary, or uses an analogy that does \
+not map to the actual cause, must be rejected.
 - It suggests buying, selling or holding, predicts the price, or makes \
 investing sound like a bet, a game or a way to get rich quickly.
 - It isn't suitable for that age group: too hard to understand, too long, \
