@@ -47,6 +47,7 @@ CATEGORIES: list[tuple[str, str]] = [
     ("pipeline", "Jobs and the pipeline"),
     ("delivery", "Emails and why they looked like that"),
     ("stories", "AI stories"),
+    ("ai_tuning", "AI generation tuning"),
     ("prices", "Price data"),
     ("people", "Users and watchlists"),
     ("errors", "Errors and logs"),
@@ -306,6 +307,247 @@ SELECT content_type, age_group, rating, COUNT(*) AS votes
 FROM content_feedback
 GROUP BY content_type, age_group, rating
 ORDER BY content_type, age_group, votes DESC
+""",
+    ),
+
+    # ---------------------------------------------------------- ai_tuning
+    SavedQuery(
+        key="retry_weekly_summary",
+        category="ai_tuning",
+        title="How are retries performing this week?",
+        question="Stories attempted this week: how many passed first try, "
+                "how many were saved by a retry, how many failed anyway, "
+                "and how many retries were skipped for lack of time.",
+        teaches="json_extract_path_text for reading fields from a JSON column. "
+                "CASE WHEN inside COUNT for conditional counting. This is "
+                "the query that tells you whether AI_ARTICLE_MAX_WRITE_ATTEMPTS "
+                "is set correctly.",
+        sql="""
+SELECT
+  COUNT(*) AS total_stories,
+  COUNT(CASE WHEN status = 'ready'
+             AND (content::json->'diagnostics'->>'write_attempts')::int = 1
+        THEN 1 END) AS passed_first_try,
+  COUNT(CASE WHEN status = 'ready'
+             AND (content::json->'diagnostics'->>'write_attempts')::int > 1
+        THEN 1 END) AS saved_by_retry,
+  COUNT(CASE WHEN status = 'failed'
+             AND content::json->'diagnostics'->>'rejections' IS NOT NULL
+        THEN 1 END) AS failed_after_retries,
+  COUNT(CASE WHEN content::json->'diagnostics'->>'retry_skipped' IS NOT NULL
+        THEN 1 END) AS retry_skipped_no_time,
+  COUNT(CASE WHEN status = 'no_clear_cause' THEN 1 END) AS no_clear_cause,
+  COUNT(CASE WHEN status = 'ready' THEN 1 END) AS ready,
+  COUNT(CASE WHEN status = 'failed' THEN 1 END) AS failed
+FROM stock_articles
+WHERE trading_date >= CURRENT_DATE - 7
+  AND content IS NOT NULL
+""",
+    ),
+    SavedQuery(
+        key="retry_per_story",
+        category="ai_tuning",
+        title="How many attempts did each story take?",
+        question="Every story from the last 7 days with its attempt count, "
+                "rejection history, and whether it was saved by a retry. "
+                "Sort by most attempts first to find the hardest stories.",
+        teaches="Extracting nested JSON, casting to int, and ordering by a "
+                "computed value. The 'rejections' field is a JSON array "
+                "showing what went wrong on each failed attempt.",
+        sql="""
+SELECT
+  t.symbol,
+  a.direction,
+  a.status,
+  a.move_pct,
+  (a.content::json->'diagnostics'->>'write_attempts')::int AS attempts,
+  a.content::json->'diagnostics'->>'retry_skipped' AS skipped_reason,
+  a.content::json->'diagnostics'->'rejections' AS rejection_history,
+  a.content::json->'diagnostics'->>'rejected_by' AS final_rejected_by,
+  a.created_at,
+  a.completed_at
+FROM stock_articles a
+JOIN tickers t ON t.id = a.ticker_id
+WHERE a.trading_date >= CURRENT_DATE - 7
+  AND a.content IS NOT NULL
+ORDER BY (a.content::json->'diagnostics'->>'write_attempts')::int DESC NULLS LAST,
+         a.created_at DESC
+""",
+    ),
+    SavedQuery(
+        key="rejection_reasons",
+        category="ai_tuning",
+        title="Which safety layer rejects the most stories?",
+        question="Rejection reasons across all stories in the last 30 days. "
+                "Shows whether the problem is the language check, the "
+                "reviewer, or a specific age group failing repeatedly.",
+        teaches="json_array_elements for iterating over a JSON array inside "
+                "a column. Each story's rejections array has one entry per "
+                "failed attempt, each with the layer that rejected it.",
+        sql="""
+SELECT
+  r->>'rejected_by' AS rejected_by,
+  COUNT(*) AS times,
+  COUNT(DISTINCT a.id) AS distinct_stories
+FROM stock_articles a,
+     json_array_elements(a.content::json->'diagnostics'->'rejections') AS r
+WHERE a.trading_date >= CURRENT_DATE - 30
+  AND a.content IS NOT NULL
+  AND a.content::json->'diagnostics'->'rejections' IS NOT NULL
+GROUP BY r->>'rejected_by'
+ORDER BY times DESC
+""",
+    ),
+    SavedQuery(
+        key="search_budget_usage",
+        category="ai_tuning",
+        title="Are stories hitting the search budget ceiling?",
+        question="Search usage per story: how many searches were used vs. "
+                "the ceiling. Stories that use the full budget and still "
+                "find no cause are budget-bound — raising "
+                "AI_ARTICLE_MAX_SEARCHES may help. Stories that stop early "
+                "chose to stop — the prompt or domains setting is the "
+                "constraint.",
+        teaches="Comparing two JSON fields. 'Budget-bound' means the story "
+                "used its full ceiling and still failed. 'Stopped early' "
+                "means it found what it needed or gave up before the limit.",
+        sql="""
+SELECT
+  t.symbol,
+  a.status,
+  (a.content::json->'diagnostics'->>'searches_used')::int AS searches_used,
+  (a.content::json->'diagnostics'->>'max_searches')::int AS max_searches,
+  CASE
+    WHEN (a.content::json->'diagnostics'->>'searches_used')::int
+       >= (a.content::json->'diagnostics'->>'max_searches')::int
+    THEN 'budget-bound'
+    ELSE 'stopped early'
+  END AS budget_status,
+  (a.content::json->'diagnostics'->>'facts_found')::int AS facts_found,
+  (a.content::json->'diagnostics'->>'facts_kept')::int AS facts_kept,
+  a.trading_date
+FROM stock_articles a
+JOIN tickers t ON t.id = a.ticker_id
+WHERE a.trading_date >= CURRENT_DATE - 14
+  AND a.content IS NOT NULL
+  AND a.content::json->'diagnostics'->>'searches_used' IS NOT NULL
+ORDER BY a.trading_date DESC, searches_used DESC
+""",
+    ),
+    SavedQuery(
+        key="fact_drop_reasons",
+        category="ai_tuning",
+        title="Why are facts being dropped by validation?",
+        question="Which validation rules drop the most facts, and which "
+                "domains are being rejected. If 'domain_not_allowed' "
+                "dominates, check AI_NEWS_DOMAINS. If 'url_not_in_search_"
+                "results' dominates, the model is fabricating URLs.",
+        teaches="json_array_elements to unpack a nested JSON array, then "
+                "GROUP BY on the extracted rule name. This is how you find "
+                "the dominant validation problem without reading each story.",
+        sql="""
+SELECT
+  d->>'rule' AS validation_rule,
+  COUNT(*) AS facts_dropped,
+  COUNT(DISTINCT a.id) AS stories_affected,
+  (array_agg(DISTINCT d->>'detail'))[1:3] AS example_details
+FROM stock_articles a,
+     json_array_elements(a.content::json->'diagnostics'->'dropped') AS d
+WHERE a.trading_date >= CURRENT_DATE - 14
+  AND a.content IS NOT NULL
+  AND a.content::json->'diagnostics'->'dropped' IS NOT NULL
+GROUP BY d->>'rule'
+ORDER BY facts_dropped DESC
+""",
+    ),
+    SavedQuery(
+        key="story_cost_per_day",
+        category="ai_tuning",
+        title="How much is the AI costing per day?",
+        question="Token usage and estimated cost per day. The cost estimate "
+                "uses Haiku 3.5 pricing ($0.25/M input, $1.25/M output) — "
+                "adjust if your model differs. Searches are ~$0.02 each.",
+        teaches="Date casting with aggregation, and inline cost arithmetic. "
+                "The search cost dominates, so the total is only useful "
+                "when you include it.",
+        sql="""
+SELECT
+  trading_date,
+  COUNT(*) AS stories,
+  SUM(input_tokens) AS total_input_tokens,
+  SUM(output_tokens) AS total_output_tokens,
+  ROUND((SUM(input_tokens) * 0.25 / 1000000 +
+         SUM(output_tokens) * 1.25 / 1000000)::numeric, 4) AS llm_cost_usd,
+  SUM((content::json->'diagnostics'->>'searches_used')::int) AS total_searches,
+  ROUND((SUM((content::json->'diagnostics'->>'searches_used')::int) * 0.02)::numeric, 4)
+    AS search_cost_usd
+FROM stock_articles
+WHERE trading_date >= CURRENT_DATE - 14
+  AND content IS NOT NULL
+GROUP BY trading_date
+ORDER BY trading_date DESC
+""",
+    ),
+    SavedQuery(
+        key="retry_trend",
+        category="ai_tuning",
+        title="Is the retry rate trending up or down?",
+        question="Per-day retry statistics over the last 30 days. A rising "
+                "retry rate means the prompt or the provider is degrading. "
+                "A rising 'saved_by_retry' rate means the retries are earning "
+                "their cost. A rising 'skipped' rate means the budget is too "
+                "tight.",
+        teaches="Multiple conditional aggregates side by side for a trend "
+                "view. Each column is a different question about the same "
+                "day.",
+        sql="""
+SELECT
+  trading_date,
+  COUNT(*) AS total,
+  COUNT(CASE WHEN status = 'ready'
+             AND (content::json->'diagnostics'->>'write_attempts')::int = 1
+        THEN 1 END) AS first_try,
+  COUNT(CASE WHEN status = 'ready'
+             AND (content::json->'diagnostics'->>'write_attempts')::int > 1
+        THEN 1 END) AS saved_by_retry,
+  COUNT(CASE WHEN status = 'failed'
+             AND content::json->'diagnostics'->>'rejections' IS NOT NULL
+        THEN 1 END) AS failed_after_retry,
+  COUNT(CASE WHEN content::json->'diagnostics'->>'retry_skipped' IS NOT NULL
+        THEN 1 END) AS skipped_no_time,
+  ROUND(AVG((content::json->'diagnostics'->>'write_attempts')::int)::numeric, 2)
+    AS avg_attempts
+FROM stock_articles
+WHERE trading_date >= CURRENT_DATE - 30
+  AND content IS NOT NULL
+GROUP BY trading_date
+ORDER BY trading_date DESC
+""",
+    ),
+    SavedQuery(
+        key="age_group_failure_rate",
+        category="ai_tuning",
+        title="Which age group fails the most?",
+        question="Age groups dropped by the language check or the reviewer. "
+                "If ages 3-5 consistently fail, the writing prompt for that "
+                "age needs work — not more retries.",
+        teaches="json_each_text to unpack a JSON object's keys and values. "
+                "The 'versions_dropped_by_language_check' field maps each "
+                "failing age group to its problems.",
+        sql="""
+SELECT
+  kv.key AS age_group,
+  COUNT(*) AS times_dropped,
+  COUNT(DISTINCT a.id) AS stories_affected
+FROM stock_articles a,
+     json_each_text(
+       a.content::json->'diagnostics'->'versions_dropped_by_language_check'
+     ) AS kv
+WHERE a.trading_date >= CURRENT_DATE - 30
+  AND a.content IS NOT NULL
+  AND a.content::json->'diagnostics'->'versions_dropped_by_language_check' IS NOT NULL
+GROUP BY kv.key
+ORDER BY times_dropped DESC
 """,
     ),
 

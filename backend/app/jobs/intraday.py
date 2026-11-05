@@ -266,7 +266,8 @@ def _send_one_alert(
         )
         body = body.replace("\n━━━━━━━━━━━━━━━━━━━━\n", f"\n{fb_text}\n━━━━━━━━━━━━━━━━━━━━\n", 1)
         if body_html:
-            body_html = body_html.replace("</div>\n</div>", f"{fb_html}</div>\n</div>", 1)
+            _DISCLAIMER_MARKER = '<p style="font-size:12px;line-height:1.45;color:#57606a;background:#f6f8fa'
+            body_html = body_html.replace(_DISCLAIMER_MARKER, f"{fb_html}\n{_DISCLAIMER_MARKER}", 1)
     headers = alert_email_headers(user)
     message_id = None
     if story is not None:
