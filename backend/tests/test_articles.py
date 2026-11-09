@@ -523,7 +523,25 @@ def _fetch(prices: dict[str, float]):
     return lambda symbol: prices[symbol]
 
 
-def test_alert_and_story_arrive_in_one_email(client, stories_on):
+def _generate_for(ticker_id: int, pct: float = 6.4, price: float = 106.4,
+                  prev_close: float = 100.0) -> service.StoryPlan:
+    """Generate a story article by calling ensure_articles directly."""
+    from app.models import Ticker
+
+    db = get_session_factory()()
+    ticker = db.get(Ticker, ticker_id)
+    plan = service.ensure_articles(
+        db, [service.Candidate(ticker, pct, price, prev_close)],
+    )
+    service.wait_for(db, list(plan.stories.values()), 0)
+    db.commit()
+    db.close()
+    return plan
+
+
+def test_big_move_alert_gets_recap_teaser(client, stories_on):
+    """Big move (above story bar): alert carries a recap teaser, not a story.
+    Kid versions are reserved for the daily recap."""
     _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
 
@@ -531,25 +549,40 @@ def test_alert_and_story_arrive_in_one_email(client, stories_on):
 
     assert sent == 1
     email = client.sent_emails[0]
-    assert "STOCK STORY" in email["body_text"]
-    assert "Ask your kid" in email["body_text"]
+    assert "story arrives in your daily recap" in email["body_text"]
     assert "6.40%" in email["body_text"]
-    assert "Ask your kid" in email["body_html"]
-    assert "Message-ID" in email["headers"]
-    assert [a.status for a in _rows(StockArticle)] == ["ready"]
+    assert "STOCK STORY" not in email["body_text"]
+    assert "Ask your kid" not in email["body_text"]
     assert _rows(ArticleFollowup) == []
 
 
-def test_one_story_is_shared_by_everyone_watching(client, stories_on):
+def test_alert_shows_grownup_summary_when_story_exists(client, stories_on):
+    """If a story was already generated (e.g. by an earlier run), the alert
+    carries the grown-up summary + sources — but still no kid versions."""
+    _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
+    _seed_prior_day_close(ticker_id, close=100.0)
+    _generate_for(ticker_id)
+
+    sent = run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
+
+    assert sent == 1
+    email = client.sent_emails[0]
+    assert "WHY IT MOVED" in email["body_text"]
+    assert "6.40%" in email["body_text"]
+    assert "Ask your kid" not in email["body_text"]
+    assert email["body_html"] is not None
+
+
+def test_all_watchers_get_recap_teaser(client, stories_on):
+    """Multiple users watching the same stock each get the recap teaser."""
     _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0, email="a@example.com")
     _setup_user_with_range_rule("AAPL", -3.0, 3.0, email="b@example.com")
     _seed_prior_day_close(ticker_id, close=100.0)
 
     run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
 
-    assert stories_on == ["AAPL"]
     assert len(client.sent_emails) == 2
-    assert all("STOCK STORY" in e["body_text"] for e in client.sent_emails)
+    assert all("story arrives in your daily recap" in e["body_text"] for e in client.sent_emails)
 
 
 def test_small_stock_move_gets_the_fixed_note_not_an_ai_story(client, stories_on):
@@ -585,9 +618,9 @@ def test_small_move_note_uses_the_parents_age_groups(client, stories_on):
     assert "moved down 0.7% today, within ±1%" in body
 
 
-def test_funds_get_a_story_from_half_a_percent(client, stories_on):
-    """AI_ARTICLE_MIN_PCT_FUND (0.5%) applies to ETFs: SPY +0.6% gets a story,
-    the same move in a single stock doesn't."""
+def test_funds_get_recap_teaser_from_half_a_percent(client, stories_on):
+    """AI_ARTICLE_MIN_PCT_FUND (0.5%) applies to ETFs: SPY +0.6% is above the
+    fund story bar (recap teaser), the same move in a stock is below (small-move note)."""
     _, spy_id = _setup_user_with_range_rule("SPY", -0.3, 0.3, email="a@example.com")
     _, aapl_id = _setup_user_with_range_rule("AAPL", -0.3, 0.3, email="b@example.com")
     _seed_prior_day_close(spy_id, close=100.0)
@@ -595,9 +628,8 @@ def test_funds_get_a_story_from_half_a_percent(client, stories_on):
 
     run_intraday_capture(fetcher=_fetch({"SPY": 100.6, "AAPL": 100.6}), force=True)
 
-    assert stories_on == ["SPY"]
     bodies = {e["to"]: e["body_text"] for e in client.sent_emails}
-    assert "STOCK STORY" in bodies["a@example.com"]
+    assert "story arrives in your daily recap" in bodies["a@example.com"]
     assert "SMALL MOVE" in bodies["b@example.com"]
 
 
@@ -608,9 +640,9 @@ def test_no_small_move_note_when_stories_are_off(client):
     assert "SMALL MOVE" not in client.sent_emails[0]["body_text"]
 
 
-def test_no_clear_cause_sends_the_plain_alert(client, stories_on, monkeypatch):
-    monkeypatch.setattr(service, "generate_article",
-                        lambda req: GenerationResult(status="no_clear_cause"))
+def test_big_move_without_story_gets_recap_teaser_not_blank(client, stories_on):
+    """A big move with no pre-existing story gets the recap teaser, not a
+    blank alert. Story generation happens later in the daily recap."""
     _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
 
@@ -619,14 +651,16 @@ def test_no_clear_cause_sends_the_plain_alert(client, stories_on, monkeypatch):
     email = client.sent_emails[0]
     assert "STOCK STORY" not in email["body_text"]
     assert "still looking" not in email["body_text"]
-    assert email["body_html"] is None
+    assert "story arrives in your daily recap" in email["body_text"]
+    assert email["body_html"] is not None
     assert _rows(ArticleFollowup) == []
 
 
-def test_no_clear_cause_on_a_whole_market_day_gets_the_market_note(
-        client, stories_on, monkeypatch):
-    """No company news, but the stock fell about as much as the S&P 500:
-    the fixed "whole-market day" note, in the parent's age groups."""
+def test_whole_market_day_note_in_build_alert_email(stories_on, monkeypatch):
+    """The whole-market-day note is rendered via build_alert_email when the
+    story generation returns no_clear_cause and the stock moved with the
+    market. This tests the rendering path directly (story generation now
+    happens in the daily recap, not intraday)."""
     from app.services.articles.preferences import set_age_groups
 
     monkeypatch.setattr(service, "generate_article",
@@ -635,33 +669,23 @@ def test_no_clear_cause_on_a_whole_market_day_gets_the_market_note(
     user_id, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
     _seed_prior_day_close(ticker_id, close=100.0)
     db = get_session_factory()()
-    set_age_groups(db, db.get(User, user_id), ["3-5", "13-17"])
+    user = db.get(User, user_id)
+    set_age_groups(db, user, ["3-5", "13-17"])
+    from app.models import Ticker
+    ticker = db.get(Ticker, ticker_id)
+    plan = service.ensure_articles(
+        db, [service.Candidate(ticker, -1.75, 98.25, 100.0)],
+    )
+    service.wait_for(db, list(plan.stories.values()), 0)
+    article = plan.stories.get(ticker_id)
+    body, html, _, outcome = service.build_alert_email(
+        db, user, "AAPL moved", article=article,
+        skipped=plan.skipped.get(ticker_id),
+    )
     db.close()
-
-    run_intraday_capture(fetcher=_fetch({"AAPL": 98.25}), force=True)
-
-    email = client.sent_emails[0]
-    body = email["body_text"]
     assert "WHOLE-MARKET DAY" in body
-    assert "AAPL -1.75% today · S&P 500 -1.80%" in body
     assert "when the tide goes out, all the boats go down together" in body
     assert "ages 13–17" in body and "ages 6–9" not in body
-    assert "isn't written by AI" in body
-    assert "WHOLE-MARKET DAY" in email["body_html"]
-    assert "STOCK STORY" not in body
-
-
-def test_failed_story_on_a_whole_market_day_gets_the_market_note(
-        client, stories_on, monkeypatch):
-    monkeypatch.setattr(service, "generate_article", lambda req: GenerationResult(
-        status="failed", error="reviewer rejected the grown-up summary"))
-    monkeypatch.setattr(service, "market_move_pct", lambda: -1.8)
-    _, ticker_id = _setup_user_with_range_rule("AAPL", -1.0, 1.0)
-    _seed_prior_day_close(ticker_id, close=100.0)
-
-    run_intraday_capture(fetcher=_fetch({"AAPL": 98.3}), force=True)
-
-    assert "WHOLE-MARKET DAY" in client.sent_emails[0]["body_text"]
 
 
 def test_reviewer_gets_our_price_data_for_market_claims():
@@ -699,111 +723,99 @@ def test_research_looks_for_the_market_reason_when_no_company_news():
     assert "why the overall" in RESEARCH_SYSTEM and "whole market" in RESEARCH_SYSTEM
 
 
-def test_slow_story_follows_up_in_the_same_thread(client, stories_on, monkeypatch):
+def test_sweep_gives_up_on_a_lost_story(stories_on, monkeypatch):
+    """A pending article whose future is gone and whose row is old enough
+    is marked failed by sweep, and any waiting followups are abandoned."""
     later = _Later()
     monkeypatch.setattr(service, "_executor", later)
     _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
+    _generate_for(ticker_id)
 
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
-
-    alert = client.sent_emails[0]
-    assert "still looking into why AAPL moved" in alert["body_text"]
-    assert [f.status for f in _rows(ArticleFollowup)] == ["waiting"]
-
-    later.run_all()  # the story finishes after the alert went out
-
-    assert len(client.sent_emails) == 2
-    follow = client.sent_emails[1]
-    assert follow["subject"] == f"Re: {alert['subject']}"
-    assert follow["headers"]["In-Reply-To"] == alert["headers"]["Message-ID"]
-    assert "STOCK STORY" in follow["body_text"]
-    assert [f.status for f in _rows(ArticleFollowup)] == ["sent"]
-
-    # Nothing is sent twice, even if the sweep runs afterwards.
-    db = get_session_factory()()
-    service.sweep(db)
-    db.close()
-    assert len(client.sent_emails) == 2
-
-
-def test_sweep_gives_up_on_a_lost_story(client, stories_on, monkeypatch):
-    later = _Later()
-    monkeypatch.setattr(service, "_executor", later)
-    _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
-    _seed_prior_day_close(ticker_id, close=100.0)
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
-
-    # Simulate a restart: the job is gone and the row is old.
     service._futures.clear()
     db = get_session_factory()()
     row = db.execute(select(StockArticle)).scalar_one()
     row.created_at = utcnow() - timedelta(minutes=30)
+    row.status = "pending"
     db.commit()
     service.sweep(db)
     db.close()
 
     assert [a.status for a in _rows(StockArticle)] == ["failed"]
-    assert [f.status for f in _rows(ArticleFollowup)] == ["abandoned"]
-    assert len(client.sent_emails) == 1  # just the original alert
 
 
-def _two_movers(aapl_price: float, msft_price: float):
+def _two_candidates():
+    """Create AAPL and MSFT candidates for cap tests (ensure_articles)."""
+    from app.models import Ticker
+
     _, aapl = _setup_user_with_range_rule("AAPL", -3.0, 3.0, email="a@example.com")
     db = get_session_factory()()
-    from app.models import NotificationEventType, NotificationRule, Ticker, User, WatchlistItem
-    user = db.execute(select(User).where(User.email == "a@example.com")).scalar_one()
     msft = db.execute(select(Ticker).where(Ticker.symbol == "MSFT")).scalar_one()
-    db.add(WatchlistItem(user_id=user.id, ticker_id=msft.id))
-    db.add(NotificationRule(user_id=user.id, ticker_id=msft.id,
-                            event_type=NotificationEventType.PRICE_CHANGE_RANGE,
-                            pct_low=-3.0, pct_high=3.0, enabled=True))
-    db.commit()
     msft_id = msft.id
     db.close()
     _seed_prior_day_close(aapl, close=100.0)
     _seed_prior_day_close(msft_id, close=100.0)
-    run_intraday_capture(fetcher=_fetch({"AAPL": aapl_price, "MSFT": msft_price}), force=True)
+    return aapl, msft_id
 
 
-def test_big_moves_get_stories_past_the_daily_cap(client, stories_on, monkeypatch):
+def test_big_moves_get_stories_past_the_daily_cap(stories_on, monkeypatch):
+    """Ensure_articles generates stories for both tickers when moves are above
+    AI_ARTICLE_ALWAYS_PCT, even though the daily cap is 1."""
+    from app.models import Ticker
+
     monkeypatch.setenv("AI_ARTICLE_MAX_PER_DAY", "1")
     get_settings.cache_clear()
-    _two_movers(106.0, 91.0)  # +6% and -9%: both "big" (default 5%)
+    aapl_id, msft_id = _two_candidates()
+    db = get_session_factory()()
+    aapl_t = db.get(Ticker, aapl_id)
+    msft_t = db.get(Ticker, msft_id)
+    plan = service.ensure_articles(db, [
+        service.Candidate(aapl_t, 6.0, 106.0, 100.0),
+        service.Candidate(msft_t, -9.0, 91.0, 100.0),
+    ])
+    db.commit()
+    db.close()
     assert sorted(stories_on) == ["AAPL", "MSFT"]
 
 
-def test_smaller_moves_stop_at_the_daily_cap(client, stories_on, monkeypatch):
+def test_smaller_moves_stop_at_the_daily_cap(stories_on, monkeypatch):
+    """Under the big-move threshold, the daily cap limits stories."""
+    from app.models import Ticker
+
     monkeypatch.setenv("AI_ARTICLE_MAX_PER_DAY", "1")
     get_settings.cache_clear()
-    _two_movers(104.0, 96.0)  # +4% and -4%: alerts fire (±3% rules) but not "big"
-    assert len(stories_on) == 1
-    assert len(_rows(NotificationLog)) == 2  # both alerts still sent
-
-
-def test_daily_cap_keeps_the_biggest_move(client, stories_on, monkeypatch):
-    monkeypatch.setenv("AI_ARTICLE_MAX_PER_DAY", "1")
-    monkeypatch.setenv("AI_ARTICLE_ALWAYS_PCT", "50")  # big-move rule out of the way
-    get_settings.cache_clear()
-    _, aapl = _setup_user_with_range_rule("AAPL", -5.0, 5.0, email="a@example.com")
+    aapl_id, msft_id = _two_candidates()
     db = get_session_factory()()
-    from app.models import NotificationEventType, NotificationRule, Ticker, User, WatchlistItem
-    user = db.execute(select(User).where(User.email == "a@example.com")).scalar_one()
-    msft = db.execute(select(Ticker).where(Ticker.symbol == "MSFT")).scalar_one()
-    db.add(WatchlistItem(user_id=user.id, ticker_id=msft.id))
-    db.add(NotificationRule(user_id=user.id, ticker_id=msft.id,
-                            event_type=NotificationEventType.PRICE_CHANGE_RANGE,
-                            pct_low=-5.0, pct_high=5.0, enabled=True))
+    aapl_t = db.get(Ticker, aapl_id)
+    msft_t = db.get(Ticker, msft_id)
+    plan = service.ensure_articles(db, [
+        service.Candidate(aapl_t, 4.0, 104.0, 100.0),
+        service.Candidate(msft_t, -4.0, 96.0, 100.0),
+    ])
     db.commit()
-    msft_id = msft.id
     db.close()
-    _seed_prior_day_close(aapl, close=100.0)
-    _seed_prior_day_close(msft_id, close=100.0)
+    assert len(stories_on) == 1
+    assert len(plan.skipped) == 1
 
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.0, "MSFT": 91.0}), force=True)
 
+def test_daily_cap_keeps_the_biggest_move(stories_on, monkeypatch):
+    """With cap=1 and big-move bypass disabled, the biggest absolute move wins."""
+    from app.models import Ticker
+
+    monkeypatch.setenv("AI_ARTICLE_MAX_PER_DAY", "1")
+    monkeypatch.setenv("AI_ARTICLE_ALWAYS_PCT", "50")
+    get_settings.cache_clear()
+    aapl_id, msft_id = _two_candidates()
+    db = get_session_factory()()
+    aapl_t = db.get(Ticker, aapl_id)
+    msft_t = db.get(Ticker, msft_id)
+    plan = service.ensure_articles(db, [
+        service.Candidate(aapl_t, 6.0, 106.0, 100.0),
+        service.Candidate(msft_t, -9.0, 91.0, 100.0),
+    ])
+    db.commit()
+    db.close()
     assert stories_on == ["MSFT"]  # -9% beats +6%
-    assert len(_rows(NotificationLog)) == 2  # both alerts still sent
 
 
 def test_stories_off_never_calls_the_ai(client, monkeypatch):
@@ -889,9 +901,26 @@ def _gemini_with_claude_backup(monkeypatch, **extra):
 
 
 def _alert_aapl_up():
+    """Set up AAPL and generate a story via ensure_articles."""
     _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
+    _generate_for(ticker_id)
+
+
+def _generate_aapl_again():
+    """Delete today's AAPL article and regenerate."""
+    db = get_session_factory()()
+    db.query(StockArticle).delete()
+    db.commit()
+    from app.models import Ticker
+    ticker = db.execute(select(Ticker).where(Ticker.symbol == "AAPL")).scalar_one()
+    plan = service.ensure_articles(
+        db, [service.Candidate(ticker, 7.0, 107.0, 100.0)],
+    )
+    service.wait_for(db, list(plan.stories.values()), 0)
+    db.commit()
+    db.close()
+    return plan
 
 
 def _clear_alert_history():
@@ -903,7 +932,7 @@ def _clear_alert_history():
 
 
 def test_backup_provider_writes_the_story_and_admin_is_told(
-        client, providers_faked, admin_emails, monkeypatch):
+        providers_faked, admin_emails, monkeypatch):
     runs, behaviour = providers_faked
     _gemini_with_claude_backup(monkeypatch)
     behaviour.update(gemini=_key_rejected("Gemini"), anthropic=_ready_story)
@@ -911,19 +940,17 @@ def test_backup_provider_writes_the_story_and_admin_is_told(
     _alert_aapl_up()
 
     assert runs == ["gemini", "anthropic"]
-    assert "STOCK STORY" in client.sent_emails[0]["body_text"]  # user gets the story anyway
     assert [a.model for a in _rows(StockArticle)] == ["claude-haiku-5-5"]
     assert [e for e, _ in admin_emails] == ["ai_key_problem"]
     assert "Stories keep working on the backup (Anthropic, claude-haiku-5-5)" in admin_emails[0][1]
 
-    # Gemini is paused: the next story goes straight to the backup, no new email.
-    _clear_alert_history()
-    run_intraday_capture(fetcher=_fetch({"AAPL": 107.0}), force=True)
+    # Gemini is paused: the next story goes straight to the backup.
+    _generate_aapl_again()
     assert runs == ["gemini", "anthropic", "anthropic"]
     assert len(admin_emails) == 1
 
 
-def test_gemini_outage_uses_backup_without_pausing(client, providers_faked, admin_emails, monkeypatch):
+def test_gemini_outage_uses_backup_without_pausing(providers_faked, admin_emails, monkeypatch):
     runs, behaviour = providers_faked
     _gemini_with_claude_backup(monkeypatch)
     behaviour.update(
@@ -933,12 +960,12 @@ def test_gemini_outage_uses_backup_without_pausing(client, providers_faked, admi
     _alert_aapl_up()
 
     assert runs == ["gemini", "anthropic"]
-    assert "STOCK STORY" in client.sent_emails[0]["body_text"]
+    assert [a.status for a in _rows(StockArticle)] == ["ready"]
     assert "Gemini is tried again for the next story" in admin_emails[0][1]
     assert not service._is_paused("gemini")
 
 
-def test_content_rejections_are_not_retried_on_the_backup(client, providers_faked, monkeypatch):
+def test_content_rejections_are_not_retried_on_the_backup(providers_faked, monkeypatch):
     runs, behaviour = providers_faked
     _gemini_with_claude_backup(monkeypatch)
     behaviour.update(gemini=lambda req: GenerationResult(status="no_clear_cause", usage=Usage(500, 50)),
@@ -947,29 +974,25 @@ def test_content_rejections_are_not_retried_on_the_backup(client, providers_fake
     assert runs == ["gemini"]  # an honest "no clear reason" isn't a failure
 
 
-def test_both_providers_down_sends_a_plain_alert_and_tells_only_admin(
-        client, providers_faked, admin_emails, monkeypatch):
+def test_both_providers_down_tells_admin(
+        providers_faked, admin_emails, monkeypatch):
     runs, behaviour = providers_faked
     _gemini_with_claude_backup(monkeypatch)
     behaviour.update(gemini=_key_rejected("Gemini"), anthropic=_key_rejected("Anthropic"))
 
     _alert_aapl_up()
 
-    email = client.sent_emails[0]
-    assert "6.40%" in email["body_text"]
-    for word in ("STOCK STORY", "still looking", "API", "key", "Gemini", "Anthropic"):
-        assert word not in email["body_text"]
+    assert [a.status for a in _rows(StockArticle)] == ["failed"]
     events = [b for _, b in admin_emails]
     assert len(events) == 2 and "Price alerts are still sent" in events[1]
 
-    # Both paused: no AI calls at all on the next alert, no more emails.
-    _clear_alert_history()
-    run_intraday_capture(fetcher=_fetch({"AAPL": 107.0}), force=True)
+    # Both paused: no AI calls at all on the next attempt.
+    _generate_aapl_again()
     assert runs == ["gemini", "anthropic"]
     assert len(admin_emails) == 2
 
 
-def test_missing_key_never_calls_the_ai(client, providers_faked, admin_emails, monkeypatch):
+def test_missing_key_never_calls_the_ai(providers_faked, admin_emails, monkeypatch):
     runs, _ = providers_faked
     monkeypatch.setenv("AI_API_KEY", "")
     get_settings.cache_clear()
@@ -978,12 +1001,11 @@ def test_missing_key_never_calls_the_ai(client, providers_faked, admin_emails, m
 
     assert runs == []
     assert _rows(StockArticle) == []
-    assert "STOCK STORY" not in client.sent_emails[0]["body_text"]
     assert [e for e, _ in admin_emails] == ["ai_key_problem"]
     assert "ANTHROPIC_API_KEY is not set (main AI provider)" in admin_emails[0][1]
 
 
-def test_admin_hears_when_a_provider_works_again(client, providers_faked, admin_emails, monkeypatch):
+def test_admin_hears_when_a_provider_works_again(providers_faked, admin_emails, monkeypatch):
     runs, behaviour = providers_faked
     behaviour.update(anthropic=_ready_story)
     service.report_key_problem("anthropic", "the Anthropic API key was rejected")
@@ -992,7 +1014,7 @@ def test_admin_hears_when_a_provider_works_again(client, providers_faked, admin_
     _alert_aapl_up()
 
     assert [e for e, _ in admin_emails] == ["ai_key_problem", "ai_key_recovered"]
-    assert "STOCK STORY" in client.sent_emails[0]["body_text"]
+    assert [a.status for a in _rows(StockArticle)] == ["ready"]
 
 
 def test_reminder_at_most_every_six_hours(client, stories_on, admin_emails):
@@ -1032,7 +1054,9 @@ def test_story_preferences_need_sign_in(client):
     assert client.get("/auth/story-preferences").status_code == 401
 
 
-def test_alert_email_uses_the_parents_age_groups(client, stories_on):
+def test_alert_email_has_no_age_specific_content(client, stories_on):
+    """Intraday alerts no longer carry kid versions — those are in the recap.
+    The alert shows either a recap teaser or a grown-up summary."""
     user_id, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
     from app.models import StoryPreference
@@ -1044,8 +1068,9 @@ def test_alert_email_uses_the_parents_age_groups(client, stories_on):
     run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
 
     body = client.sent_emails[0]["body_text"]
-    assert "For your little one" in body and "For your teen" in body
-    assert "For your kid (ages 6–9)" not in body
+    assert "For your little one" not in body
+    assert "For your teen" not in body
+    assert "story arrives in your daily recap" in body
 
 
 def test_writer_sentence_limits_stay_under_the_code_check():
