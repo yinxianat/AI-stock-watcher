@@ -276,21 +276,15 @@ def test_no_deadline_means_only_the_count_bounds_it(attempts):
     assert len(reviewed) == 2
 
 
-def test_each_job_passes_its_own_wait_budget():
-    """Wiring, and a bug this caught: the alert path waits
-    AI_ARTICLE_WAIT_SECONDS and the recap path waits
-    RECAP_STORY_WAIT_SECONDS, which at the defaults are 120 and 300. The
-    first version of this read the alert's budget inside the shared
-    pipeline entry point, so recap stories were handed 120s and skipped
-    retries they had minutes left for.
-    """
+def test_recap_passes_its_own_wait_budget():
+    """The recap path passes RECAP_STORY_WAIT_SECONDS as the budget to
+    ensure_articles, not the alert's AI_ARTICLE_WAIT_SECONDS. (The alert
+    path no longer generates stories — it defers to the recap.)"""
     import inspect
 
-    from app.jobs import intraday, recap
+    from app.jobs import recap
 
-    alert_src = inspect.getsource(intraday)
     recap_src = inspect.getsource(recap)
-    assert "ensure_articles(" in alert_src and "ai_article_wait_seconds" in alert_src
     assert "ensure_articles(" in recap_src and "recap_story_wait_seconds" in recap_src
     assert "ai_article_wait_seconds" not in recap_src, (
         "the recap path must not borrow the alert's budget"

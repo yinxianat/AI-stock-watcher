@@ -11,17 +11,10 @@ on weekdays. For each watched ticker we:
    has confirmed their notify email, fire an alert if that change is
    outside the user's [pct_low, pct_high] band.
 
-(There used to be a second, 10-minute tick-over-tick signal. It was
-removed: the first tick after the open compared against yesterday's last
-tick, so it mostly duplicated the day-over-day alert.)
-
-Stories: when AI_ARTICLES_ENABLED, alerts aren't sent straight away. All
-alerts for the run are collected first; stocks that moved at least the
-story bar (AI_ARTICLE_MIN_PCT_STOCK / _FUND) get an AI "why it moved" story
-(see app.services.articles), given up to AI_ARTICLE_WAIT_SECONDS; then
-every alert is sent, with its story if ready, or a "still looking" note
-and a threaded follow-up later. Smaller moves get a fixed "small move"
-note instead.
+Alerts are price-only: the AI "why it moved" story is reserved for the
+daily recap (see app.jobs.recap), so parents get one high-quality story
+at a calm reading moment. Moves below the story bar still get the fixed
+small-move note; big moves get a recap teaser.
 
 Dedup: one alert per (user, ticker) per 3-hour window, matched on the
 "[vs. prior day]" prefix of the NotificationLog summary.
@@ -48,7 +41,6 @@ from app.models import (
     DailyClose,
     IntradayPrice,
     NotificationEventType,
-    StockArticle,
     NotificationLog,
     NotificationRule,
     Ticker,
@@ -56,12 +48,12 @@ from app.models import (
     WatchlistItem,
     utcnow,
 )
-from app.api.feedback_routes import feedback_links_html, feedback_links_text
 from app.services import delivery
 from app.services.alerts import alert_event_first_notification
 from app.services.articles import service as articles
-from app.services.articles.preferences import get_age_groups
+from app.services.articles import render
 from app.services.emailer import send_email
+from app.services import email_prefs
 from app.services.email_prefs import alert_email_headers, opted_out_user_ids
 
 log = logging.getLogger(__name__)
@@ -232,50 +224,73 @@ class _Alert:
     summary: str
 
 
-def _send_one_alert(
-    db: DBSession, alert: _Alert, story: StockArticle | None,
-    skipped: delivery.StoryOutcome | None = None,
-) -> bool:
+def _footer_text(user: User) -> str:
+    return (
+        "You're receiving this because you set a price-change rule for this ticker.\n"
+        + email_prefs.alert_email_footer(user)
+    )
+
+
+def _alert_html(intro: str, block: str, user: User) -> str:
+    from app.services.email_links import settings_url
+
+    return render.email_html(
+        intro, block, settings_url(user.id), email_prefs.unsubscribe_url(user),
+    )
+
+
+def _send_one_alert(db: DBSession, alert: _Alert) -> bool:
     """Send the email and write the NotificationLog row. True iff the
     SMTP call didn't raise (so we should record it).
 
-    `skipped` is why there is no story, when `_stories_for` already knows.
-    It ends up in `delivery_outcomes` so a bare alert is never unexplained."""
+    Small moves get the fixed small-move note. Bigger moves get the
+    grown-up summary + sources if a story is already ready, otherwise
+    just the price with a recap teaser. Kid versions are reserved for
+    the daily recap."""
     user, ticker = alert.user, alert.ticker
     subject = f"[🐵 Little Money Monkey] {ticker.symbol}"
-    small_move = None
-    if get_settings().ai_articles_enabled and not articles.needs_story(ticker, alert.pct):
-        small_move = (ticker, alert.pct)
-    body, body_html, story_pending, outcome = articles.build_alert_email(
-        db, user, alert.summary, story, small_move=small_move, skipped=skipped,
-    )
-    if story is not None:
-        ages = get_age_groups(db, user.id)
-        art_ctx = {
-            "ticker": ticker.symbol, "move_pct": round(alert.pct, 2),
-            "direction": "up" if alert.pct >= 0 else "down",
-            "trading_date": story.trading_date.isoformat(),
-        }
-        fb_text = feedback_links_text(
-            user.id, "article", str(story.id),
-            age_group=ages[0] if ages else None, context=art_ctx,
+    settings = get_settings()
+    body_html: str | None = None
+
+    if settings.ai_articles_enabled and not articles.needs_story(ticker, alert.pct):
+        body, body_html, _, outcome = articles.build_alert_email(
+            db, user, alert.summary, article=None,
+            small_move=(ticker, alert.pct),
         )
-        fb_html = feedback_links_html(
-            user.id, "article", str(story.id),
-            age_group=ages[0] if ages else None, context=art_ctx,
+    elif settings.ai_articles_enabled:
+        article = articles.find_ready_article(db, ticker.id, alert.pct)
+        view = articles.alert_story_view(db, article) if article else None
+        if view is not None:
+            body = f"{alert.summary}\n\n{render.alert_story_text(view)}\n\n{_footer_text(user)}"
+            body_html = _alert_html(alert.summary, render.alert_story_html(view), user)
+            outcome = delivery.StoryOutcome(
+                state=delivery.STATE_RECAP_TEASER, reason="recap_only",
+                detail=f"{ticker.symbol} moved {alert.pct:+.2f}%: alert carried the "
+                       "grown-up summary; kid story reserved for the daily recap.",
+                article_id=article.id,
+            )
+        else:
+            teaser_t = render.recap_teaser_text(ticker.symbol)
+            teaser_h = render.recap_teaser_html(ticker.symbol)
+            body = f"{alert.summary}\n\n{teaser_t}\n\n{_footer_text(user)}"
+            body_html = _alert_html(alert.summary, teaser_h, user)
+            outcome = delivery.StoryOutcome(
+                state=delivery.STATE_RECAP_TEASER, reason="recap_only",
+                detail=f"{ticker.symbol} moved {alert.pct:+.2f}%, over the story bar; "
+                       "the AI story will be in tonight's daily recap.",
+            )
+    else:
+        body = f"{alert.summary}\n\n{_footer_text(user)}"
+        outcome = delivery.StoryOutcome(
+            state=delivery.STATE_NONE, reason="ai_disabled",
+            detail=f"AI_ARTICLES_ENABLED is false; {ticker.symbol} got a price-only alert.",
         )
-        body = body.replace("\n━━━━━━━━━━━━━━━━━━━━\n", f"\n{fb_text}\n━━━━━━━━━━━━━━━━━━━━\n", 1)
-        if body_html:
-            _DISCLAIMER_MARKER = '<p style="font-size:12px;line-height:1.45;color:#57606a;background:#f6f8fa'
-            body_html = body_html.replace(_DISCLAIMER_MARKER, f"{fb_html}\n{_DISCLAIMER_MARKER}", 1)
-    headers = alert_email_headers(user)
-    message_id = None
-    if story is not None:
-        # Lets a follow-up story show up in the same thread as this alert.
-        message_id = articles.new_message_id()
-        headers = {**headers, "Message-ID": message_id}
+
     try:
-        send_email(user.notify_email, subject, body, body_html=body_html, headers=headers)
+        send_email(
+            user.notify_email, subject, body,
+            body_html=body_html, headers=alert_email_headers(user),
+        )
     except Exception as e:  # pragma: no cover
         log.warning("Intraday email send failed for user=%d: %s", user.id, e)
         delivery.record(
@@ -297,8 +312,6 @@ def _send_one_alert(
             sent_to=user.notify_email, summary=alert.summary,
         )
     )
-    if story_pending and message_id is not None:
-        articles.add_followup(db, story, user, message_id, subject)
     delivery.record(
         db, user=user, ticker=ticker, channel=delivery.CHANNEL_ALERT,
         trading_date=articles.trading_date(), outcome=outcome,
@@ -358,76 +371,17 @@ def _detect_range_alerts(
     return alerts
 
 
-def _stories_for(
-    db: DBSession, alerts: list[_Alert],
-) -> tuple[dict[int, StockArticle], dict[int, delivery.StoryOutcome]]:
-    """Stories (by ticker id) for stocks that moved at least the story bar,
-    after waiting up to AI_ARTICLE_WAIT_SECONDS, plus the reason for each
-    ticker that got none. Alerts go out either way — a story problem must
-    never hold up a price alert — so the reasons are the only record of why
-    an alert was bare."""
-    settings = get_settings()
-    if not settings.ai_articles_enabled:
-        return {}, {
-            a.ticker.id: delivery.StoryOutcome(
-                state=delivery.STATE_NONE, reason="ai_disabled",
-                detail=f"AI_ARTICLES_ENABLED is false, so {a.ticker.symbol} "
-                       f"({a.pct:+.2f}%) got a price-only alert.",
-            )
-            for a in alerts
-        }
-    candidates: dict[int, articles.Candidate] = {}
-    skipped: dict[int, delivery.StoryOutcome] = {}
-    for a in alerts:
-        if not articles.needs_story(a.ticker, a.pct):
-            continue  # the small-move note covers these; see `_send_one_alert`
-        if not a.prev_close:
-            skipped[a.ticker.id] = delivery.StoryOutcome(
-                state=delivery.STATE_NONE, reason="no_prev_close",
-                detail=f"{a.ticker.symbol} has no previous trading day's close, which the "
-                       "story step needs to describe the move.",
-            )
-            continue
-        candidates.setdefault(
-            a.ticker.id, articles.Candidate(a.ticker, a.pct, a.price, a.prev_close),
-        )
-    if not candidates:
-        return {}, skipped
-    try:
-        plan = articles.ensure_articles(
-            db, list(candidates.values()), settings.ai_article_wait_seconds,
-        )
-        articles.wait_for(db, list(plan.stories.values()), settings.ai_article_wait_seconds)
-        return plan.stories, {**skipped, **plan.skipped}
-    except Exception as e:  # noqa: BLE001
-        log.warning("Stories unavailable this run: %s", e)
-        db.rollback()
-        etype = type(e).__name__
-        for tid in candidates:
-            sym = candidates[tid].ticker.symbol
-            skipped[tid] = delivery.StoryOutcome(
-                state=delivery.STATE_NONE, reason="generation_error",
-                detail=(
-                    f"The story step for {sym} raised {etype} before any story "
-                    f"could be attached: {e}"
-                ),
-            )
-        return {}, skipped
-
-
 def _send_alerts(
-    db: DBSession, alerts: list[_Alert], stories: dict[int, StockArticle],
-    skipped: dict[int, delivery.StoryOutcome] | None = None,
+    db: DBSession, alerts: list[_Alert],
 ) -> tuple[int, list[tuple[User, str, str, str]]]:
     """Returns (#sent, [(user, symbol, event, summary) for first-ever notifications])."""
-    skipped = skipped or {}
     users_with_history: set[int] = {
         uid for (uid,) in db.execute(select(NotificationLog.user_id).distinct()).all()
     }
     sent = 0
     first_events: list[tuple[User, str, str, str]] = []
     for a in alerts:
-        if not _send_one_alert(db, a, stories.get(a.ticker.id), skipped.get(a.ticker.id)):
+        if not _send_one_alert(db, a):
             continue
         sent += 1
         if a.user.id not in users_with_history:
@@ -468,7 +422,6 @@ def run_intraday_capture(
     if own:
         db = get_session_factory()()
     try:
-        articles.sweep(db)
         tickers = _watched_tickers(db)
         if not tickers:
             log.warning("Intraday capture: no watched tickers — is anyone's watchlist populated?")
@@ -522,13 +475,8 @@ def run_intraday_capture(
                 prev_day_close=prev_day_close, captured_at=now,
             ))
 
-        stories, story_skips = _stories_for(db, alerts)
-        total_sent, first_events_all = _send_alerts(db, alerts, stories, story_skips)
+        total_sent, first_events_all = _send_alerts(db, alerts)
         db.commit()
-        # A story that finished just after the wait found no follow-ups to
-        # send (they were committed above), so send them now.
-        for story in stories.values():
-            articles.send_waiting_followups(db, story)
 
         # Admin first-ever notification event — fire AFTER commit so SMTP
         # flakiness doesn't roll back the notification log.
