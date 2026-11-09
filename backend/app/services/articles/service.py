@@ -443,6 +443,17 @@ def _find(db: DBSession, ticker_id: int, day: date, direction: str) -> StockArti
     ).scalar_one_or_none()
 
 
+def find_ready_article(
+    db: DBSession, ticker_id: int, move_pct: float,
+) -> StockArticle | None:
+    """Today's ready article for this ticker/direction, or None."""
+    direction = _direction(move_pct)
+    article = _find(db, ticker_id, trading_date(), direction)
+    if article is not None and article.status == "ready":
+        return article
+    return None
+
+
 @dataclass
 class StoryPlan:
     """What `ensure_articles` decided, per candidate ticker.
@@ -897,6 +908,15 @@ def kid_block(
         detail="No story was requested for this move.",
         age_group=ages[0] if ages else None,
     ))
+
+
+def alert_story_view(
+    db: DBSession, article: StockArticle,
+) -> render.StoryView | None:
+    """A StoryView for an intraday alert: grown-up summary + sources only.
+
+    Returns None if the article isn't ready or can't be parsed."""
+    return _view(db, article, age_groups=[])
 
 
 def build_alert_email(

@@ -27,7 +27,9 @@ from app.services import delivery, diagnostics
 from app.services.articles import service
 from app.services.articles.schemas import GenerationResult
 
-from tests.test_articles import _fact, _kid, _story, stories_on  # noqa: F401
+from tests.test_articles import (
+    _fact, _generate_for, _kid, _story, stories_on,  # noqa: F401
+)
 from tests.test_intraday import _seed_prior_day_close, _setup_user_with_range_rule
 
 
@@ -98,19 +100,34 @@ def test_explain_survives_a_code_it_has_never_seen():
 # ---------------------------------------------------------------------------
 
 
-def test_story_sent_is_recorded_against_the_user(client, stories_on):
+def test_recap_teaser_is_recorded_for_big_move(client, stories_on):
+    """Intraday alerts for big moves record a recap_only outcome — story
+    generation is deferred to the daily recap."""
     _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
 
     assert run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True) == 1
 
     row = _one()
-    assert row.reason == "ready"
-    assert row.story_state == delivery.STATE_STORY
+    assert row.reason == "recap_only"
+    assert row.story_state == delivery.STATE_RECAP_TEASER
     assert row.channel == delivery.CHANNEL_ALERT
-    assert row.article_id is not None
-    assert row.age_group == "6-9"  # the default preference
     assert "AAPL" in row.detail
+
+
+def test_grownup_summary_recorded_when_story_exists(client, stories_on):
+    """When a story is already ready, the alert carries the grown-up summary
+    and the delivery outcome notes the article_id."""
+    _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
+    _seed_prior_day_close(ticker_id, close=100.0)
+    _generate_for(ticker_id)
+
+    assert run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True) == 1
+
+    row = _one()
+    assert row.reason == "recap_only"
+    assert row.article_id is not None
+    assert "grown-up summary" in row.detail
 
 
 def test_a_small_move_records_the_free_note_as_a_healthy_outcome(client, stories_on):
@@ -128,12 +145,12 @@ def test_a_small_move_records_the_free_note_as_a_healthy_outcome(client, stories
     assert "0.80%" in row.detail
 
 
-def test_an_age_substitution_is_visible_even_though_the_parent_cannot_see_it(
-    client, stories_on, monkeypatch,
+def test_age_substitution_is_recorded_via_build_alert_email(
+    stories_on, monkeypatch,
 ):
-    """When the chosen age group's version fails a safety check the nearest
-    age is sent instead and the parent is never told. That is the right call
-    for the family and the wrong one for the admin, so it is recorded."""
+    """Age substitution (when the chosen group's version fails safety) is
+    recorded through build_alert_email. Intraday alerts no longer carry kid
+    versions, but build_alert_email still records the outcome for the recap."""
     monkeypatch.setattr(
         service, "generate_article",
         lambda req: GenerationResult(
@@ -143,14 +160,18 @@ def test_an_age_substitution_is_visible_even_though_the_parent_cannot_see_it(
     )
     _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
+    _generate_for(ticker_id)
 
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
-
-    row = _one()
-    assert row.reason == "age_substituted"
-    assert row.age_group == "6-9"
-    assert row.age_group_sent == "13-17"
-    assert delivery.REASONS[row.reason].ok is True
+    db = get_session_factory()()
+    from app.models import Ticker
+    user = db.execute(select(User)).scalars().first()
+    article = db.execute(select(StockArticle)).scalars().first()
+    body, html, pending, outcome = service.build_alert_email(
+        db, user, "AAPL moved", article=article,
+    )
+    db.close()
+    assert outcome.reason == "age_substituted"
+    assert delivery.REASONS[outcome.reason].ok is True
 
 
 # ---------------------------------------------------------------------------
@@ -159,15 +180,44 @@ def test_an_age_substitution_is_visible_even_though_the_parent_cannot_see_it(
 
 
 def _run_with_result(monkeypatch, result: GenerationResult, symbol: str = "AAPL"):
+    """Generate a story with a specific result and record the outcome.
+
+    Since intraday no longer generates stories, this calls ensure_articles
+    directly and then manually records the outcome + a NotificationLog row
+    so diagnostics.delivery_report can find the alert."""
+    from app.models import NotificationEventType, NotificationLog, Ticker
+
     monkeypatch.setattr(service, "generate_article", lambda req: result)
     _, ticker_id = _setup_user_with_range_rule(symbol, -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
-    run_intraday_capture(fetcher=_fetch({symbol: 106.4}), force=True)
+    db = get_session_factory()()
+    ticker = db.get(Ticker, ticker_id)
+    user = db.execute(select(User)).scalars().first()
+    plan = service.ensure_articles(
+        db, [service.Candidate(ticker, 6.4, 106.4, 100.0)],
+    )
+    service.wait_for(db, list(plan.stories.values()), 0)
+    article = plan.stories.get(ticker_id)
+    skip = plan.skipped.get(ticker_id)
+    _, _, _, outcome = service.build_alert_email(
+        db, user, f"{symbol} moved", article=article, skipped=skip,
+    )
+    db.add(NotificationLog(
+        user_id=user.id, ticker_id=ticker_id,
+        event_type=NotificationEventType.PRICE_CHANGE_RANGE,
+        sent_to=user.notify_email, summary=f"{symbol} moved",
+    ))
+    delivery.record(
+        db, user=user, ticker=ticker, channel=delivery.CHANNEL_ALERT,
+        trading_date=service.trading_date(), outcome=outcome,
+    )
+    db.commit()
+    db.close()
     return ticker_id
 
 
 def test_research_finding_nothing_is_distinguished_from_our_checks_rejecting_it(
-    client, stories_on, monkeypatch,
+    stories_on, monkeypatch,
 ):
     """`no_clear_cause` was one bucket over two unrelated failures. This is
     the "nothing to find" half — usually correct, and nothing to fix."""
@@ -183,7 +233,7 @@ def test_research_finding_nothing_is_distinguished_from_our_checks_rejecting_it(
 
 
 def test_facts_dropped_by_our_own_checks_names_the_rule_that_fired(
-    client, stories_on, monkeypatch,
+    stories_on, monkeypatch,
 ):
     """The other half, and the one that is ours to fix. The admin must not
     have to guess which rule emptied the story — validation knew."""
@@ -209,7 +259,7 @@ def test_facts_dropped_by_our_own_checks_names_the_rule_that_fired(
 
 
 def test_a_row_without_diagnostics_admits_the_cause_was_not_recorded(
-    client, stories_on, monkeypatch,
+    stories_on, monkeypatch,
 ):
     """Rows written before diagnostics existed must say so rather than
     present the old generic sentence as if it were an explanation."""
@@ -220,7 +270,7 @@ def test_a_row_without_diagnostics_admits_the_cause_was_not_recorded(
 
 
 def test_our_language_check_rejecting_a_story_is_named_as_such(
-    client, stories_on, monkeypatch,
+    stories_on, monkeypatch,
 ):
     _run_with_result(monkeypatch, GenerationResult(
         status="failed", model="fake", error="rejected: grown_up_summary too long",
@@ -234,7 +284,7 @@ def test_our_language_check_rejecting_a_story_is_named_as_such(
     assert "grown_up_summary too long" in row.detail
 
 
-def test_the_reviewer_rejecting_a_story_is_named_as_such(client, stories_on, monkeypatch):
+def test_the_reviewer_rejecting_a_story_is_named_as_such(stories_on, monkeypatch):
     _run_with_result(monkeypatch, GenerationResult(
         status="failed", model="fake", error="reviewer rejected the grown-up summary",
         diagnostics={"cause_found": True, "facts_found": 2, "facts_kept": 2,
@@ -247,7 +297,7 @@ def test_the_reviewer_rejecting_a_story_is_named_as_such(client, stories_on, mon
     assert "implies a price prediction" in row.detail
 
 
-def test_generation_failure_is_recorded_with_its_error(client, stories_on, monkeypatch):
+def test_generation_failure_is_recorded_with_its_error(stories_on, monkeypatch):
     monkeypatch.setattr(
         service, "generate_article",
         lambda req: GenerationResult(
@@ -256,8 +306,21 @@ def test_generation_failure_is_recorded_with_its_error(client, stories_on, monke
     )
     _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
+    _generate_for(ticker_id)
 
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
+    db = get_session_factory()()
+    user = db.execute(select(User)).scalars().first()
+    ticker = db.get(Ticker, ticker_id)
+    article = db.execute(select(StockArticle)).scalars().first()
+    _, _, _, outcome = service.build_alert_email(
+        db, user, "AAPL moved", article=article,
+    )
+    delivery.record(
+        db, user=user, ticker=ticker, channel=delivery.CHANNEL_ALERT,
+        trading_date=service.trading_date(), outcome=outcome,
+    )
+    db.commit()
+    db.close()
 
     row = _one()
     assert row.reason == "generation_failed"
@@ -282,7 +345,7 @@ def test_stories_switched_off_is_recorded_per_email(client, monkeypatch):
     assert "AI_ARTICLES_ENABLED" in row.detail
 
 
-def test_the_daily_cap_names_the_family_that_missed_out(client, stories_on, monkeypatch):
+def test_the_daily_cap_names_the_family_that_missed_out(stories_on, monkeypatch):
     monkeypatch.setenv("AI_ARTICLE_MAX_PER_DAY", "0")
     from app.core.settings import get_settings
 
@@ -290,36 +353,38 @@ def test_the_daily_cap_names_the_family_that_missed_out(client, stories_on, monk
     _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
 
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
+    db = get_session_factory()()
+    ticker = db.get(Ticker, ticker_id)
+    user = db.execute(select(User)).scalars().first()
+    plan = service.ensure_articles(
+        db, [service.Candidate(ticker, 6.4, 106.4, 100.0)],
+    )
+    skip = plan.skipped.get(ticker_id)
+    assert skip is not None
+    delivery.record(
+        db, user=user, ticker=ticker, channel=delivery.CHANNEL_ALERT,
+        trading_date=service.trading_date(), outcome=skip,
+    )
+    db.commit()
+    db.close()
 
     row = _one()
     assert row.reason == "cap_reached"
     assert "AAPL" in row.detail
 
 
-def test_a_missing_previous_close_is_recorded_rather_than_crashing(client, stories_on):
-    """A guard, not a live path: the capture loop skips a ticker with no
-    previous close before any rule is evaluated, so today this cannot
-    happen end-to-end. It is tested because `stock_articles.prev_close` is
-    NOT NULL — if an alert ever did reach here without one, the choice is
-    between a recorded skip and an IntegrityError mid-send.
-    """
-    from app.jobs.intraday import _Alert, _stories_for
-    from app.db.seed import seed
+def test_capture_loop_skips_ticker_with_no_previous_close(client, stories_on):
+    """The capture loop skips a ticker with no previous close before any
+    rule is evaluated. No delivery outcome is recorded — the ticker is
+    simply absent from the run. This test verifies the path runs cleanly
+    without crashing."""
+    _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
+    # Deliberately NOT seeding a prior day close.
 
-    seed()
-    db = get_session_factory()()
-    ticker = db.execute(select(Ticker).where(Ticker.symbol == "AAPL")).scalar_one()
-    user = db.execute(select(User)).scalars().first() or User(
-        email="x@example.com", notify_email="x@example.com", notify_email_confirmed=True,
-    )
-    alert = _Alert(user=user, ticker=ticker, pct=6.4, price=106.4,
-                   prev_close=None, summary="test")
-    stories, skipped = _stories_for(db, [alert])
-    db.close()
+    sent = run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
 
-    assert not stories
-    assert skipped[ticker.id].reason == "no_prev_close"
+    assert sent == 0
+    assert _outcomes() == []
 
 
 # ---------------------------------------------------------------------------
@@ -327,12 +392,12 @@ def test_a_missing_previous_close_is_recorded_rather_than_crashing(client, stori
 # ---------------------------------------------------------------------------
 
 
-def test_a_paused_provider_still_hands_back_a_finished_story(client, stories_on, monkeypatch):
+def test_a_paused_provider_still_hands_back_a_finished_story(stories_on, monkeypatch):
     """The pause exists to stop new AI calls, not to hide stories already
     written. The early return it replaced withheld both."""
     _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
     _seed_prior_day_close(ticker_id, close=100.0)
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
+    _generate_for(ticker_id)
 
     db = get_session_factory()()
     article = db.execute(select(StockArticle)).scalars().one()
@@ -372,14 +437,15 @@ def test_a_pause_blocks_a_new_story_and_says_so(client, stories_on, monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def test_the_report_states_the_reason_rather_than_guessing(client, stories_on, monkeypatch):
+def test_the_report_states_the_reason_rather_than_guessing(stories_on, monkeypatch):
+    """The delivery report reads recorded reasons, not inferred ones."""
     monkeypatch.setattr(
         service, "generate_article",
         lambda req: GenerationResult(status="no_clear_cause", model="fake"),
     )
-    _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
-    _seed_prior_day_close(ticker_id, close=100.0)
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
+    _run_with_result(monkeypatch, GenerationResult(
+        status="no_clear_cause", model="fake",
+    ))
 
     db = get_session_factory()()
     report = diagnostics.delivery_report(service.trading_date(), db)
@@ -417,14 +483,10 @@ def test_a_quiet_day_reads_as_healthy_not_as_a_failure(client, stories_on):
     assert "Nothing was unexplained" in stories["summary"]
 
 
-def test_findings_flag_undelivered_stories_with_causes(client, stories_on, monkeypatch):
-    monkeypatch.setattr(
-        service, "generate_article",
-        lambda req: GenerationResult(status="failed", error="boom", model="fake"),
-    )
-    _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
-    _seed_prior_day_close(ticker_id, close=100.0)
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
+def test_findings_flag_undelivered_stories_with_causes(stories_on, monkeypatch):
+    _run_with_result(monkeypatch, GenerationResult(
+        status="failed", error="boom", model="fake",
+    ))
 
     db = get_session_factory()()
     report = diagnostics.day_report(service.trading_date(), db)

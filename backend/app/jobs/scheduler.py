@@ -284,8 +284,7 @@ def start_scheduler() -> BackgroundScheduler:
             ),
             id="intraday_capture",
             replace_existing=True,
-            # A run can wait AI_ARTICLE_WAIT_SECONDS for stories; never let
-            # the next tick start while one is still going.
+            # Never let the next tick start while one is still going.
             max_instances=1,
             coalesce=True,
         )

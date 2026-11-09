@@ -416,10 +416,99 @@ def market_move_html(m: MarketMove) -> str:
                       _market_move_versions(m), _market_move_note(m))
 
 
+def alert_story_text(v: StoryView) -> str:
+    """Grown-up summary + sources for an intraday alert (no kid versions).
+
+    Kid stories are reserved for the daily recap, where the family has a
+    calmer reading moment."""
+    s = v.story
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━",
+        "📰 WHY IT MOVED",
+        _numbers_line(v),
+    ]
+    trend = sparkline(v.closes)
+    if trend:
+        lines.append(f"Last {len(v.closes)} days: {trend}")
+    lines += ["", "🧐 For grown-ups", s.grown_up_summary]
+    for f in v.facts:
+        lines.append(f'"{f.quote}" ({f.source_name})')
+    links = _links(v)
+    if links:
+        lines.append("Read more:")
+        lines += [f"  {name}: {url}" for name, url in links]
+    lines += [
+        f"Story as of {v.as_of}. Prices keep moving; the sources have the latest news.",
+        "",
+        recap_teaser_text(v.symbol),
+        "",
+        f"⚠️ {DISCLAIMER}",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    return "\n".join(lines)
+
+
+def alert_story_html(v: StoryView) -> str:
+    """HTML grown-up summary + sources for an intraday alert (no kid
+    versions)."""
+    s = v.story
+    color = _UP if v.move_pct >= 0 else _DOWN
+    bars = _bar(v.symbol, v.move_pct, color)
+    if v.market_pct is not None:
+        bars += _bar("S&P 500", v.market_pct, _MUTED)
+    trend = sparkline(v.closes)
+    trend_html = (
+        f'<p style="margin:4px 0 0;font-size:13px;color:{_MUTED}">Last '
+        f'{len(v.closes)} days: <span style="font-size:16px;color:{color}">'
+        f"{trend}</span></p>"
+        if trend else ""
+    )
+    quotes = "".join(
+        f'<p style="margin:6px 0;font-style:italic">"{escape(f.quote)}" '
+        f'<span style="font-style:normal;color:{_MUTED}">({escape(f.source_name)})</span></p>'
+        for f in v.facts
+    )
+    links = " · ".join(
+        f'<a href="{escape(url, quote=True)}">{escape(name)} ↗</a>' for name, url in _links(v)
+    )
+    return f"""\
+<div style="border:1px solid #d0d7de;border-radius:10px;padding:16px;margin:16px 0">
+<p style="margin:0 0 8px;font-size:12px;letter-spacing:.04em;color:{_MUTED}">📰 WHY IT MOVED</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%">{bars}</table>
+{trend_html}
+<div style="margin-top:14px;padding-top:10px">
+<p style="margin:0 0 2px"><strong>🧐 For grown-ups</strong></p>
+<p style="margin:0">{escape(s.grown_up_summary)}</p>
+{quotes}
+<p style="margin:6px 0">{'Read more: ' + links if links else ''}</p>
+<p style="font-size:12px;color:{_MUTED};margin:4px 0 0">Story as of {escape(v.as_of)}. Prices keep moving; the sources have the latest news.</p>
+</div>
+{recap_teaser_html(v.symbol)}
+<p style="font-size:12px;line-height:1.45;color:#57606a;background:#f6f8fa;border-radius:8px;padding:10px;margin:12px 0 0">⚠️ {DISCLAIMER}</p>
+</div>"""
+
+
 def still_looking_text(symbol: str) -> str:
     return (
         f"🔎 We're still looking into why {symbol} moved. If we find the story, "
         "we'll email it to you in the next few minutes."
+    )
+
+
+def recap_teaser_text(symbol: str) -> str:
+    return (
+        f"📖 {symbol}'s story arrives in your daily recap after the market "
+        "closes — a calmer moment to read it together with your kids."
+    )
+
+
+def recap_teaser_html(symbol: str) -> str:
+    return (
+        '<div style="border:1px solid #d0d7de;border-radius:10px;padding:14px 16px;'
+        'margin:16px 0;background:#f6f8fa">'
+        f'<p style="margin:0;font-size:15px">📖 <strong>{escape(symbol)}\'s story '
+        'arrives in your daily recap</strong> after the market closes — a calmer '
+        'moment to read it together with your kids.</p></div>'
     )
 
 
