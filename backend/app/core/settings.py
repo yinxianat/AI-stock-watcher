@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = "Little Money Monkey <no-reply@example.com>"
     smtp_use_tls: bool = False
+    # Socket timeout for each SMTP operation, not for the whole conversation.
+    # 10s was too tight: Gmail regularly takes longer than that to return its
+    # 250 after the DATA of an HTML story email, and the send then dies with
+    # SMTPServerDisconnected *after* the message was already handed over.
+    smtp_timeout: int = 30
 
     # Batch jobs
     batch_job_times_et: str = "09:35,12:30,16:05"

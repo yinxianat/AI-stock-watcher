@@ -27,7 +27,7 @@ from app.models import (
     utcnow,
 )
 from app.services.alerts import alert_event_first_notification
-from app.services.emailer import send_email
+from app.services.emailer import EmailSendError, send_email
 from app.services.email_prefs import (
     alert_email_footer,
     alert_email_headers,
@@ -139,7 +139,9 @@ def run_notify(db: DBSession | None = None) -> int:
                     body,
                     headers=alert_email_headers(user),
                 )
-            except Exception as e:  # pragma: no cover
+            except EmailSendError as e:
+                # No NotificationLog row: the user did not get this alert, so
+                # the next run must be free to try the same rule again.
                 send_failures += 1
                 log.warning("Email send failed for user=%d: %s", user.id, e)
                 continue

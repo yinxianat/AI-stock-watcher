@@ -59,7 +59,7 @@ from app.services import delivery, email_prefs, money_ideas
 from app.services.articles import render
 from app.services.articles import service as articles
 from app.services.articles.preferences import get_age_groups
-from app.services.emailer import send_email
+from app.services.emailer import EmailSendError, send_email
 from app.services.price_history import derive_snapshot_for_ticker
 
 log = logging.getLogger(__name__)
@@ -476,7 +476,7 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
     )
     try:
         send_email(user.notify_email, subject, body, body_html=html, headers=headers)
-    except Exception as e:  # pragma: no cover
+    except EmailSendError as e:
         log.warning("Recap email failed for user=%d: %s", user.id, e)
         # Recorded, not just logged: a failed send is the one case where the
         # user is owed an email, nothing in the database says so, and the
@@ -606,7 +606,7 @@ def _send_starter_recap(
     try:
         send_email(user.notify_email, subject, body, body_html=html,
                    headers=email_prefs.alert_email_headers(user))
-    except Exception as e:  # pragma: no cover
+    except EmailSendError as e:
         log.warning("Starter recap failed for user=%d: %s", user.id, e)
         delivery.record(
             db, user=user, ticker=None, channel=delivery.CHANNEL_RECAP,

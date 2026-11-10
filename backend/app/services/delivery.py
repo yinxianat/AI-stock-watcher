@@ -399,6 +399,35 @@ REASONS: dict[str, Reason] = {
         fix="If a schema change caused it, old rows stay unreadable: they are training data, "
             "so migrate the content rather than deleting the rows.",
     ),
+    "followup_send_failed": Reason(
+        label="Follow-up the server dropped",
+        what=(
+            "The promised story was written and the mail server refused or dropped the "
+            "reply, so the user is still waiting. Unlike the other send failures this one "
+            "is retried: the follow-up goes back to `waiting` and the next sweep tries "
+            "again, unless the alert it replies to is from an earlier day — a reply that "
+            "arrives tomorrow would describe the wrong day, so that one is abandoned "
+            "instead. The detail says which happened and carries the SMTP error."
+        ),
+        ok=False,
+        causes=(
+            Cause("A transient timeout — the server took longer than SMTP_TIMEOUT to "
+                  "acknowledge the message.",
+                  "The detail will name a timeout or a disconnect. One row that does not "
+                  "repeat, with a later followup_sent for the same user and symbol, is "
+                  "the retry working. Note the message may also have been delivered: a "
+                  "disconnect during DATA loses only the acknowledgement."),
+            Cause("A sending quota is exhausted, so every send in this window fails.",
+                  "Look for the same reason across many users in one run. Gmail caps "
+                  "daily sends, and story follow-ups are the last emails of the day."),
+            Cause("The recipient address is being rejected outright.",
+                  "The detail gives the SMTP code. 5xx is permanent and the retries will "
+                  "not help — check the address."),
+        ),
+        fix="One row with a later followup_sent needs nothing. Repeats for the same user "
+            "mean the address or the quota, not the network; many at once in one run "
+            "mean the quota. Raise SMTP_TIMEOUT if the detail is always a timeout.",
+    ),
     "followup_abandoned": Reason(
         label="Promise not kept",
         what=(
@@ -493,9 +522,11 @@ REASONS: dict[str, Reason] = {
     "send_failed": Reason(
         label="SMTP refused the email",
         what=(
-            "The email was built correctly and the mail server rejected it, so the user "
-            "got nothing. The detail carries the exact SMTP error. Nothing retries this: "
-            "the next run's dedup window treats it as already handled."
+            "The email was built correctly and the mail server refused or dropped it, so "
+            "the user got nothing. The detail carries the exact SMTP error. No row "
+            "claiming the send succeeded is written, so an alert is free to go out again "
+            "on the next pipeline run; a recap runs once a day, so that one waits until "
+            "tomorrow. A follow-up is retried within the day — see followup_send_failed."
         ),
         ok=False,
         causes=(
