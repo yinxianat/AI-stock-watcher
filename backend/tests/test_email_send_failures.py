@@ -32,6 +32,7 @@ from app.models import (
     StockArticle,
     utcnow,
 )
+from app.core.settings import get_settings
 from app.services import delivery, emailer
 from app.services.articles import service
 
@@ -57,6 +58,28 @@ def _outcomes(reason: str) -> list[DeliveryOutcome]:
     ).scalars().all()
     db.close()
     return rows
+
+
+def _recap_promising_a_story(monkeypatch) -> _Later:
+    """A recap that went out saying we are still looking, with the follow-up
+    queued and the generator held mid-flight.
+
+    The recap is where follow-ups come from: an alert defers the kid story to
+    it rather than promising one itself.
+    """
+    monkeypatch.setenv("RECAP_STORY_WAIT_SECONDS", "0")
+    get_settings.cache_clear()
+    later = _Later()
+    monkeypatch.setattr(service, "_executor", later)
+    _user("parent@example.com", ["AAPL"])
+    _closes("AAPL", today=106.4)
+
+    run_watchlist_recap()
+
+    assert [f.status for f in _rows(ArticleFollowup)] == ["waiting"], (
+        "the recap did not promise a story, so there is no follow-up to test"
+    )
+    return later
 
 
 # ---------------------------------------------------------------------------
@@ -183,19 +206,15 @@ def test_a_failed_followup_goes_back_in_the_queue_and_is_retried(
     """The follow-up is claimed before the send, so a dropped email left the
     row reading "sent" with nobody waiting on it. It goes back to `waiting`
     and the next sweep delivers it."""
-    later = _Later()
-    monkeypatch.setattr(service, "_executor", later)
-    _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
-    _seed_prior_day_close(ticker_id, close=100.0)
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
-    alert_count = len(client.sent_emails)
+    later = _recap_promising_a_story(monkeypatch)
+    before = len(client.sent_emails)
 
     capture = service.send_email  # the conftest capture, put back below
     monkeypatch.setattr(service, "send_email", _boom)
     later.run_all()  # the story finishes, and the follow-up send fails
 
     assert [f.status for f in _rows(ArticleFollowup)] == ["waiting"]
-    assert len(client.sent_emails) == alert_count
+    assert len(client.sent_emails) == before
     rows = _outcomes("followup_send_failed")
     assert len(rows) == 1
     assert "SMTPServerDisconnected" in rows[0].detail
@@ -208,7 +227,7 @@ def test_a_failed_followup_goes_back_in_the_queue_and_is_retried(
     db.close()
 
     assert [f.status for f in _rows(ArticleFollowup)] == ["sent"]
-    assert len(client.sent_emails) == alert_count + 1
+    assert len(client.sent_emails) == before + 1
     assert client.sent_emails[-1]["subject"].startswith("Re: ")
     assert len(_outcomes("followup_sent")) == 1
 
@@ -218,11 +237,7 @@ def test_a_followup_too_old_to_send_is_abandoned_not_retried(
 ):
     """A reply arriving the next day would describe the wrong day's move, so
     a stale follow-up is a promise we stop trying to keep — and say so."""
-    later = _Later()
-    monkeypatch.setattr(service, "_executor", later)
-    _, ticker_id = _setup_user_with_range_rule("AAPL", -5.0, 5.0)
-    _seed_prior_day_close(ticker_id, close=100.0)
-    run_intraday_capture(fetcher=_fetch({"AAPL": 106.4}), force=True)
+    later = _recap_promising_a_story(monkeypatch)
 
     db = get_session_factory()()
     article = db.execute(select(StockArticle)).scalar_one()

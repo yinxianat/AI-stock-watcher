@@ -41,6 +41,7 @@ log = logging.getLogger(__name__)
 STATE_STORY = "story"                      # a generated AI story
 STATE_SMALL_MOVE = "small_move_note"       # the fixed below-the-bar note
 STATE_MARKET_DAY = "market_day_note"       # the fixed whole-market-day note
+STATE_RECAP_TEASER = "recap_teaser"        # "your story arrives in tonight's recap"
 STATE_PENDING = "pending_followup"         # "still looking", follow-up promised
 STATE_NONE = "none"                        # price line only, nothing for kids
 
@@ -116,6 +117,16 @@ REASONS: dict[str, Reason] = {
         what=(
             "No cause specific to this stock was found, but it moved with the S&P 500, so "
             "the family got the fixed \"the whole market moved\" note. Correct answer, no AI cost."
+        ),
+        ok=True,
+    ),
+    "recap_only": Reason(
+        label="Story reserved for recap",
+        what=(
+            "Intraday alerts are price-only: the AI story is written once at end "
+            "of day for the daily recap, so parents get one high-quality story at "
+            "a calm reading moment instead of several mid-day stories they can't "
+            "keep up with. No AI cost on this alert."
         ),
         ok=True,
     ),

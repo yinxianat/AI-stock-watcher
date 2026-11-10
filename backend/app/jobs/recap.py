@@ -643,6 +643,7 @@ def run_watchlist_recap(db: DBSession | None = None) -> int:
     if own:
         db = get_session_factory()()
     try:
+        articles.sweep(db)
         day = articles.trading_date()
         tickers = db.execute(
             select(Ticker).where(Ticker.id.in_(select(WatchlistItem.ticker_id)))
