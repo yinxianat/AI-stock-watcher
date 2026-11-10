@@ -258,7 +258,7 @@ export default function Dashboard() {
   for (const r of rules ?? []) (rulesByTicker[r.ticker_id] ??= []).push(r);
 
   return (
-    <div className="container wide">
+    <div className={`container wide${holdingsOn ? ' with-holdings' : ''}`}>
       <div className="card">
         <h2>Your watchlist</h2>
         <p className="muted">
@@ -304,6 +304,7 @@ export default function Dashboard() {
                 ))}
               </select>
             </div>
+            <div className="table-scroll">
             <table className={`watch-table${holdingsOn ? ' with-holdings' : ''}`}>
               <thead>
                 <tr>
@@ -459,6 +460,7 @@ export default function Dashboard() {
                 })}
               </tbody>
             </table>
+            </div>
             </>
           )}
         </div>

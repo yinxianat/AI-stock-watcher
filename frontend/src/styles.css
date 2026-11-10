@@ -366,9 +366,26 @@ td.actions a { margin-right: 12px; }
       "paid   gain"
       "flags  actions";
   }
-  .watch-table .cell-paid { grid-area: paid; font-size: 13px; color: var(--muted); }
-  .watch-table .cell-gain { grid-area: gain; text-align: right; font-weight: 600; }
-  /* The price editor is a form, not a stock card: opt it out of the grid. */
+  /* min-width: 0 so a long figure wraps instead of widening the row's
+     `auto` track past the card, which is what `minmax(0, 1fr) auto` leaves
+     these two free to do. */
+  .watch-table .cell-paid {
+    grid-area: paid;
+    font-size: 13px;
+    color: var(--muted);
+    min-width: 0;
+  }
+  .watch-table .cell-gain {
+    grid-area: gain;
+    text-align: right;
+    font-weight: 600;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  /* The price editor is a form, not a stock card: opt it out of the grid.
+     The <td> has to become a block as well — a table-cell inside a block
+     parent gets wrapped in an anonymous table box, and that box is sized to
+     max-content, which pushed the form out of the card. */
   .watch-table tr.holding-row {
     display: block;
     border: 1px solid var(--border);
@@ -376,7 +393,10 @@ td.actions a { margin-right: 12px; }
     padding: 10px 12px;
     margin-bottom: 8px;
   }
+  .watch-table tr.holding-row > td { display: block; width: 100%; }
   .holding-editor { flex-direction: column; align-items: stretch; }
+  /* Full width on a phone: 9em next to a wrapped label reads as broken. */
+  .holding-editor input { width: 100%; }
 }
 
 /* ---------- Per-stock alert summary ---------- */
@@ -415,12 +435,27 @@ td.actions a { margin-right: 12px; }
   }
 }
 
-/* The dashboard table has 7 columns, so give it more room on desktop. */
+/* The dashboard table has 7 columns, so give it more room on desktop — and
+   two columns more when purchase-price comparison is on. Widened only in
+   that case, so the layout is unchanged for everyone who never turned it
+   on (which is the default). */
 .container.wide { max-width: 1120px; }
+.container.wide.with-holdings { max-width: 1280px; }
 @media (min-width: 601px) {
   .watch-table .cell-flags { white-space: nowrap; }
   .watch-table .cell-alerts { min-width: 200px; }
+  /* Nowrap is safe here and not on a phone: above this breakpoint the table
+     is a real table inside .table-scroll, which scrolls rather than spills. */
+  .watch-table .cell-paid,
+  .watch-table .cell-gain { white-space: nowrap; }
+  /* A table cannot shrink below its min-content width, so with nine columns
+     a narrow laptop or a split window would push the table out of the card.
+     Scroll the table, not the page. */
+  .table-scroll { overflow-x: auto; }
 }
+/* On a phone each stock is a card, not a row, so there is nothing to scroll
+   sideways and a scroll container would only clip the price editor. */
+.table-scroll { max-width: 100%; }
 
 /* ---------- Purchase-price comparison ---------- */
 /* The inline "what did you pay" form, opened from a row's Edit price link. */
@@ -433,8 +468,6 @@ td.actions a { margin-right: 12px; }
 }
 .holding-editor label { margin: 0; font-size: 13px; color: var(--muted); white-space: nowrap; }
 .holding-editor input { width: 9em; margin: 0; }
-.cell-gain { white-space: nowrap; }
-.cell-paid { white-space: nowrap; }
 
 /* ---------- Email preferences ---------- */
 .flash.warn { background: rgba(255, 193, 7, 0.12); color: var(--warn); }
