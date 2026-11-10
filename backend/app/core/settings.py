@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = "Little Money Monkey <no-reply@example.com>"
     smtp_use_tls: bool = False
+    # Socket timeout for each SMTP operation, not for the whole conversation.
+    # 10s was too tight: Gmail regularly takes longer than that to return its
+    # 250 after the DATA of an HTML story email, and the send then dies with
+    # SMTPServerDisconnected *after* the message was already handed over.
+    smtp_timeout: int = 30
 
     # Batch jobs
     batch_job_times_et: str = "09:35,12:30,16:05"
@@ -128,6 +133,10 @@ class Settings(BaseSettings):
     # or a stolen session yields pseudonyms. The row id is always shown, which
     # is enough to correlate against the rest of the dashboard.
     data_lens_show_emails: bool = False
+    # What a family paid for a stock is financial data about them. It has
+    # real diagnostic use but no business on a screen-share, so the console
+    # hides `purchase_price` and `shares` until this is deliberately on.
+    data_lens_show_holdings: bool = False
     # Asking an AI to read a result and say what it means. Off by default
     # because unlike the rest of the console it costs money per press, and a
     # tool that silently bills you is not a tool you should have to opt out of.

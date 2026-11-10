@@ -52,7 +52,7 @@ from app.services import delivery
 from app.services.alerts import alert_event_first_notification
 from app.services.articles import service as articles
 from app.services.articles import render
-from app.services.emailer import send_email
+from app.services.emailer import EmailSendError, send_email
 from app.services import email_prefs
 from app.services.email_prefs import alert_email_headers, opted_out_user_ids
 
@@ -291,17 +291,15 @@ def _send_one_alert(db: DBSession, alert: _Alert) -> bool:
             user.notify_email, subject, body,
             body_html=body_html, headers=alert_email_headers(user),
         )
-    except Exception as e:  # pragma: no cover
+    except EmailSendError as e:
         log.warning("Intraday email send failed for user=%d: %s", user.id, e)
         delivery.record(
             db, user=user, ticker=ticker, channel=delivery.CHANNEL_ALERT,
             trading_date=articles.trading_date(),
             outcome=delivery.StoryOutcome(
                 state=delivery.STATE_NONE, reason="send_failed",
-                detail=(
-                    f"The alert for {ticker.symbol} was built but SMTP refused "
-                    f"it: {type(e).__name__}: {e}"
-                ),
+                # EmailSendError already carries the SMTP exception's name.
+                detail=f"The alert for {ticker.symbol} was built but SMTP refused it: {e}",
             ),
         )
         return False

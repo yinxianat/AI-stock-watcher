@@ -49,7 +49,7 @@ from app.services.articles.schemas import (
     GenerationResult,
     Story,
 )
-from app.services.emailer import send_email
+from app.services.emailer import EmailSendError, send_email
 
 log = logging.getLogger(__name__)
 
@@ -961,6 +961,21 @@ def _claim(db: DBSession, followup_id: int, new_status: str) -> bool:
     return res.rowcount == 1
 
 
+def _reset(db: DBSession, followup_id: int, new_status: str) -> None:
+    """Move a follow-up we already claimed somewhere else.
+
+    Unlike `_claim` this does not guard on `waiting`: it undoes or finalises
+    our own claim after the send failed. It does not commit either — the
+    caller records the delivery outcome in the same transaction, so the new
+    status and the reason for it land together or not at all.
+    """
+    db.execute(
+        update(ArticleFollowup)
+        .where(ArticleFollowup.id == followup_id)
+        .values(status=new_status, sent_at=None)
+    )
+
+
 def send_waiting_followups(db: DBSession, article: StockArticle) -> int:
     """Email the finished story to everyone told "still looking". Users get
     nothing if no story was found (their alert already said "if we find it")."""
@@ -1017,13 +1032,42 @@ def send_waiting_followups(db: DBSession, article: StockArticle) -> int:
             "In-Reply-To": f.in_reply_to,
             "References": f.in_reply_to,
         }
-        send_email(
-            user.notify_email,
-            f.subject if f.subject.startswith("Re: ") else f"Re: {f.subject}",
-            f"{intro}\n\n{render.story_text(mine)}\n\n{_footer_text(user)}",
-            body_html=_html(intro, render.story_html(mine), user),
-            headers=headers,
-        )
+        try:
+            send_email(
+                user.notify_email,
+                f.subject if f.subject.startswith("Re: ") else f"Re: {f.subject}",
+                f"{intro}\n\n{render.story_text(mine)}\n\n{_footer_text(user)}",
+                body_html=_html(intro, render.story_html(mine), user),
+                headers=headers,
+            )
+        except EmailSendError as e:
+            # The claim is taken before the send, so without this the row
+            # reads "sent" for an email nobody received and no later sweep
+            # would ever look at it again. Today's story goes back in the
+            # queue; an older one is a promise we can no longer keep, because
+            # a reply arriving tomorrow would describe the wrong day.
+            stale = article.trading_date != trading_date()
+            _reset(db, f.id, "abandoned" if stale else "waiting")
+            delivery.record(
+                db, user=user, ticker=ticker, channel=delivery.CHANNEL_FOLLOWUP,
+                trading_date=article.trading_date,
+                outcome=delivery.StoryOutcome(
+                    state=delivery.STATE_NONE, reason="followup_send_failed",
+                    detail=(
+                        f"The follow-up story for {mine.symbol} was built and the mail "
+                        f"server dropped it: {e}. "
+                        + (
+                            f"The alert it replies to is from {article.trading_date}, "
+                            "too old to send now, so the promise is abandoned."
+                            if stale else
+                            "Put back in the queue for the next sweep to retry."
+                        )
+                    ),
+                    article_id=article.id,
+                ),
+            )
+            db.commit()
+            continue
         sent += 1
         delivery.record(
             db, user=user, ticker=ticker, channel=delivery.CHANNEL_FOLLOWUP,

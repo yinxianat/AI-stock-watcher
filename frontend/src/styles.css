@@ -356,6 +356,27 @@ td.actions a { margin-right: 12px; }
   }
   .watch-table .cell-actions button { min-height: 40px; padding: 4px 14px; }
   .list-toolbar select { flex: 1; }
+
+  /* The extra row exists only when purchase-price comparison is on, so the
+     template is switched by a class rather than always reserving space. */
+  .watch-table.with-holdings tr:not(.holding-row) {
+    grid-template-areas:
+      "symbol price"
+      "name   change"
+      "paid   gain"
+      "flags  actions";
+  }
+  .watch-table .cell-paid { grid-area: paid; font-size: 13px; color: var(--muted); }
+  .watch-table .cell-gain { grid-area: gain; text-align: right; font-weight: 600; }
+  /* The price editor is a form, not a stock card: opt it out of the grid. */
+  .watch-table tr.holding-row {
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+  .holding-editor { flex-direction: column; align-items: stretch; }
 }
 
 /* ---------- Per-stock alert summary ---------- */
@@ -378,6 +399,14 @@ td.actions a { margin-right: 12px; }
       "alerts alerts"
       "flags  actions";
   }
+  .watch-table.with-holdings tr:not(.holding-row) {
+    grid-template-areas:
+      "symbol price"
+      "name   change"
+      "paid   gain"
+      "alerts alerts"
+      "flags  actions";
+  }
   .watch-table .cell-alerts {
     grid-area: alerts;
     margin-top: 6px;
@@ -392,6 +421,20 @@ td.actions a { margin-right: 12px; }
   .watch-table .cell-flags { white-space: nowrap; }
   .watch-table .cell-alerts { min-width: 200px; }
 }
+
+/* ---------- Purchase-price comparison ---------- */
+/* The inline "what did you pay" form, opened from a row's Edit price link. */
+.holding-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0 0;
+}
+.holding-editor label { margin: 0; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.holding-editor input { width: 9em; margin: 0; }
+.cell-gain { white-space: nowrap; }
+.cell-paid { white-space: nowrap; }
 
 /* ---------- Email preferences ---------- */
 .flash.warn { background: rgba(255, 193, 7, 0.12); color: var(--warn); }

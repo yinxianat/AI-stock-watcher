@@ -76,6 +76,27 @@ class QueryRejected(Exception):
 # `expires_at` and `consumed_at`.
 BLOCKED_COLUMNS: frozenset[str] = frozenset({"token_hash"})
 
+# Columns held back for privacy rather than for secrecy, and so gated by a
+# setting instead of blocked outright. What a family paid for a stock is
+# financial data about them: it has real diagnostic use ("why did the recap
+# say they were up 8%?") but no business appearing in a console someone is
+# screen-sharing, so it is off unless asked for — the same bargain as
+# DATA_LENS_SHOW_EMAILS.
+PRIVATE_COLUMNS: frozenset[str] = frozenset({"purchase_price", "shares"})
+
+
+def blocked_columns() -> frozenset[str]:
+    """Columns this query may not read, for this configuration.
+
+    A function rather than a constant because one half of the answer depends
+    on a setting. `BLOCKED_COLUMNS` alone is never enough — use this.
+    """
+    from app.core.settings import get_settings
+
+    if get_settings().data_lens_show_holdings:
+        return BLOCKED_COLUMNS
+    return BLOCKED_COLUMNS | PRIVATE_COLUMNS
+
 # Statement words that have no place in a read-only question. Checked as
 # whole words against the query with comments and string literals removed.
 #
@@ -257,6 +278,27 @@ TABLE_NOTES: dict[str, TableNote] = {
         "the recap footer link",
         "created_at",
     ),
+    "holdings_opt_ins": TableNote(
+        "A row means this user turned purchase-price comparison ON. The "
+        "inverse of the opt-out tables above, because this feature is off "
+        "until it is asked for. No row means off, which is most users.",
+        "Durable. Presence is the whole meaning. Turning the feature off "
+        "deletes this row but keeps the `holdings` prices.",
+        "the Settings page",
+        "created_at",
+    ),
+    "holdings": TableNote(
+        "What one user paid for one ticker, and optionally how many shares. "
+        "`shares` is null when they chose not to say, which means the recap "
+        "shows them a percentage and a per-share figure but no total. This is "
+        "financial data about a real person: `purchase_price` and `shares` are "
+        "hidden unless DATA_LENS_SHOW_HOLDINGS is on, and they are never "
+        "logged or sent to the AI pipeline.",
+        "Durable, and deleted with the watchlist row for that ticker so a "
+        "price cannot outlive the position.",
+        "the watchlist page (PUT /holdings/{ticker_id})",
+        "updated_at",
+    ),
 
     # --- prices ---
     "daily_closes": TableNote(
@@ -409,7 +451,7 @@ def _mapped_tables() -> dict[str, list[dict[str, str]]]:
     for name, table in Base.metadata.tables.items():
         cols = []
         for col in table.columns:
-            if col.name in BLOCKED_COLUMNS:
+            if col.name in blocked_columns():
                 continue
             cols.append({
                 "name": col.name,
@@ -465,7 +507,7 @@ def schema_catalogue() -> dict:
     settings = get_settings()
     return {
         "tables": tables,
-        "blocked_columns": sorted(BLOCKED_COLUMNS),
+        "blocked_columns": sorted(blocked_columns()),
         # Served here as well as on a result, so the console can show the
         # real ceiling before the first query instead of guessing at one.
         "limits": {
@@ -592,6 +634,13 @@ def validate(sql: str, *, limit: int) -> QueryPlan:
                 "Nothing is diagnosable from a token hash. For a login or "
                 "session question use `created_at`, `expires_at`, "
                 "`consumed_at` and `revoked_at` instead.",
+            )
+        if w in blocked_columns():
+            raise QueryRejected(
+                f"`{w}` is private financial data and is hidden.",
+                "What a family paid for a stock is not needed to debug the "
+                "pipeline. Set DATA_LENS_SHOW_HOLDINGS=true if you genuinely "
+                "need it, and turn it back off afterwards.",
             )
 
     # Table references. CTE names and column names are accepted alongside the
@@ -815,12 +864,13 @@ def run_query(sql: str, *, actor: str, limit: int | None = None) -> QueryResult:
 
     # Dropped rather than returned if a blocked column arrived anyway — via
     # `SELECT *`, which names nothing the validator could object to.
-    drop = {i for i, c in enumerate(columns) if c.lower() in BLOCKED_COLUMNS}
+    hidden = blocked_columns()
+    drop = {i for i, c in enumerate(columns) if c.lower() in hidden}
     if drop:
-        notes.append(
-            f"Hidden from the result: "
-            f"{', '.join(columns[i] for i in sorted(drop))} (credential columns)."
-        )
+        dropped = [columns[i] for i in sorted(drop)]
+        why = ("credential columns" if all(c.lower() in BLOCKED_COLUMNS for c in dropped)
+               else "credential or private financial columns")
+        notes.append(f"Hidden from the result: {', '.join(dropped)} ({why}).")
         columns = [c for i, c in enumerate(columns) if i not in drop]
 
     rows = [

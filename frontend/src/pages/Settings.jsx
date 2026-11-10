@@ -42,6 +42,11 @@ export default function Settings() {
   const [savingStories, setSavingStories] = useState(false);
   // { kind: 'ok' | 'err', msg }
   const [storiesFlash, setStoriesFlash] = useState(null);
+  // Purchase-price comparison. null while loading or if it failed, so the
+  // card is hidden rather than showing a switch in an unknown state.
+  const [holdingsEnabled, setHoldingsEnabled] = useState(null);
+  const [savingHoldings, setSavingHoldings] = useState(false);
+  const [holdingsFlash, setHoldingsFlash] = useState(null);
 
   useEffect(() => {
     if (!linkToken && !signedIn) return;
@@ -72,7 +77,36 @@ export default function Settings() {
           logError('settings', e, 'load-story-prefs');
         }
       });
+    api
+      .getHoldingsPreferences(undefined, linkToken)
+      .then((p) => setHoldingsEnabled(p.enabled))
+      .catch((e) => {
+        setHoldingsEnabled(null);
+        if (e?.status !== 400 && e?.status !== 401) {
+          logError('settings', e, 'load-holdings-prefs');
+        }
+      });
   }, [linkToken, signedIn]);
+
+  async function toggleHoldings(e) {
+    const want = e.target.checked;
+    setSavingHoldings(true);
+    setHoldingsFlash(null);
+    try {
+      const saved = await api.setHoldingsEnabled(want, linkToken);
+      setHoldingsEnabled(saved.enabled);
+      setHoldingsFlash({
+        kind: 'ok',
+        msg: saved.enabled
+          ? 'On. Add what you paid on your watchlist to see how each stock is doing.'
+          : "Off. The prices you entered are kept, in case you turn this back on.",
+      });
+    } catch (err) {
+      setHoldingsFlash({ kind: 'err', msg: `Not saved: ${err.message}` });
+    } finally {
+      setSavingHoldings(false);
+    }
+  }
 
   async function savePrefs(save) {
     setSavingAlerts(true);
@@ -262,6 +296,36 @@ export default function Settings() {
                 : 'The daily recap is off. Alerts from your rules still arrive.'}
           </p>
           {alertsFlash && <div className="flash err">{alertsFlash}</div>}
+        </div>
+      )}
+
+      {holdingsEnabled !== null && (
+        <div className="card">
+          <h3>What I paid</h3>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={holdingsEnabled}
+              onChange={toggleHoldings}
+              disabled={savingHoldings}
+            />
+            <span>Show how much I've gained or lost on each stock</span>
+          </label>
+          <p className="muted">
+            {holdingsEnabled
+              ? 'On. Enter what you paid per share on your watchlist — a share count is optional, and without one you\'ll see the percentage and the per-share change. Your daily recap includes it too. You can change a price whenever you like.'
+              : 'Off. Turn this on to enter what you paid for each stock or fund and see how it\'s doing against that price.'}
+          </p>
+          <p className="muted">
+            🔒 What you paid is yours. It is never included in the stories our AI
+            writes, never written to our logs, and never shown to anyone but you.
+          </p>
+          {savingHoldings && <p className="muted" role="status">Saving…</p>}
+          {holdingsFlash && (
+            <div className={`flash ${holdingsFlash.kind}`} role={holdingsFlash.kind === 'err' ? 'alert' : 'status'}>
+              {holdingsFlash.msg}
+            </div>
+          )}
         </div>
       )}
 
