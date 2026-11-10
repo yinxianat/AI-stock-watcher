@@ -8,6 +8,8 @@ from .models import (  # noqa: F401
     DeliveryOutcome,
     EmailOptOut,
     FindingState,
+    Holding,
+    HoldingsOptIn,
     InfoLog,
     IntradayPrice,
     JobRun,

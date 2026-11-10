@@ -133,6 +133,10 @@ class Settings(BaseSettings):
     # or a stolen session yields pseudonyms. The row id is always shown, which
     # is enough to correlate against the rest of the dashboard.
     data_lens_show_emails: bool = False
+    # What a family paid for a stock is financial data about them. It has
+    # real diagnostic use but no business on a screen-share, so the console
+    # hides `purchase_price` and `shares` until this is deliberately on.
+    data_lens_show_holdings: bool = False
     # Asking an AI to read a result and say what it means. Off by default
     # because unlike the rest of the console it costs money per press, and a
     # tool that silently bills you is not a tool you should have to opt out of.

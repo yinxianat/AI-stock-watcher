@@ -25,6 +25,7 @@ from app.api import (
     client_logs,
     data_lens_routes,
     feedback_routes,
+    holdings_routes,
     money_ideas_routes,
     root_cause_routes,
     rules_routes,
@@ -215,6 +216,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_routes.router)
     app.include_router(tickers_routes.router)
     app.include_router(watchlist_routes.router)
+    app.include_router(holdings_routes.router)
     app.include_router(rules_routes.router)
     app.include_router(trends_routes.router)
     app.include_router(money_ideas_routes.router)

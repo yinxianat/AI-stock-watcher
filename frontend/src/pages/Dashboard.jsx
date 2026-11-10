@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api.js';
+import { parseHoldingDraft } from '../lib/holdings.js';
 import TickerAutocomplete from '../components/TickerAutocomplete.jsx';
 import { logRenderError } from '../lib/log.js';
 import { ErrorBoundary } from 'react-error-boundary';
@@ -74,6 +75,15 @@ export default function Dashboard() {
   const [sortBy, setSortBy] = useState(readSavedSort);
   // Ticker ids just added whose trend data the backend is still fetching.
   const [pendingTrendIds, setPendingTrendIds] = useState([]);
+  // Purchase-price comparison. Off by default, so the extra columns only
+  // appear once the user has asked for them in Settings.
+  const [holdingsOn, setHoldingsOn] = useState(false);
+  const [holdings, setHoldings] = useState([]);
+  // Ticker id whose price is being edited, and the form's current values.
+  const [editing, setEditing] = useState(null);
+  const [draft, setDraft] = useState({ price: '', shares: '' });
+  const [holdingError, setHoldingError] = useState(null);
+  const [savingHolding, setSavingHolding] = useState(false);
 
   function changeSort(value) {
     setSortBy(value);
@@ -88,7 +98,7 @@ export default function Dashboard() {
     const controller = new AbortController();
     async function load(){
       try{
-        const [w,t,r,prefs] = await Promise.all([
+        const [w,t,r,prefs,hp,h] = await Promise.all([
           api.listWatchlist({signal: controller.signal}),
           api.myTrends({signal:controller.signal}),
           // Rules are extra info here: if they fail, still show the watchlist.
@@ -100,6 +110,16 @@ export default function Dashboard() {
             if (err.name === "AbortError") throw err;
             return null;
           }),
+          // Both holdings calls are extra: a watchlist that loads without
+          // the gain column is still a working watchlist.
+          api.getHoldingsPreferences({signal: controller.signal}).catch((err) => {
+            if (err.name === "AbortError") throw err;
+            return null;
+          }),
+          api.listHoldings({signal: controller.signal}).catch((err) => {
+            if (err.name === "AbortError") throw err;
+            return null;
+          }),
         ]);
         if(controller.signal.aborted) return;
         setWatch(w);
@@ -107,6 +127,11 @@ export default function Dashboard() {
         setRules(r);
         // If preferences fail to load, assume on rather than show a false warning.
         setAlertsEnabled(prefs?.alerts_enabled ?? true);
+        // Unknown preference means hide the feature: showing an empty "what
+        // you paid" column to someone who never turned it on is worse than
+        // not showing it.
+        setHoldingsOn(hp?.enabled ?? false);
+        setHoldings(Array.isArray(h) ? h : []);
         setError(null);
         setLoading(false);
       } catch (err){
@@ -177,6 +202,56 @@ export default function Dashboard() {
     }
   }
 
+  const holdingByTicker = Object.fromEntries((holdings ?? []).map((h) => [h.ticker_id, h]));
+
+  function startEdit(tickerId) {
+    const h = holdingByTicker[tickerId];
+    setEditing(tickerId);
+    setHoldingError(null);
+    setDraft({
+      price: h ? String(h.purchase_price) : '',
+      shares: h?.shares != null ? String(h.shares) : '',
+    });
+  }
+
+  async function saveHolding(tickerId) {
+    // Checked here for a good message; the server checks it again for real.
+    const parsed = parseHoldingDraft(draft);
+    if (!parsed.ok) {
+      setHoldingError(parsed.error);
+      return;
+    }
+    const { purchase_price, shares } = parsed.value;
+    setSavingHolding(true);
+    setHoldingError(null);
+    try {
+      const saved = await api.setHolding(tickerId, purchase_price, shares);
+      setHoldings((rows) => [
+        ...rows.filter((r) => r.ticker_id !== tickerId),
+        saved,
+      ]);
+      setEditing(null);
+    } catch (err) {
+      setHoldingError(err.message);
+    } finally {
+      setSavingHolding(false);
+    }
+  }
+
+  async function clearHolding(tickerId) {
+    setSavingHolding(true);
+    setHoldingError(null);
+    try {
+      await api.deleteHolding(tickerId);
+      setHoldings((rows) => rows.filter((r) => r.ticker_id !== tickerId));
+      setEditing(null);
+    } catch (err) {
+      setHoldingError(err.message);
+    } finally {
+      setSavingHolding(false);
+    }
+  }
+
   const trendByTicker = Array.isArray(trends)?Object.fromEntries(trends.map((t) => [t.ticker_id, t])) :{};
   const sortedWatch = sortWatchlist(watch, trendByTicker, sortBy);
   const rulesByTicker = {};
@@ -229,13 +304,15 @@ export default function Dashboard() {
                 ))}
               </select>
             </div>
-            <table className="watch-table">
+            <table className={`watch-table${holdingsOn ? ' with-holdings' : ''}`}>
               <thead>
                 <tr>
                   <th>Symbol</th>
                   <th>Name</th>
                   <th>Last price</th>
                   <th>% change</th>
+                  {holdingsOn && <th>You paid</th>}
+                  {holdingsOn && <th>Gain / loss</th>}
                   <th>Flags</th>
                   <th>Alerts</th>
                   <th></th>
@@ -244,9 +321,11 @@ export default function Dashboard() {
               <tbody>
                 {sortedWatch.map((w) => {
                   const tr = trendByTicker[w.ticker.id];
+                  const h = holdingByTicker[w.ticker.id];
                   const updating = !tr && pendingTrendIds.includes(w.ticker.id);
                   return (
-                    <tr key={w.id}>
+                    <Fragment key={w.id}>
+                    <tr>
                       <td className="cell-symbol"><strong>{w.ticker.symbol}</strong></td>
                       <td className="cell-name" title={w.ticker.name}>{w.ticker.name}</td>
                       <td className="cell-price">
@@ -255,6 +334,40 @@ export default function Dashboard() {
                       <td className="cell-change" style={tr ? { color: tr.pct_change >= 0 ? 'var(--ok)' : 'var(--danger)' } : undefined}>
                         {tr ? `${tr.pct_change >= 0 ? '+' : ''}${tr.pct_change.toFixed(2)}%` : '—'}
                       </td>
+                      {holdingsOn && (
+                        <td className="cell-paid">
+                          {h ? (
+                            <>
+                              ${h.purchase_price.toFixed(2)}
+                              {h.shares != null && (
+                                <>
+                                  <br />
+                                  <span className="muted">{h.shares} sh</span>
+                                </>
+                              )}
+                            </>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </td>
+                      )}
+                      {holdingsOn && (
+                        <td
+                          className="cell-gain"
+                          style={h?.gain_loss ? { color: h.gain_loss.is_gain ? 'var(--ok)' : 'var(--danger)' } : undefined}
+                        >
+                          {h?.gain_loss ? (
+                            <strong>{h.gain_loss.summary}</strong>
+                          ) : h ? (
+                            // Priced, but no current price yet — a stock added
+                            // today, or a batch that hasn't run. Deliberately
+                            // not "$0.00", which would read as "you're even".
+                            <span className="muted">waiting for a price</span>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </td>
+                      )}
                       <td className="cell-flags">
                         {tr
                           ? [
@@ -276,9 +389,72 @@ export default function Dashboard() {
                       </td>
                       <td className="actions cell-actions">
                         <Link to={`/rules/${w.ticker.id}`} aria-label={`Rules for ${w.ticker.symbol}`}>Rules</Link>{' '}
+                        {holdingsOn && (
+                          <>
+                            <button
+                              className="link-button inline"
+                              onClick={() => startEdit(w.ticker.id)}
+                              aria-label={`${h ? 'Edit' : 'Add'} what you paid for ${w.ticker.symbol}`}
+                            >
+                              {h ? 'Edit price' : 'Add price'}
+                            </button>{' '}
+                          </>
+                        )}
                         <button className="secondary" onClick={() => remove(w.id)} aria-label={`Remove ${w.ticker.symbol}`}>Remove</button>
                       </td>
                     </tr>
+                    {holdingsOn && editing === w.ticker.id && (
+                      <tr className="holding-row">
+                        <td colSpan={9}>
+                          <div className="holding-editor">
+                            <label htmlFor={`paid-${w.ticker.id}`}>Price paid per share</label>
+                            <input
+                              id={`paid-${w.ticker.id}`}
+                              type="number"
+                              step="0.01"
+                              min="0.01"
+                              inputMode="decimal"
+                              value={draft.price}
+                              onChange={(e) => setDraft({ ...draft, price: e.target.value })}
+                              placeholder="98.40"
+                              autoFocus
+                            />
+                            <label htmlFor={`shares-${w.ticker.id}`}>Shares (optional)</label>
+                            <input
+                              id={`shares-${w.ticker.id}`}
+                              type="number"
+                              step="any"
+                              min="0"
+                              inputMode="decimal"
+                              value={draft.shares}
+                              onChange={(e) => setDraft({ ...draft, shares: e.target.value })}
+                              placeholder="leave blank for % only"
+                            />
+                            <button onClick={() => saveHolding(w.ticker.id)} disabled={savingHolding}>
+                              {savingHolding ? 'Saving…' : 'Save'}
+                            </button>
+                            <button className="secondary" onClick={() => setEditing(null)} disabled={savingHolding}>
+                              Cancel
+                            </button>
+                            {h && (
+                              <button
+                                className="secondary"
+                                onClick={() => clearHolding(w.ticker.id)}
+                                disabled={savingHolding}
+                              >
+                                Remove price
+                              </button>
+                            )}
+                          </div>
+                          <p className="muted" style={{ margin: '6px 0 0' }}>
+                            Leave shares blank and you'll see the percentage and the
+                            change per share. Only you ever see this.
+                          </p>
+                          {holdingError && <div className="flash err" role="alert">{holdingError}</div>}
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>

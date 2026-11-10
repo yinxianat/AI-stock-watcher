@@ -108,6 +108,57 @@ class WatchlistItemOut(_ORM):
     ticker: TickerOut
 
 
+# ---------- Holdings (purchase-price comparison) ----------
+
+
+class HoldingsPreferences(BaseModel):
+    # False is the default: nobody is asked for a purchase price until they
+    # ask for the feature.
+    enabled: bool
+
+
+class HoldingIn(BaseModel):
+    """What the user paid. Editable at any time, which is the point.
+
+    The upper bounds are not opinions about anyone's portfolio — they stop a
+    typo (a price pasted with its cents attached, a share count with an extra
+    six zeros) from rendering a nonsense total in an email.
+    """
+
+    purchase_price: float = Field(gt=0, le=10_000_000)
+    # None means "I'd rather not say" and gives percentages only. Explicitly
+    # not ge=0: zero shares would report $0.00 on a real position, which
+    # reads as "you have made nothing" rather than "you didn't tell us".
+    shares: float | None = Field(default=None, gt=0, le=1_000_000_000)
+
+
+class GainLossOut(BaseModel):
+    """Computed server-side so the page and the email cannot disagree."""
+
+    current_price: float
+    per_share: float
+    pct: float
+    # All three are null without a share count. A renderer must show nothing
+    # rather than a zero.
+    cost_basis: float | None = None
+    market_value: float | None = None
+    total: float | None = None
+    is_gain: bool
+    # The same phrase the recap email uses, so the page and the inbox read
+    # alike.
+    summary: str
+
+
+class HoldingOut(BaseModel):
+    ticker_id: int
+    purchase_price: float
+    shares: float | None = None
+    updated_at: datetime
+    # Null when no price has been captured yet — a stock added today, or a
+    # batch that has not run. Distinct from "you are even".
+    gain_loss: GainLossOut | None = None
+
+
 # ---------- Notification rules ----------
 
 
