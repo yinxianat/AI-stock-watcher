@@ -92,6 +92,23 @@ export const api = {
     request(`/auth/story-preferences${qs(token)}`,
       { method: 'PUT', body: { age_groups }, auth: !token }),
 
+  getHoldingsPreferences: (opts, token) =>
+    request(`/auth/holdings-preferences${qs(token)}`, { auth: !token, ...opts }),
+  setHoldingsEnabled: (enabled, token) =>
+    request(`/auth/holdings-preferences${qs(token)}`,
+      { method: 'PUT', body: { enabled }, auth: !token }),
+
+  // holdings (purchase-price comparison). Session auth only: entering what
+  // you paid for a stock is not something to do from a link in an email.
+  // The gain/loss is computed server-side so this page and the daily recap
+  // quote the same number.
+  listHoldings: (opts) => request('/holdings', { auth: true, ...opts }),
+  setHolding: (tickerId, purchase_price, shares) =>
+    request(`/holdings/${tickerId}`,
+      { method: 'PUT', body: { purchase_price, shares }, auth: true }),
+  deleteHolding: (tickerId) =>
+    request(`/holdings/${tickerId}`, { method: 'DELETE', auth: true }),
+
   // tickers
   listTickers: () => request('/tickers'),
   searchTickers: (q, opts) => request(`/tickers/search?q=${encodeURIComponent(q)}`,opts),

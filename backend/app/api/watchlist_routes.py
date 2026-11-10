@@ -19,6 +19,7 @@ from app.models import (
     WatchlistItem,
 )
 from app.schemas.schemas import AddWatchRequest, WatchlistItemOut
+from app.services import holdings as holdings_service
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
@@ -98,6 +99,10 @@ def remove_watch(
             NotificationRule.ticker_id == item.ticker_id,
         )
     )
+    # And what they paid for it. Holdings are keyed by (user, ticker), so a
+    # price left behind here would reappear months later if the user ever
+    # re-added the stock — against a purchase they no longer hold.
+    holdings_service.delete_for_ticker(db, user.id, item.ticker_id)
     db.delete(item)
     db.commit()
     return Response(status_code=204)

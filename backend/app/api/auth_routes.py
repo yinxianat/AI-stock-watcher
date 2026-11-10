@@ -11,6 +11,7 @@ from app.models import User
 from app.schemas.schemas import (
     EmailPreferences,
     EmailPreferencesUpdate,
+    HoldingsPreferences,
     LoginRequest,
     MagicLinkVerify,
     SessionResponse,
@@ -21,6 +22,7 @@ from app.schemas.schemas import (
 )
 from app.core.ratelimit import RateLimit
 from app.core.settings import get_settings
+from app.services import holdings
 from app.services.articles.preferences import get_age_groups, set_age_groups
 from app.services.auth import (
     TooManySignInEmails,
@@ -213,6 +215,28 @@ def update_story_preferences(
         age_groups=set_age_groups(db, user, payload.age_groups),
         stories_enabled=get_settings().ai_articles_enabled,
     )
+
+
+@router.get("/holdings-preferences", response_model=HoldingsPreferences)
+def get_holdings_preferences(
+    user: User = Depends(current_user_or_settings_token), db: DBSession = Depends(get_db)
+) -> HoldingsPreferences:
+    return HoldingsPreferences(enabled=holdings.tracking_enabled(db, user.id))
+
+
+@router.put("/holdings-preferences", response_model=HoldingsPreferences)
+def update_holdings_preferences(
+    payload: HoldingsPreferences,
+    user: User = Depends(current_user_or_settings_token),
+    db: DBSession = Depends(get_db),
+) -> HoldingsPreferences:
+    """Turn purchase-price comparison on or off.
+
+    Off keeps the prices already entered — see `set_tracking_enabled`. The
+    prices are not shown anywhere while it is off.
+    """
+    holdings.set_tracking_enabled(db, user, payload.enabled)
+    return HoldingsPreferences(enabled=holdings.tracking_enabled(db, user.id))
 
 
 @router.post("/unsubscribe", status_code=204, response_class=Response)

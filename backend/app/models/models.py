@@ -28,6 +28,11 @@ TrendAnalysis  — per (user, ticker) booleans derived from PriceSnapshot.
 NotificationLog — audit trail of sent notifications (used to suppress dupes).
 LogEntry       — durable application log (WARNING+), auto-pruned per LOG_LIFETIME.
 RecapOptOut    — user who turned the daily watchlist recap off.
+HoldingsOptIn  — user who turned purchase-price comparison ON (off by default).
+Holding        — what one user paid for one ticker, and optionally how many
+                  shares. Financial data about the user: never logged, never
+                  sent to the AI pipeline, hidden from Data Lens unless
+                  DATA_LENS_SHOW_HOLDINGS says otherwise.
 RecapSend      — one row per (user, trading day) recap sent; stops repeats.
 MoneyIdeaSend  — which Money Idea of the Day each user got, per trading day.
 ContentFeedback — parent like/neutral/dislike on AI stories and Money Ideas.
@@ -310,6 +315,71 @@ class RecapOptOut(Base):
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class HoldingsOptIn(Base):
+    """A user who turned purchase-price comparison on.
+
+    A row's presence means "show me what I'm up or down"; no row means off,
+    which is the default — nobody is asked for a purchase price until they
+    ask for the feature. The inverse of `EmailOptOut`/`RecapOptOut` for that
+    reason, and its own table for the same reason as those: startup only runs
+    `create_all`, which creates missing tables but never adds columns to
+    existing ones.
+
+    Turning it off hides the comparison but keeps the `Holding` rows, so a
+    user who switches it back on does not have to type their prices again.
+    """
+
+    __tablename__ = "holdings_opt_ins"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class Holding(Base):
+    """What one user paid for one ticker.
+
+    `shares` is optional on purpose: the percentage and the per-share
+    difference need only a price, and a family that just wants "am I up or
+    down" should not have to disclose the size of their position to get it.
+    Given shares, the recap and the watchlist can also show the total.
+
+    This is financial data about a real person, so it is treated like
+    `notify_email` rather than like a watchlist row: it is never written to a
+    log line, never passed to the AI story pipeline, and Data Lens hides
+    `purchase_price` and `shares` unless DATA_LENS_SHOW_HOLDINGS is on.
+
+    Keyed by (user, ticker) rather than by watchlist item so a price survives
+    a rules edit, and deleted with the watchlist row so re-adding a stock
+    never resurrects a price from months ago.
+    """
+
+    __tablename__ = "holdings"
+    __table_args__ = (
+        UniqueConstraint("user_id", "ticker_id", name="uq_holding_user_ticker"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    ticker_id: Mapped[int] = mapped_column(
+        ForeignKey("tickers.id", ondelete="CASCADE"), index=True
+    )
+    # Per share, in the ticker's currency. Always positive — validated at the
+    # schema boundary, because a zero would make the percentage meaningless
+    # (a division by zero) rather than merely wrong.
+    purchase_price: Mapped[float] = mapped_column(Float, nullable=False)
+    # None means "I didn't say", not zero. Zero shares would report a $0
+    # gain on a real position, which is worse than reporting nothing.
+    shares: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, default=utcnow, onupdate=utcnow
+    )
+
+    ticker: Mapped[Ticker] = relationship()
 
 
 class RecapSend(Base):

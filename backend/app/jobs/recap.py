@@ -55,7 +55,7 @@ from app.models import (
 )
 from app.api.feedback_routes import feedback_links_html, feedback_links_text
 from app.services.email_links import money_ideas_url, settings_url
-from app.services import delivery, email_prefs, money_ideas
+from app.services import delivery, email_prefs, holdings, money_ideas
 from app.services.articles import render
 from app.services.articles import service as articles
 from app.services.articles.preferences import get_age_groups
@@ -273,7 +273,8 @@ def _market_line(market_pct: float | None) -> str:
 
 
 def _text(moves: list[Move], market_pct: float | None, alerted: set[int],
-          kids: str | None, day: date) -> str:
+          kids: str | None, day: date,
+          gains: dict[int, holdings.GainLoss] | None = None) -> str:
     top = moves[0]
     lines = [f"📊 YOUR WATCHLIST TODAY · {day:%a %b} {day.day}"]
     if market_pct is not None:
@@ -287,14 +288,39 @@ def _text(moves: list[Move], market_pct: float | None, alerted: set[int],
             f"  {m.ticker.symbol:<6} {m.pct:+6.2f}%  ${m.price:,.2f}  "
             f"{render.sparkline(m.closes)}{'  ' + tags if tags else ''}"
         )
+        # Indented under its stock rather than squeezed into the row: the
+        # row is already a fixed-width table and a second number in it reads
+        # as part of the day's move, which this is not.
+        gl = (gains or {}).get(m.ticker.id)
+        if gl is not None:
+            lines.append(
+                f"         you paid ${gl.purchase_price:,.2f} → "
+                f"{holdings.summary(gl)}"
+            )
+    if gains:
+        total = sum(g.total for g in gains.values() if g.total is not None)
+        if any(g.total is not None for g in gains.values()):
+            sign = "+" if total >= 0 else "-"
+            lines += ["", f"  Total on the stocks you've priced: {sign}${abs(total):,.2f}"]
     if kids:
         lines += ["", f"💬 Talk about it together: {top.ticker.symbol} was your biggest mover today.",
                   kids]
     return "\n".join(lines)
 
 
+def _gain_row_html(gl: holdings.GainLoss) -> str:
+    """The "you paid X, you're up Y" line under one stock's row."""
+    color = _UP if gl.is_gain else _DOWN
+    return (
+        f'<tr><td colspan="4" style="padding:0 0 6px;font-size:12px;color:{_MUTED}">'
+        f'you paid ${gl.purchase_price:,.2f} → '
+        f'<span style="color:{color}"><strong>{escape(holdings.summary(gl))}</strong></span>'
+        "</td></tr>"
+    )
+
+
 def _html(moves: list[Move], market_pct: float | None, alerted: set[int],
-          kids: str | None) -> str:
+          kids: str | None, gains: dict[int, holdings.GainLoss] | None = None) -> str:
     top = moves[0]
     rows = []
     for m in moves:
@@ -310,6 +336,8 @@ def _html(moves: list[Move], market_pct: float | None, alerted: set[int],
             "</tr>"
             + (f'<tr><td colspan="4" style="padding:0 0 6px;font-size:12px;color:{_MUTED}">{tags}</td></tr>'
                if tags else "")
+            + (_gain_row_html((gains or {})[m.ticker.id])
+               if (gains or {}).get(m.ticker.id) is not None else "")
         )
     market = (f'<p style="margin:0 0 8px;color:{_MUTED}">{escape(_market_line(market_pct))}</p>'
               if market_pct is not None else "")
@@ -405,10 +433,42 @@ def _footer_text(user: User) -> str:
     )
 
 
+def _gains(db: DBSession, user_id: int, moves: list[Move],
+           tracking: set[int] | None) -> dict[int, holdings.GainLoss]:
+    """Gain/loss by ticker id for the stocks in this recap.
+
+    Empty unless the user turned purchase-price comparison on, which is the
+    default. Only stocks they have actually priced appear, so a half-filled
+    watchlist shows the comparison for the half that has prices.
+
+    `tracking` is the set of opted-in user ids, read once for the whole run;
+    None means "ask for this user", for callers outside the job.
+    """
+    if tracking is None:
+        if not holdings.tracking_enabled(db, user_id):
+            return {}
+    elif user_id not in tracking:
+        return {}
+    priced = holdings.for_user(db, user_id)
+    if not priced:
+        return {}
+    out: dict[int, holdings.GainLoss] = {}
+    for m in moves:
+        h = priced.get(m.ticker.id)
+        if h is None:
+            continue
+        gl = holdings.compute(h.purchase_price, h.shares, m.price)
+        if gl is not None:
+            out[m.ticker.id] = gl
+    return out
+
+
 def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float | None,
                 stories: dict[int, StockArticle], day: date, all_moves: dict[int, Move],
-                story_skips: dict[int, delivery.StoryOutcome] | None = None) -> bool:
+                story_skips: dict[int, delivery.StoryOutcome] | None = None,
+                tracking: set[int] | None = None) -> bool:
     top = moves[0]
+    gains = _gains(db, user.id, moves, tracking)
     small = None if articles.needs_story(top.ticker, top.pct) else (top.ticker, top.pct)
     story = stories.get(top.ticker.id)
     skipped = (story_skips or {}).get(top.ticker.id)
@@ -463,12 +523,12 @@ def _send_recap(db: DBSession, user: User, moves: list[Move], market_pct: float 
     quiet_text = f"{_quiet_text(quiet)}\n\n" if quiet else ""
     kids_text_with_fb = (kids_text or "") + story_fb_text if kids_text or story_fb_text else None
     kids_html_with_fb = (kids_html or "") + story_fb_html if kids_html or story_fb_html else None
-    body = (f"{intro}\n\n{_text(moves, market_pct, alerted, kids_text_with_fb, day)}\n\n"
+    body = (f"{intro}\n\n{_text(moves, market_pct, alerted, kids_text_with_fb, day, gains)}\n\n"
             f"{money_ideas.idea_text(idea, ages, ideas_url, feedback_text=idea_fb_text)}\n\n"
             f"{quiet_text}{_footer_text(user)}")
     html = render.email_html(
         intro,
-        _html(moves, market_pct, alerted, kids_html_with_fb)
+        _html(moves, market_pct, alerted, kids_html_with_fb, gains)
         + money_ideas.idea_html(idea, ages, ideas_url, feedback_html=idea_fb_html)
         + (_quiet_html(quiet) if quiet else ""),
         settings_url(user.id), email_prefs.unsubscribe_url(user),
@@ -700,10 +760,13 @@ def run_watchlist_recap(db: DBSession | None = None) -> int:
         )
 
         sent = 0
+        # One query for the whole run rather than one per user. Only the ids
+        # are read — never a price, which has no business in a job log.
+        tracking = holdings.tracking_user_ids(db)
         for user in users:
             try:
                 if _send_recap(db, user, watch[user.id], market_pct, stories, day, moves,
-                               story_skips):
+                               story_skips, tracking=tracking):
                     sent += 1
             except Exception as e:  # noqa: BLE001 — one user's crash must not skip everyone after them
                 log.warning("Recap crashed for user=%d: %s: %s", user.id, type(e).__name__, e)
