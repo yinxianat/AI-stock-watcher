@@ -98,10 +98,13 @@ def client(engine, monkeypatch) -> Iterator[TestClient]:
 
     monkeypatch.setattr(emailer, "send_email", _capture)
     # Also patch references in services that imported it directly at top level
-    from app.services import auth as auth_mod, confirm_email as ce_mod
+    from app.services import confirm_email as ce_mod
     from app.jobs import intraday as intraday_mod, notify as notify_mod
 
-    monkeypatch.setattr(auth_mod, "send_email", _capture)
+    # `auth` and the confirm-link path call `send_email_quiet`, which is left
+    # real on purpose: it resolves `send_email` through the emailer module, so
+    # it still captures, and its swallow-and-return-False behaviour is part of
+    # what those call sites rely on.
     monkeypatch.setattr(ce_mod, "send_email", _capture)
     monkeypatch.setattr(notify_mod, "send_email", _capture)
     monkeypatch.setattr(intraday_mod, "send_email", _capture)

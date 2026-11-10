@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session as DBSession
 from app.core.security import hash_session_token, issue_token, verify_token
 from app.core.settings import get_settings
 from app.models import ConfirmationToken, User, utcnow
-from app.services.emailer import send_email
+from app.services.emailer import EmailSendError, send_email, send_email_quiet
 from app.services.send_limits import TooManyEmails, enforce_send_limit, window_start
 
 CONFIRM_PURPOSE = "confirm-notify-email"
@@ -107,11 +107,15 @@ def request_notify_email_change(
         f"to send your notifications. The link expires in "
         f"{settings.email_confirm_ttl_minutes} minutes.\n\n{link}"
     )
-    # send_email logs SMTP failures instead of raising.
+    # Quiet on purpose: like the sign-in link, a failed confirm email is
+    # fixed by asking for another one, and a background task that raises
+    # does so after the response has already gone out.
     if background_tasks is not None:
-        background_tasks.add_task(send_email, new_email, "Confirm your notification email", body)
+        background_tasks.add_task(
+            send_email_quiet, new_email, "Confirm your notification email", body
+        )
     else:
-        send_email(new_email, "Confirm your notification email", body)
+        send_email_quiet(new_email, "Confirm your notification email", body)
 
     return token
 
@@ -154,6 +158,9 @@ def confirm_notify_email(db: DBSession, token: str) -> User | None:
                 f"any time at {settings.frontend_base_url}."
             ),
         )
-    except Exception:  # pragma: no cover
+    except EmailSendError:
+        # The address is already confirmed and saved; the welcome email is a
+        # courtesy. Swallowed so a mail-server blip cannot undo a successful
+        # confirmation, and logged by the emailer.
         pass
     return user

@@ -31,7 +31,7 @@ from app.models import (
     utcnow,
 )
 from app.services.alerts import alert_event_signup
-from app.services.emailer import send_email
+from app.services.emailer import send_email_quiet
 from app.services.send_limits import TooManyEmails, enforce_send_limit, window_start
 
 log = logging.getLogger(__name__)
@@ -91,11 +91,15 @@ def request_magic_link(
         f"It expires in {ttl_min} minutes.\n\n{link}\n\n"
         "If you didn't request this, you can ignore this email."
     )
-    # send_email logs SMTP failures instead of raising; the user can retry.
+    # Quiet on purpose: the caller is an HTTP request that must not 500 or
+    # leak whether the address exists, and there is nothing to record — the
+    # user just asks for another link. The failure is logged and alerted.
     if background_tasks is not None:
-        background_tasks.add_task(send_email, email, "Your Little Money Monkey sign-in link 🐵", body)
+        background_tasks.add_task(
+            send_email_quiet, email, "Your Little Money Monkey sign-in link 🐵", body
+        )
     else:
-        send_email(email, "Your Little Money Monkey sign-in link 🐵", body)
+        send_email_quiet(email, "Your Little Money Monkey sign-in link 🐵", body)
 
     return token
 

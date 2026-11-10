@@ -111,10 +111,14 @@ def test_send_failure_does_not_log_the_recipient(monkeypatch, caplog):
     get_settings.cache_clear()
 
     with caplog.at_level(logging.ERROR, logger="app.services.emailer"):
-        emailer.send_email("alice@gmail.com", "subject", "body")
+        with pytest.raises(emailer.EmailSendError) as excinfo:
+            emailer.send_email("alice@gmail.com", "subject", "body")
 
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert "alice@gmail.com" not in logged
+    # The exception text reaches delivery-outcome details and admin alerts.
+    assert "alice@gmail.com" not in str(excinfo.value)
+    assert "connection refused" in str(excinfo.value)
 
 
 def test_body_is_not_logged_outside_development(monkeypatch, caplog):
